@@ -16,7 +16,7 @@ DEBUG = False
 
 # Update with your staging server domain
 # Include: IP address, hostname, domain name (if applicable), localhost, and 127.0.0.1
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,192.168.1.236').split(',')
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,192.168.1.235,192.168.1.236').split(',')
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
@@ -24,9 +24,9 @@ ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,192.168.1.2
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'klikk_financials',
+        'NAME': 'klikk_financials_v4',
         'USER': 'klikk_user',
-        'PASSWORD': 'StrongPasswordHere',
+        'PASSWORD': 'Number55dip',
         'HOST': '127.0.0.1',
         'PORT': '5432',
         # For gunicorn with multiple workers, use 0 to disable connection pooling

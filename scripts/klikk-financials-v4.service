@@ -1,0 +1,25 @@
+[Unit]
+Description=Klikk Financials v4 (Gunicorn)
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=mc
+Group=mc
+WorkingDirectory=/home/mc/apps/klikk_financials_v4
+Environment="DJANGO_SETTINGS_MODULE=klikk_business_intelligence.settings.staging"
+Environment="PATH=/home/mc/apps/klikk_financials_v4/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/home/mc/apps/klikk_financials_v4/venv/bin/gunicorn \
+    --workers 3 \
+    --bind 0.0.0.0:8000 \
+    --timeout 3600 \
+    --graceful-timeout 3600 \
+    --access-logfile - \
+    --error-logfile - \
+    klikk_business_intelligence.wsgi:application
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

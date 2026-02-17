@@ -1,0 +1,424 @@
+{
+  "info": {
+    "_postman_id": "klikk-financials-v4-api-2026",
+    "name": "Klikk Financials v4 API",
+    "description": "Postman collection for Klikk Financials v4 (klikk_business_intelligence).\n\n**Base URL:** Set `base_url` (e.g. http://192.168.1.235:8002 for staging).\n\n**Auth:** JWT – Register, Login, Refresh; use `access_token` in Authorization: Bearer for protected endpoints.\n\n**Xero pipeline:**\n1. xero/auth/initiate → connect Xero\n2. xero/metadata/update → accounts, contacts, tracking\n3. xero/data/update/journals/ → fetch transactions + manual journals from Xero\n4. xero/data/process/journals/ → build journal entries from sources\n5. xero/cube/process/ → build trail balance & cube\n\n**Manual journals:** Included in data update when you call update/journals/; use `load_all: true` for full import.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://192.168.1.235:8002", "type": "string" },
+    { "key": "access_token", "value": "", "type": "string" },
+    { "key": "refresh_token", "value": "", "type": "string" },
+    { "key": "tenant_id", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": ["if (pm.response.code === 201) { var j = pm.response.json(); if (j.tokens) { pm.collectionVariables.set('access_token', j.tokens.access); pm.collectionVariables.set('refresh_token', j.tokens.refresh); } }"],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"testuser\",\n  \"email\": \"test@example.com\",\n  \"password\": \"testpass123\",\n  \"password_confirm\": \"testpass123\",\n  \"first_name\": \"Test\",\n  \"last_name\": \"User\"\n}"
+            },
+            "url": "{{base_url}}/api/auth/register/"
+          }
+        },
+        {
+          "name": "Login",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": ["if (pm.response.code === 200) { var j = pm.response.json(); if (j.tokens) { pm.collectionVariables.set('access_token', j.tokens.access); pm.collectionVariables.set('refresh_token', j.tokens.refresh); } }"],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"testuser\",\n  \"password\": \"testpass123\"\n}"
+            },
+            "url": "{{base_url}}/api/auth/login/"
+          }
+        },
+        {
+          "name": "Refresh Token",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": ["if (pm.response.code === 200) { var j = pm.response.json(); if (j.access) pm.collectionVariables.set('access_token', j.access); if (j.refresh) pm.collectionVariables.set('refresh_token', j.refresh); }"],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh\": \"{{refresh_token}}\"\n}"
+            },
+            "url": "{{base_url}}/api/auth/refresh/"
+          }
+        },
+        {
+          "name": "Token Obtain Pair",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"testuser\",\n  \"password\": \"testpass123\"\n}"
+            },
+            "url": "{{base_url}}/api/auth/token/"
+          }
+        },
+        {
+          "name": "Token Verify",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"token\": \"{{access_token}}\"\n}" },
+            "url": "{{base_url}}/api/auth/token/verify/"
+          }
+        },
+        {
+          "name": "Legacy Token Auth",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"username\": \"testuser\",\n  \"password\": \"testpass123\"\n}" },
+            "url": "{{base_url}}/api-token-auth/"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Auth",
+      "item": [
+        {
+          "name": "Initiate",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/xero/auth/initiate/"
+          }
+        },
+        {
+          "name": "Connection Status",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/xero/auth/status/"
+          }
+        },
+        {
+          "name": "Credentials",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/xero/auth/credentials/"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Core",
+      "item": [
+        {
+          "name": "List Tenants",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "exec": ["if (pm.response.code === 200) { var j = pm.response.json(); if (j.length && j[0].tenant_id) pm.collectionVariables.set('tenant_id', j[0].tenant_id); }"],
+              "type": "text/javascript"
+            }
+          }],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/xero/core/tenants/"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Sync",
+      "item": [
+        {
+          "name": "Update Models",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\"\n}"
+            },
+            "url": "{{base_url}}/xero/sync/update/"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Data",
+      "item": [
+        {
+          "name": "Update Data (Transactions + Manual Journals)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\",\n  \"load_all\": true\n}"
+            },
+            "url": "{{base_url}}/xero/data/update/journals/"
+          }
+        },
+        {
+          "name": "Process Journals (Source → Journal Entries)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\"\n}"
+            },
+            "url": "{{base_url}}/xero/data/process/journals/"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Cube",
+      "item": [
+        {
+          "name": "Process (Trail Balance & Cube)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\",\n  \"rebuild_trail_balance\": false,\n  \"exclude_manual_journals\": false\n}"
+            },
+            "url": "{{base_url}}/xero/cube/process/"
+          }
+        },
+        {
+          "name": "Data Summary",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/xero/cube/summary/?tenant_id={{tenant_id}}"
+          }
+        },
+        {
+          "name": "Trail Balance List",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/xero/cube/trail-balance/?tenant_id={{tenant_id}}"
+          }
+        },
+        {
+          "name": "Line Items List",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/xero/cube/line-items/?tenant_id={{tenant_id}}"
+          }
+        },
+        {
+          "name": "Import PnL by Tracking",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\"\n}"
+            },
+            "url": "{{base_url}}/xero/cube/import-pnl-by-tracking/"
+          }
+        },
+        {
+          "name": "PnL Summary",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/xero/cube/pnl-summary/?tenant_id={{tenant_id}}"
+          }
+        },
+        {
+          "name": "Account Summary",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/xero/cube/account-summary/?tenant_id={{tenant_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Metadata",
+      "item": [
+        {
+          "name": "Update Metadata",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\"\n}"
+            },
+            "url": "{{base_url}}/xero/metadata/update/"
+          }
+        },
+        {
+          "name": "Accounts Search",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+            "url": "{{base_url}}/xero/metadata/accounts/search/?tenant_id={{tenant_id}}&q=200"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Validation",
+      "item": [
+        {
+          "name": "Validate Balance Sheet",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\"\n}"
+            },
+            "url": "{{base_url}}/xero/validation/balance-sheet/"
+          }
+        },
+        {
+          "name": "Reconcile Reports",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\"\n}"
+            },
+            "url": "{{base_url}}/xero/validation/reconcile/"
+          }
+        },
+        {
+          "name": "Import Profit Loss",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\"\n}"
+            },
+            "url": "{{base_url}}/xero/validation/import-profit-loss/"
+          }
+        },
+        {
+          "name": "Compare Profit Loss",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\"\n}"
+            },
+            "url": "{{base_url}}/xero/validation/compare-profit-loss/"
+          }
+        },
+        {
+          "name": "Export Trail Balance",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\"\n}"
+            },
+            "url": "{{base_url}}/xero/validation/export-trail-balance/"
+          }
+        },
+        {
+          "name": "Export Profit Loss",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{access_token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"tenant_id\": \"{{tenant_id}}\"\n}"
+            },
+            "url": "{{base_url}}/xero/validation/export-profit-loss/"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Deployment",
+      "item": [
+        {
+          "name": "GitHub Webhook",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"ref\": \"refs/heads/main\"\n}"
+            },
+            "url": "{{base_url}}/deployment/webhook/github/"
+          }
+        }
+      ]
+    }
+  ]
+}
