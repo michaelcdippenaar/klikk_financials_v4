@@ -10,6 +10,16 @@ from apps.xero.xero_metadata.models import XeroContacts, XeroAccount, XeroTracki
 logger = logging.getLogger(__name__)
 
 
+def _resolve_tracking_slot(tracking_obj, organisation, fallback_idx=None):
+    """Return 1 or 2 for tracking1/tracking2. Uses TrackingCategoryID (stable); fallback to category_slot/index."""
+    slot = organisation.get_tracking_slot(tracking_obj.tracking_category_id)
+    if slot is None and tracking_obj.category_slot:
+        slot = min(tracking_obj.category_slot, 2)
+    if slot is None and fallback_idx is not None:
+        slot = 1 if fallback_idx == 0 else 2
+    return slot
+
+
 class XeroTransactionSourceModelManager(models.Manager):
     def _create_transactions_from_xero(self, organisation, xero_response, transaction_source_type, transaction_id_key):
         """Helper method to create transactions with bulk operations."""
@@ -130,7 +140,7 @@ class XeroTransactionSource(models.Model):
 
 
 class XeroJournalsSourceManager(models.Manager):
-    def create_journals_from_xero(self, organisation, journal_ids=None):
+    def create_journals_from_xero(self, organisation, journal_ids=None, force_reprocess=False):
         """
         Process journals from XeroJournalsSource to XeroJournals.
         
@@ -138,6 +148,7 @@ class XeroJournalsSourceManager(models.Manager):
             organisation: The XeroTenant organisation
             journal_ids: Optional list of journal IDs to process. If None, processes all unprocessed journals.
                         This allows incremental updates to only process newly fetched journals.
+            force_reprocess: If True, process all journal sources (including already processed) to fix tracking.
         """
         from apps.xero.xero_data.models import XeroTransactionSource, XeroJournals
         from apps.xero.xero_metadata.models import XeroAccount, XeroTracking, XeroContacts
@@ -148,18 +159,25 @@ class XeroJournalsSourceManager(models.Manager):
             t.transactions_id: t for t in XeroTransactionSource.objects.filter(organisation=organisation)
         }
         
-        # Filter source journals: if journal_ids provided, only process those; otherwise process all unprocessed
-        source = XeroJournalsSource.objects.filter(organisation=organisation, processed=False)
+        # Filter source journals: force_reprocess processes all; otherwise only unprocessed
+        if force_reprocess:
+            source = XeroJournalsSource.objects.filter(organisation=organisation)
+            if journal_ids:
+                source = source.filter(journal_id__in=journal_ids)
+        elif journal_ids:
+            source = XeroJournalsSource.objects.filter(organisation=organisation, processed=False, journal_id__in=journal_ids)
+        else:
+            source = XeroJournalsSource.objects.filter(organisation=organisation, processed=False)
         if journal_ids:
-            source = source.filter(journal_id__in=journal_ids)
             print(f"[PROCESS] Processing only newly fetched journals: {len(journal_ids)} journal IDs")
+        elif force_reprocess:
+            print(f"[PROCESS] Force reprocess: re-processing all journal sources to fix tracking assignment")
         else:
             print(f"[PROCESS] Processing all unprocessed journals")
         
-        # Debug: Count journals by type
         manual_count = source.filter(journal_type='manual_journal').count()
         regular_count = source.filter(journal_type='journal').count()
-        print(f"[PROCESS] Unprocessed journals: {manual_count} manual, {regular_count} regular, {source.count()} total")
+        print(f"[PROCESS] Journals to process: {manual_count} manual, {regular_count} regular, {source.count()} total")
         # Create accounts dict by ID for regular journals
         accounts_dict = {
             acc.account_id: acc for acc in XeroAccount.objects.filter(organisation=organisation)
@@ -363,25 +381,20 @@ class XeroJournalsSourceManager(models.Manager):
                 if is_manual_journal:
                     print(f"[PROCESS] Added manual journal line to list: line_id={line_id}, journal_type={journal_entry['journal_type']}, amount={amount}")
                 
-                # Process tracking categories/tracking (different structures)
-                index = 1
-                for t in tracking_data:
+                # Process tracking categories/tracking - use category_slot from Xero API order
+                for idx, t in enumerate(tracking_data):
                     if is_manual_journal:
-                        # Manual journals: Tracking structure may be different
-                        # Check if it's a dict with TrackingOptionID or similar
                         tracking_option_id = t.get('TrackingOptionID') or t.get('OptionID') or t.get('ID')
                     else:
-                        # Regular journals: Use TrackingOptionID
                         tracking_option_id = t.get('TrackingOptionID')
-                    
                     if tracking_option_id:
                         tracking_obj = trackings_dict.get(tracking_option_id)
                         if tracking_obj:
-                            if index == 1:
+                            slot = _resolve_tracking_slot(tracking_obj, organisation, idx)
+                            if slot == 1:
                                 journal_data_list[-1]['tracking1_id'] = tracking_obj.id
-                            elif index == 2:
+                            elif slot == 2:
                                 journal_data_list[-1]['tracking2_id'] = tracking_obj.id
-                    index += 1
                 
                 # Inherit tracking from transaction source if journal line has no tracking
                 # This handles cases where Xero's Journals API doesn't carry tracking from
@@ -396,38 +409,38 @@ class XeroJournalsSourceManager(models.Manager):
                         for txn_line in txn_line_items:
                             txn_tracking = txn_line.get('Tracking', [])
                             if txn_tracking and txn_line.get('AccountCode') == acct_code:
-                                # Found matching line with tracking
-                                t_index = 1
+                                # Found matching line with tracking - use category_slot from API order
+                                t_idx = 0
                                 for tt in txn_tracking:
                                     option_name = tt.get('Option', '')
-                                    category_id = tt.get('TrackingCategoryID', '')
-                                    # Look up tracking by option name + category
                                     for tk_id, tk_obj in trackings_dict.items():
                                         if tk_obj.option == option_name:
-                                            if t_index == 1:
+                                            slot = _resolve_tracking_slot(tk_obj, organisation, t_idx)
+                                            if slot == 1:
                                                 journal_data_list[-1]['tracking1_id'] = tk_obj.id
-                                            elif t_index == 2:
+                                            elif slot == 2:
                                                 journal_data_list[-1]['tracking2_id'] = tk_obj.id
                                             break
-                                    t_index += 1
-                                break  # Use first matching line
+                                    t_idx += 1
+                                break  # Use first matching line - exit txn_line loop
                         
                         # If still no tracking and there's only one line item with tracking, use it
                         if journal_data_list[-1]['tracking1_id'] is None:
                             for txn_line in txn_line_items:
                                 txn_tracking = txn_line.get('Tracking', [])
                                 if txn_tracking:
-                                    t_index = 1
+                                    t_idx = 0
                                     for tt in txn_tracking:
                                         option_name = tt.get('Option', '')
                                         for tk_id, tk_obj in trackings_dict.items():
                                             if tk_obj.option == option_name:
-                                                if t_index == 1:
+                                                slot = _resolve_tracking_slot(tk_obj, organisation, t_idx)
+                                                if slot == 1:
                                                     journal_data_list[-1]['tracking1_id'] = tk_obj.id
-                                                elif t_index == 2:
+                                                elif slot == 2:
                                                     journal_data_list[-1]['tracking2_id'] = tk_obj.id
                                                 break
-                                        t_index += 1
+                                        t_idx += 1
                                     break  # Use first line with tracking
                     except Exception as e:
                         logger.warning(f"Error inheriting tracking from transaction source: {e}")
@@ -477,10 +490,9 @@ class XeroJournalsSourceManager(models.Manager):
                 existing.journal_type = journal_type_from_data  # Update journal type
                 if existing.journal_type != journal_type_from_data:
                     print(f"[PROCESS] WARNING: journal_type mismatch for {line_id}. Existing: {existing.journal_type}, Setting: {journal_type_from_data}")
-                if journal_data['tracking1_id']:
-                    existing.tracking1_id = journal_data['tracking1_id']
-                if journal_data['tracking2_id']:
-                    existing.tracking2_id = journal_data['tracking2_id']
+                # Always set both to fix wrongly-assigned tracking (e.g. category2 in tracking1)
+                existing.tracking1_id = journal_data['tracking1_id']
+                existing.tracking2_id = journal_data['tracking2_id']
                 if journal_data.get('contact') is not None:
                     existing.contact = journal_data['contact']
                 to_update.append(existing)

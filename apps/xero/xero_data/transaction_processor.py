@@ -205,6 +205,9 @@ class TransactionProcessor:
         """
         Extract tracking category IDs from a line item.
         
+        Uses category_slot from XeroTracking (set from GET TrackingCategories array order).
+        Slot 1 = first category, slot 2 = second. Fallback to index when category_slot is None.
+        
         Handles multiple Xero tracking data formats:
         - Journals API: {"TrackingOptionID": "...", "Name": "...", "Option": "..."}
         - Invoices/BankTransactions API: {"TrackingCategoryID": "...", "Name": "...", "Option": "..."}
@@ -239,9 +242,15 @@ class TransactionProcessor:
                         break
             
             if tracking_obj:
-                if index == 0:
+                # Prefer TrackingCategoryID (stable across renames); fallback to category_slot/index
+                slot = self.organisation.get_tracking_slot(tracking_obj.tracking_category_id)
+                if slot is None and tracking_obj.category_slot:
+                    slot = tracking_obj.category_slot if tracking_obj.category_slot <= 2 else 2
+                if slot is None:
+                    slot = (index + 1) if index < 2 else 2
+                if slot == 1:
                     tracking1_id = tracking_obj.id
-                elif index == 1:
+                elif slot >= 2:
                     tracking2_id = tracking_obj.id
         
         return tracking1_id, tracking2_id

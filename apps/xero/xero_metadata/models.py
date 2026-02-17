@@ -121,7 +121,13 @@ class XeroTrackingModelManager(models.Manager):
         tracking_options = []
         option_ids = []
         
-        for tc in xero_response:
+        # Store first two category IDs on tenant (Xero allows max 2 active; stable even if names change)
+        category_ids = []
+        for idx, tc in enumerate(xero_response):
+            slot = idx + 1  # 1-based: first = slot 1, second = slot 2
+            tracking_category_id = tc.get('TrackingCategoryID')
+            if idx < 2 and tracking_category_id:
+                category_ids.append((idx + 1, tracking_category_id))
             tracking_category_name = tc.get('Name', 'Unnamed Category')
             for option in tc.get('Options', []):
                 tracking_option_id = option.get('TrackingOptionID')
@@ -130,7 +136,9 @@ class XeroTrackingModelManager(models.Manager):
                     'option_id': tracking_option_id,
                     'name': tracking_category_name,
                     'option': option.get('Name', 'Unnamed Option'),
-                    'collection': option
+                    'collection': option,
+                    'tracking_category_id': tracking_category_id,
+                    'category_slot': slot,  # fallback for legacy
                 })
         
         # Fetch existing trackings in one query
@@ -147,27 +155,37 @@ class XeroTrackingModelManager(models.Manager):
         for opt_data in tracking_options:
             option_id = opt_data['option_id']
             if option_id in existing_trackings:
-                # Update existing
                 existing = existing_trackings[option_id]
                 existing.name = opt_data['name']
                 existing.option = opt_data['option']
                 existing.collection = opt_data['collection']
+                existing.tracking_category_id = opt_data.get('tracking_category_id')
+                existing.category_slot = opt_data.get('category_slot')
                 to_update.append(existing)
             else:
-                # Create new
                 to_create.append(XeroTracking(
                     organisation=organisation,
                     option_id=option_id,
                     name=opt_data['name'],
                     option=opt_data['option'],
-                    collection=opt_data['collection']
+                    collection=opt_data['collection'],
+                    tracking_category_id=opt_data.get('tracking_category_id'),
+                    category_slot=opt_data.get('category_slot'),
                 ))
         
-        # Bulk create and update
         if to_create:
             self.bulk_create(to_create, ignore_conflicts=True)
         if to_update:
-            self.bulk_update(to_update, ['name', 'option', 'collection'])
+            self.bulk_update(to_update, ['name', 'option', 'collection', 'tracking_category_id', 'category_slot'])
+        
+        # Update tenant's category ID mapping (first two only; stable across renames)
+        if category_ids:
+            for slot, cid in category_ids:
+                if slot == 1:
+                    organisation.tracking_category_1_id = cid
+                elif slot == 2:
+                    organisation.tracking_category_2_id = cid
+            organisation.save(update_fields=['tracking_category_1_id', 'tracking_category_2_id'])
         
         logger.info(
             f"Updated {self.filter(organisation=organisation).count()} tracking categories for {organisation.tenant_id}")
@@ -180,6 +198,14 @@ class XeroTracking(models.Model):
     name = models.TextField(max_length=1024, blank=True, null=True)
     option = models.TextField(max_length=1024, blank=True, null=True)
     collection = models.JSONField(blank=True, null=True)
+    tracking_category_id = models.CharField(
+        max_length=64, blank=True, null=True,
+        help_text='Xero TrackingCategoryID - stable identifier, survives category renames.'
+    )
+    category_slot = models.PositiveSmallIntegerField(
+        null=True, blank=True,
+        help_text='Deprecated: use org tracking_category_1_id/2_id + tracking_category_id. Kept for fallback.'
+    )
 
     objects = XeroTrackingModelManager()
 
