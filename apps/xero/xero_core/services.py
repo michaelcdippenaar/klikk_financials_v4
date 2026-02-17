@@ -379,9 +379,32 @@ class XeroAccountingApi:
 
             def get(self):
                 from apps.xero.xero_core.services import serialize_model
-                bank_trans_obj = self.api_client.get_bank_transactions(self.parent.tenant_id)
-                response = serialize_model(bank_trans_obj)['BankTransactions']
-                XeroTransactionSource.objects.create_bank_transaction_from_xero(self.organisation, response)
+                from apps.xero.xero_sync.models import XeroLastUpdate
+                modified_since = XeroLastUpdate.objects.get_utc_date_time('bank_transactions', self.organisation)
+                page = 1
+                page_size = 100
+                total_written = 0
+                while True:
+                    kwargs = dict(page=page, page_size=page_size)
+                    if modified_since:
+                        kwargs['if_modified_since'] = modified_since
+                    bank_trans_obj = self.api_client.get_bank_transactions(
+                        self.parent.tenant_id,
+                        **kwargs
+                    )
+                    page_data = serialize_model(bank_trans_obj)
+                    items = page_data.get('BankTransactions') or []
+                    if items:
+                        XeroTransactionSource.objects.create_bank_transaction_from_xero(
+                            self.organisation, items
+                        )
+                        total_written += len(items)
+                        logger.info(f"[BANK_TRANSACTIONS] Page {page}: wrote {len(items)} to DB (total so far: {total_written})")
+                    if not items or len(items) < page_size:
+                        break
+                    page += 1
+                XeroLastUpdate.objects.update_or_create_timestamp('bank_transactions', self.organisation)
+                logger.info(f"[BANK_TRANSACTIONS] Completed: {total_written} bank transactions written to DB")
 
         return BankTransactions(self)
 
@@ -396,9 +419,32 @@ class XeroAccountingApi:
 
             def get(self):
                 from apps.xero.xero_core.services import serialize_model
-                invoices_obj = self.api_client.get_invoices(self.parent.tenant_id)
-                response = serialize_model(invoices_obj)['Invoices']
-                XeroTransactionSource.objects.create_invoices_from_xero(self.organisation, response)
+                from apps.xero.xero_sync.models import XeroLastUpdate
+                modified_since = XeroLastUpdate.objects.get_utc_date_time('invoices', self.organisation)
+                page = 1
+                page_size = 100
+                total_written = 0
+                while True:
+                    kwargs = dict(page=page, page_size=page_size)
+                    if modified_since:
+                        kwargs['if_modified_since'] = modified_since
+                    invoices_obj = self.api_client.get_invoices(
+                        self.parent.tenant_id,
+                        **kwargs
+                    )
+                    page_data = serialize_model(invoices_obj)
+                    items = page_data.get('Invoices') or []
+                    if items:
+                        XeroTransactionSource.objects.create_invoices_from_xero(
+                            self.organisation, items
+                        )
+                        total_written += len(items)
+                        logger.info(f"[INVOICES] Page {page}: wrote {len(items)} to DB (total so far: {total_written})")
+                    if not items or len(items) < page_size:
+                        break
+                    page += 1
+                XeroLastUpdate.objects.update_or_create_timestamp('invoices', self.organisation)
+                logger.info(f"[INVOICES] Completed: {total_written} invoices written to DB")
 
         return Invoices(self)
 
@@ -419,147 +465,195 @@ class XeroAccountingApi:
 
         return Payments(self)
 
-    def journals(self, load_all=False):
-        """
-        Get regular journals (non-manual) from Xero API.
+    def credit_notes(self):
+        """Get credit notes from Xero API (paged; each page written to DB immediately)."""
+        from apps.xero.xero_data.models import XeroTransactionSource
         
-        Args:
-            load_all: If True, ignore last update timestamp and load all journals. Default False.
-        """
-        from apps.xero.xero_data.models import XeroJournalsSource
-        from apps.xero.xero_sync.models import XeroLastUpdate
-        
-        class Journals:
-            def __init__(self, parent, load_all):
+        class CreditNotes:
+            def __init__(self, parent):
                 self.parent = parent
                 self.api_client = parent.api_client
                 self.organisation = parent.organisation
-                self.load_all = load_all
 
             def get(self):
                 from apps.xero.xero_core.services import serialize_model
                 from apps.xero.xero_sync.models import XeroLastUpdate
-                
-                try:
-                    journals_to_process = []
-                    journal_ids_to_fetch = []
-                    
-                    # If load_all is True, ignore last update timestamp (set to None)
-                    # Otherwise, use incremental updates based on last update time
-                    if self.load_all:
-                        modified_since = None
-                        print(f"[JOURNALS] Loading ALL journals (ignoring last update timestamp)")
-                    else:
-                        modified_since = XeroLastUpdate.objects.get_utc_date_time('journals', self.organisation)
-                        print(f"[JOURNALS] Loading journals modified since {modified_since}")
-                    
-                    print('Journals Modified Since',modified_since)
+                modified_since = XeroLastUpdate.objects.get_utc_date_time('credit_notes', self.organisation)
+                logger.info(f"[CREDIT_NOTES] Fetching credit notes for tenant {self.organisation.tenant_id}")
+                page = 1
+                page_size = 100
+                total_written = 0
+                while True:
+                    kwargs = dict(page=page, page_size=page_size)
+                    if modified_since:
+                        kwargs['if_modified_since'] = modified_since
+                    credit_notes_obj = self.api_client.get_credit_notes(
+                        self.parent.tenant_id,
+                        **kwargs
+                    )
+                    page_data = serialize_model(credit_notes_obj)
+                    items = page_data.get('CreditNotes') or []
+                    if items:
+                        XeroTransactionSource.objects.create_credit_notes_from_xero(
+                            self.organisation, items
+                        )
+                        total_written += len(items)
+                        logger.info(f"[CREDIT_NOTES] Page {page}: wrote {len(items)} to DB (total so far: {total_written})")
+                    if not items or len(items) < page_size:
+                        break
+                    page += 1
+                XeroLastUpdate.objects.update_or_create_timestamp('credit_notes', self.organisation)
+                logger.info(f"[CREDIT_NOTES] Completed: {total_written} credit notes written to DB")
 
-                    # Regular journals support offset pagination
-                    offset = 0
-                    page_size = 100
-                    while True:
-                        # Store the fetch offset before making the API call to ensure accurate logging
-                        fetch_offset = offset
-                        print(f"[JOURNALS] Fetching journals with offset={fetch_offset}, limit={page_size}")
-                        
-                        # Only pass if_modified_since if it's not None (incremental update)
-                        if modified_since:
-                            journals_obj = self.api_client.get_journals(
-                                self.parent.tenant_id, offset=fetch_offset, if_modified_since=modified_since
-                            )
-                        else:
-                            journals_obj = self.api_client.get_journals(
-                                self.parent.tenant_id, offset=fetch_offset
-                            )
-                        
-                        journal_set = serialize_model(journals_obj)['Journals']
-                        if not journal_set:
-                            print(f"[JOURNALS] No more journals found. Final offset={fetch_offset}")
-                            break
-                        
-                        print(f"[JOURNALS] Retrieved {len(journal_set)} journals at offset={fetch_offset}")
-                        
-                        for journal in journal_set:
-                            journal_id = journal.get('JournalID') or journal.get('ManualJournalID')
-                            if not journal_id:
-                                logger.warning(f"Skipping journal: No ID found. Available keys: {list(journal.keys())}")
-                                continue
-                            journal_ids_to_fetch.append(journal_id)
-                            journals_to_process.append({
-                                'journal_id': journal_id,
-                                'journal_number': journal.get('JournalNumber', journal.get('ManualJournalNumber', 0)),
-                                'collection': journal,
-                            })
-                        
-                        # Increment offset by page_size for next iteration
-                        offset += page_size
-                        
-                        # If we got fewer than page_size, we've reached the end
-                        if len(journal_set) < page_size:
-                            print(f"[JOURNALS] Last page reached. Final offset={offset}")
-                            break
-                    
-                    print(f"[JOURNALS] Completed fetching all journals. Total: {len(journals_to_process)}, Final offset: {offset}")
-                    
-                    # Update timestamp immediately after API call succeeds, before database processing
-                    XeroLastUpdate.objects.update_or_create_timestamp('journals', self.organisation)
-                    
-                    # Bulk update/create journals using bulk operations
-                    if journals_to_process:
-                        # Fetch existing journals in one query (filter by journal_type)
-                        existing_journals = {
-                            j.journal_id: j for j in XeroJournalsSource.objects.filter(
-                                organisation=self.organisation,
-                                journal_id__in=journal_ids_to_fetch,
-                                journal_type='journal'
-                            )
-                        }
-                        
-                        to_create = []
-                        to_update = []
-                        
-                        for journal_data in journals_to_process:
-                            journal_id = journal_data['journal_id']
-                            if journal_id in existing_journals:
-                                # Update existing
-                                existing = existing_journals[journal_id]
-                                existing.journal_number = journal_data['journal_number']
-                                existing.collection = journal_data['collection']
-                                existing.journal_type = 'journal'
-                                existing.processed = False
-                                to_update.append(existing)
-                            else:
-                                # Create new
-                                to_create.append(XeroJournalsSource(
-                                    organisation=self.organisation,
-                                    journal_id=journal_id,
-                                    journal_number=journal_data['journal_number'],
-                                    journal_type='journal',
-                                    collection=journal_data['collection'],
-                                    processed=False
-                                ))
-                        
-                        # Bulk create and update
-                        if to_create:
-                            XeroJournalsSource.objects.bulk_create(to_create, ignore_conflicts=True)
-                        if to_update:
-                            XeroJournalsSource.objects.bulk_update(to_update, ['journal_number', 'journal_type', 'collection', 'processed'])
-                    
-                    XeroJournalsSource.objects.create_journals_from_xero(self.organisation)
-                    
-                    if not self.load_all:
-                        logger.info(f"Successfully updated journals and timestamp for tenant {self.organisation.tenant_id}")
-                    else:
-                        logger.info(f"Successfully loaded all journals for tenant {self.organisation.tenant_id}")
-                except Exception as e:
-                    # Don't update timestamp on error - preserve last successful date
-                    error_msg = str(e)
-                    logger.error(f"Failed to update journals for tenant {self.organisation.tenant_id}: {error_msg}")
-                    raise
+        return CreditNotes(self)
 
-        return Journals(self, load_all)
-    
+    def prepayments(self):
+        """Get prepayments from Xero API (paged; each page written to DB immediately)."""
+        from apps.xero.xero_data.models import XeroTransactionSource
+        
+        class Prepayments:
+            def __init__(self, parent):
+                self.parent = parent
+                self.api_client = parent.api_client
+                self.organisation = parent.organisation
+
+            def get(self):
+                from apps.xero.xero_core.services import serialize_model
+                from apps.xero.xero_sync.models import XeroLastUpdate
+                modified_since = XeroLastUpdate.objects.get_utc_date_time('prepayments', self.organisation)
+                logger.info(f"[PREPAYMENTS] Fetching prepayments for tenant {self.organisation.tenant_id}")
+                page = 1
+                page_size = 100
+                total_written = 0
+                while True:
+                    kwargs = dict(page=page, page_size=page_size)
+                    if modified_since:
+                        kwargs['if_modified_since'] = modified_since
+                    prepayments_obj = self.api_client.get_prepayments(
+                        self.parent.tenant_id,
+                        **kwargs
+                    )
+                    page_data = serialize_model(prepayments_obj)
+                    items = page_data.get('Prepayments') or []
+                    if items:
+                        XeroTransactionSource.objects.create_prepayments_from_xero(
+                            self.organisation, items
+                        )
+                        total_written += len(items)
+                        logger.info(f"[PREPAYMENTS] Page {page}: wrote {len(items)} to DB (total so far: {total_written})")
+                    if not items or len(items) < page_size:
+                        break
+                    page += 1
+                XeroLastUpdate.objects.update_or_create_timestamp('prepayments', self.organisation)
+                logger.info(f"[PREPAYMENTS] Completed: {total_written} prepayments written to DB")
+
+        return Prepayments(self)
+
+    def overpayments(self):
+        """Get overpayments from Xero API (paged; each page written to DB immediately)."""
+        from apps.xero.xero_data.models import XeroTransactionSource
+        
+        class Overpayments:
+            def __init__(self, parent):
+                self.parent = parent
+                self.api_client = parent.api_client
+                self.organisation = parent.organisation
+
+            def get(self):
+                from apps.xero.xero_core.services import serialize_model
+                from apps.xero.xero_sync.models import XeroLastUpdate
+                modified_since = XeroLastUpdate.objects.get_utc_date_time('overpayments', self.organisation)
+                logger.info(f"[OVERPAYMENTS] Fetching overpayments for tenant {self.organisation.tenant_id}")
+                page = 1
+                page_size = 100
+                total_written = 0
+                while True:
+                    kwargs = dict(page=page, page_size=page_size)
+                    if modified_since:
+                        kwargs['if_modified_since'] = modified_since
+                    overpayments_obj = self.api_client.get_overpayments(
+                        self.parent.tenant_id,
+                        **kwargs
+                    )
+                    page_data = serialize_model(overpayments_obj)
+                    items = page_data.get('Overpayments') or []
+                    if items:
+                        XeroTransactionSource.objects.create_overpayments_from_xero(
+                            self.organisation, items
+                        )
+                        total_written += len(items)
+                        logger.info(f"[OVERPAYMENTS] Page {page}: wrote {len(items)} to DB (total so far: {total_written})")
+                    if not items or len(items) < page_size:
+                        break
+                    page += 1
+                XeroLastUpdate.objects.update_or_create_timestamp('overpayments', self.organisation)
+                logger.info(f"[OVERPAYMENTS] Completed: {total_written} overpayments written to DB")
+
+        return Overpayments(self)
+
+    def purchase_orders(self):
+        """Get purchase orders from Xero API."""
+        from apps.xero.xero_data.models import XeroTransactionSource
+        
+        class PurchaseOrders:
+            def __init__(self, parent):
+                self.parent = parent
+                self.api_client = parent.api_client
+                self.organisation = parent.organisation
+
+            def get(self):
+                from apps.xero.xero_core.services import serialize_model
+                print(f"[PURCHASE_ORDERS] Fetching purchase orders for tenant {self.organisation.tenant_id}")
+                purchase_orders_obj = self.api_client.get_purchase_orders(self.parent.tenant_id)
+                response = serialize_model(purchase_orders_obj)['PurchaseOrders']
+                print(f"[PURCHASE_ORDERS] Retrieved {len(response)} purchase orders")
+                XeroTransactionSource.objects.create_purchase_orders_from_xero(self.organisation, response)
+                logger.info(f"Successfully updated purchase orders for tenant {self.organisation.tenant_id}")
+
+        return PurchaseOrders(self)
+
+    def bank_transfers(self):
+        """Get bank transfers from Xero API."""
+        from apps.xero.xero_data.models import XeroTransactionSource
+        
+        class BankTransfers:
+            def __init__(self, parent):
+                self.parent = parent
+                self.api_client = parent.api_client
+                self.organisation = parent.organisation
+
+            def get(self):
+                from apps.xero.xero_core.services import serialize_model
+                print(f"[BANK_TRANSFERS] Fetching bank transfers for tenant {self.organisation.tenant_id}")
+                bank_transfers_obj = self.api_client.get_bank_transfers(self.parent.tenant_id)
+                response = serialize_model(bank_transfers_obj)['BankTransfers']
+                print(f"[BANK_TRANSFERS] Retrieved {len(response)} bank transfers")
+                XeroTransactionSource.objects.create_bank_transfers_from_xero(self.organisation, response)
+                logger.info(f"Successfully updated bank transfers for tenant {self.organisation.tenant_id}")
+
+        return BankTransfers(self)
+
+    def expense_claims(self):
+        """Get expense claims from Xero API."""
+        from apps.xero.xero_data.models import XeroTransactionSource
+        
+        class ExpenseClaims:
+            def __init__(self, parent):
+                self.parent = parent
+                self.api_client = parent.api_client
+                self.organisation = parent.organisation
+
+            def get(self):
+                from apps.xero.xero_core.services import serialize_model
+                print(f"[EXPENSE_CLAIMS] Fetching expense claims for tenant {self.organisation.tenant_id}")
+                expense_claims_obj = self.api_client.get_expense_claims(self.parent.tenant_id)
+                response = serialize_model(expense_claims_obj)['ExpenseClaims']
+                print(f"[EXPENSE_CLAIMS] Retrieved {len(response)} expense claims")
+                XeroTransactionSource.objects.create_expense_claims_from_xero(self.organisation, response)
+                logger.info(f"Successfully updated expense claims for tenant {self.organisation.tenant_id}")
+
+        return ExpenseClaims(self)
+
     def manual_journals(self, load_all=False):
         """
         Get manual journals from Xero API.
@@ -747,7 +841,9 @@ class XeroAccountingApi:
                 self.api_client = parent.api_client
                 self.organisation = parent.organisation
 
-            def get(self, from_date, to_date, periods=11, timeframe='MONTH'):
+            def get(self, from_date, to_date, periods=11, timeframe='MONTH',
+                    tracking_category_id=None, tracking_option_id=None,
+                    tracking_category_id2=None, tracking_option_id2=None):
                 """
                 Get Profit and Loss report.
                 
@@ -756,17 +852,32 @@ class XeroAccountingApi:
                     to_date: End date (YYYY-MM-DD format)
                     periods: Number of periods (default 11 for 12 months)
                     timeframe: MONTH, QUARTER, or YEAR
+                    tracking_category_id: Filter by tracking category UUID
+                    tracking_option_id: Filter by tracking option UUID
+                    tracking_category_id2: Filter by second tracking category UUID
+                    tracking_option_id2: Filter by second tracking option UUID
                 
                 Returns:
                     Serialized P&L report data
                 """
                 from apps.xero.xero_core.services import serialize_model
-                pnl_obj = self.api_client.get_report_profit_and_loss(
-                    self.parent.tenant_id,
+                kwargs = dict(
                     from_date=from_date,
                     to_date=to_date,
                     periods=periods,
-                    timeframe=timeframe
+                    timeframe=timeframe,
+                )
+                if tracking_category_id:
+                    kwargs['tracking_category_id'] = tracking_category_id
+                if tracking_option_id:
+                    kwargs['tracking_option_id'] = tracking_option_id
+                if tracking_category_id2:
+                    kwargs['tracking_category_id2'] = tracking_category_id2
+                if tracking_option_id2:
+                    kwargs['tracking_option_id2'] = tracking_option_id2
+                pnl_obj = self.api_client.get_report_profit_and_loss(
+                    self.parent.tenant_id,
+                    **kwargs
                 )
                 return serialize_model(pnl_obj)
 

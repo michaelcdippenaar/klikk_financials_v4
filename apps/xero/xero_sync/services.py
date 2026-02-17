@@ -111,17 +111,17 @@ def update_xero_models(tenant_id, user=None):
                 errors.append(error_msg)
         print(f"[UPDATE] Group 2 completed")
         
-        # Journals should run last (may depend on other data)
-        print(f"[UPDATE] Starting journals update")
-        stats['api_calls'] += 1  # Count journals API call
+        # Manual journals only (deprecated Journals API not used)
+        print(f"[UPDATE] Starting manual journals update")
+        stats['api_calls'] += 1
         try:
-            xero_api.journals().get()
+            xero_api.manual_journals().get()
             stats['journals_updated'] = 1
-            print(f"[UPDATE] ✓ journals finished")
-            logger.info(f"Successfully updated journals for tenant {tenant_id}")
+            print(f"[UPDATE] ✓ manual journals finished")
+            logger.info(f"Successfully updated manual journals for tenant {tenant_id}")
         except Exception as e:
-            error_msg = f"Failed to update journals: {str(e)}"
-            print(f"[UPDATE] ✗ journals failed: {str(e)}")
+            error_msg = f"Failed to update manual journals: {str(e)}"
+            print(f"[UPDATE] ✗ manual journals failed: {str(e)}")
             logger.error(error_msg)
             errors.append(error_msg)
         

@@ -5,6 +5,7 @@ from .views import (
     CompareProfitLossView,
     ExportTrailBalanceCompleteView,
     ExportProfitLossCompleteView,
+    ReconcileReportsView,
 )
 
 app_name = 'xero_validation'
@@ -12,6 +13,9 @@ app_name = 'xero_validation'
 urlpatterns = [
     # Combined validation endpoint (can run all steps or individual steps)
     path('balance-sheet/', ValidateBalanceSheetCompleteView.as_view(), name='validate_complete'),
+    
+    # Reconciliation: P&L + Balance Sheet vs trail balance, per financial year
+    path('reconcile/', ReconcileReportsView.as_view(), name='reconcile_reports'),
     
     # Profit and Loss endpoints
     path('import-profit-loss/', ImportProfitLossView.as_view(), name='import_profit_loss'),

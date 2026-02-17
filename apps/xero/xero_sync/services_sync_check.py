@@ -104,10 +104,8 @@ def check_and_retry_out_of_sync(tenant_id=None, max_retry_age_hours=24):
                 api_client = XeroApiClient(credentials.user, tenant_id=tenant_id)
                 xero_api = XeroAccountingApi(api_client, tenant_id)
                 
-                if endpoint == 'journals':
-                    xero_api.journals(load_all=False).get()
-                else:
-                    xero_api.manual_journals(load_all=False).get()
+                # Manual journals only (Journals API removed)
+                xero_api.manual_journals(load_all=False).get()
                 
                 detail['status'] = 'success'
                 results['successful'] += 1

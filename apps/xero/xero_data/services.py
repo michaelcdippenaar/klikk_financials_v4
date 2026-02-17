@@ -1,7 +1,17 @@
 """
 Service layer for xero_data-related business logic.
-Handles updating transaction data (bank_transactions, invoices, payments, journals) from Xero API.
+Handles updating transaction data from Xero API.
 Note: All API calls are sequential to respect Xero's 5 concurrent call limit.
+
+Trail balance is built from:
+- Invoices (sales + bills), bank transactions, payments, credit notes,
+  prepayments, overpayments, and manual journals.
+- Data is per contact (from each transaction's Contact) and per tracking
+  category (from line-level Tracking on invoices, bank txns, credit notes).
+
+Usage:
+    update_financial_data(tenant_id)
+    update_xero_transactions(tenant_id)  # Fetch only, no journal processing
 """
 import time
 import logging
@@ -13,29 +23,22 @@ from apps.xero.xero_auth.models import XeroClientCredentials, XeroTenantToken
 logger = logging.getLogger(__name__)
 
 
-def update_xero_data(tenant_id, user=None, load_all=False):
+def _get_credentials_for_tenant(tenant_id, user=None):
     """
-    Service function to update Xero data models (transactions and journals) from API.
-    This is separate from metadata updates (accounts, contacts, tracking).
+    Find credentials that have a token for the given tenant.
     
     Args:
         tenant_id: Xero tenant ID
-        user: User object (optional, will use first active credentials if not provided)
-        load_all: If True, ignore last update timestamp and load all journals. If False (default), use incremental updates.
+        user: Optional user to prefer credentials for
     
     Returns:
-        dict: Result with status, message, errors, and stats
+        XeroClientCredentials instance
+    
+    Raises:
+        ValueError: If no credentials found for tenant
     """
-    start_time = time.time()
-    
-    try:
-        tenant = XeroTenant.objects.get(tenant_id=tenant_id)
-    except XeroTenant.DoesNotExist:
-        raise ValueError(f"Tenant {tenant_id} not found")
-    
-    # Find credentials that have a token for this tenant
-    # Prefer credentials for the provided user, otherwise find any credentials with token for this tenant
     credentials = None
+    
     if user:
         # Try to find credentials for the provided user that have a token for this tenant
         user_credentials = XeroClientCredentials.objects.filter(user=user, active=True)
@@ -65,13 +68,48 @@ def update_xero_data(tenant_id, user=None, load_all=False):
     if not credentials:
         raise ValueError(f"No active credentials found with token for tenant {tenant_id}. Please re-authenticate this tenant.")
     
+    return credentials
+
+
+def update_xero_transactions(tenant_id, user=None, load_all=False):
+    """
+    Fetch all transaction data from Xero API (transaction-based pipeline, no Journals API).
+    
+    This fetches:
+    - Invoices (sales and purchase)
+    - Bank Transactions (spend and receive)
+    - Payments
+    - Credit Notes
+    - Prepayments
+    - Overpayments
+    - Manual Journals (Manual Journals API only)
+    
+    Args:
+        tenant_id: Xero tenant ID
+        user: User object (optional)
+        load_all: If True, manual journals are loaded in full (ignore modified_since). Default False.
+    
+    Returns:
+        dict: Result with status, message, errors, and stats
+    """
+    start_time = time.time()
+    
+    try:
+        tenant = XeroTenant.objects.get(tenant_id=tenant_id)
+    except XeroTenant.DoesNotExist:
+        raise ValueError(f"Tenant {tenant_id} not found")
+    
+    credentials = _get_credentials_for_tenant(tenant_id, user)
     user = credentials.user
     
     stats = {
-        'bank_transactions_updated': 0,
         'invoices_updated': 0,
+        'bank_transactions_updated': 0,
         'payments_updated': 0,
-        'journals_updated': 0,
+        'credit_notes_updated': 0,
+        'prepayments_updated': 0,
+        'overpayments_updated': 0,
+        'manual_journals_updated': 0,
         'api_calls': 0,
     }
     
@@ -80,70 +118,179 @@ def update_xero_data(tenant_id, user=None, load_all=False):
     try:
         api_client = XeroApiClient(user, tenant_id=tenant_id)
         xero_api = XeroAccountingApi(api_client, tenant_id)
-        stats['api_calls'] += 1  # Initial API client creation
-
-        # Transaction-related calls (executed sequentially to respect Xero's 5 concurrent call limit)
-        # transaction_calls = [
-        #     ('bank_transactions', lambda: xero_api.bank_transactions().get()),
-        #     ('invoices', lambda: xero_api.invoices().get()),
-        #     ('payments', lambda: xero_api.payments().get()),
-        # ]
+        stats['api_calls'] += 1
         
-        # Execute transaction calls sequentially
-        # print(f"[DATA UPDATE] Starting transaction updates: bank_transactions, invoices, payments")
-        # stats['api_calls'] += len(transaction_calls)  # Count API calls
-        # for name, call in transaction_calls:
-        #     try:
-        #         call()
-        #         stats[f'{name}_updated'] = 1
-        #         print(f"[DATA UPDATE] ✓ {name} finished")
-        #         logger.info(f"Successfully updated {name} for tenant {tenant_id}")
-        #     except Exception as e:
-        #         error_msg = f"Failed to update {name}: {str(e)}"
-        #         print(f"[DATA UPDATE] ✗ {name} failed: {str(e)}")
-        #         logger.error(error_msg)
-        #         errors.append(error_msg)
-        # print(f"[DATA UPDATE] Transaction updates completed")
+        # Transaction calls (sequential). Manual Journals only; deprecated Journals API not used.
+        transaction_calls = [
+            ('invoices', lambda: xero_api.invoices().get()),
+            ('bank_transactions', lambda: xero_api.bank_transactions().get()),
+            ('payments', lambda: xero_api.payments().get()),
+            ('credit_notes', lambda: xero_api.credit_notes().get()),
+            ('prepayments', lambda: xero_api.prepayments().get()),
+            ('overpayments', lambda: xero_api.overpayments().get()),
+            ('manual_journals', lambda: xero_api.manual_journals(load_all=load_all).get()),
+        ]
         
-        # Journals should run last (may depend on other data)
-        # Call journals method directly
-        print(f"[DATA UPDATE] Starting journals update (load_all={load_all})")
-        try:
-            xero_api.journals(load_all=load_all).get()
-            stats['journals_updated'] = 1
-            stats['api_calls'] += 1
-            print(f"[DATA UPDATE] ✓ journals finished")
-            logger.info(f"Successfully updated journals for tenant {tenant_id}")
-        except Exception as e:
-            error_msg = f"Failed to update journals: {str(e)}"
-            print(f"[DATA UPDATE] ✗ journals failed: {str(e)}")
-            logger.error(error_msg)
-            errors.append(error_msg)
+        print(f"[TRANSACTION UPDATE] Starting transaction updates for tenant {tenant_id}")
+        
+        for name, call in transaction_calls:
+            try:
+                print(f"[TRANSACTION UPDATE] Fetching {name}...")
+                call()
+                stats[f'{name}_updated'] = 1
+                stats['api_calls'] += 1
+                print(f"[TRANSACTION UPDATE] ✓ {name} finished")
+                logger.info(f"Successfully updated {name} for tenant {tenant_id}")
+            except Exception as e:
+                error_msg = f"Failed to update {name}: {str(e)}"
+                print(f"[TRANSACTION UPDATE] ✗ {name} failed: {str(e)}")
+                logger.error(error_msg)
+                errors.append(error_msg)
         
         duration = time.time() - start_time
         stats['duration_seconds'] = duration
         stats['total_errors'] = len(errors)
         
-        print(f"[DATA UPDATE] All data updates completed in {duration:.2f} seconds. Errors: {len(errors)}")
-        
-        messages = [f"Data updated for tenant {tenant_id}"]
+        print(f"[TRANSACTION UPDATE] All updates completed in {duration:.2f} seconds. Errors: {len(errors)}")
         
         return {
             'success': len(errors) == 0,
-            'message': '. '.join(messages),
+            'message': f"Transaction data updated for tenant {tenant_id}",
             'errors': errors,
             'stats': stats
         }
         
     except ValueError as e:
-        # Handle authentication/token errors specifically
         duration = time.time() - start_time
         error_msg = f"Authentication error for tenant {tenant_id}: {str(e)}"
         logger.error(error_msg, exc_info=True)
-        # Re-raise as ValueError to distinguish from other exceptions
         raise ValueError(error_msg) from e
     except Exception as e:
         duration = time.time() - start_time
-        error_msg = f"Failed to update data for tenant {tenant_id}: {str(e)}"
+        error_msg = f"Failed to update transactions for tenant {tenant_id}: {str(e)}"
         logger.error(error_msg, exc_info=True)
         raise Exception(error_msg) from e
+
+
+def update_financial_data(tenant_id, user=None, process_to_journals=True, load_all=False):
+    """
+    Update financial data from Xero: fetch transactions and Manual Journals, then build journal entries.
+    Trail balance remains per account, per contact, per tracking, per period.
+    
+    Args:
+        tenant_id: Xero tenant ID
+        user: User object (optional)
+        process_to_journals: If True, process transactions to journal entries after fetching.
+        load_all: If True, manual journals are loaded in full (ignore modified_since). Default False.
+    
+    Returns:
+        dict: Result with status, message, errors, and stats
+    """
+    print(f"[FINANCIAL DATA] Updating for tenant {tenant_id}")
+    
+    # Step 1: Fetch all transactions + manual journals
+    result = update_xero_transactions(tenant_id, user, load_all=load_all)
+    
+    # Step 2: Process transactions and manual journal sources to journal entries
+    if process_to_journals and result.get('success', False):
+        try:
+            from apps.xero.xero_data.transaction_processor import process_transactions_to_journals
+            from apps.xero.xero_data.models import XeroJournalsSource
+            
+            tenant = XeroTenant.objects.get(tenant_id=tenant_id)
+            print(f"[FINANCIAL DATA] Processing transactions to journal entries...")
+            
+            process_stats = process_transactions_to_journals(tenant)
+            
+            print(f"[FINANCIAL DATA] Processing manual journal sources to journal entries...")
+            XeroJournalsSource.objects.create_journals_from_xero(tenant)
+            
+            result['stats']['journal_entries_created'] = process_stats.get('journal_entries_created', 0)
+            result['stats']['processing_errors'] = len(process_stats.get('errors', []))
+            
+            if process_stats.get('errors'):
+                result['errors'].extend(process_stats['errors'])
+                result['success'] = False
+            
+            print(f"[FINANCIAL DATA] Processing complete: {process_stats.get('journal_entries_created', 0)} entries created")
+        except Exception as e:
+            error_msg = f"Failed to process transactions to journals: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            result['errors'].append(error_msg)
+            result['success'] = False
+    
+    return result
+
+
+def update_and_consolidate(tenant_id, user=None):
+    """
+    Update financial data and consolidate to trail balance.
+    
+    Workflow:
+    1. Fetch transactions and Manual Journals from Xero
+    2. Process to journal entries
+    3. Consolidate to XeroTrailBalance
+    
+    Args:
+        tenant_id: Xero tenant ID
+        user: User object (optional)
+    
+    Returns:
+        dict: Result with full pipeline stats
+    """
+    from apps.xero.xero_data.models import XeroJournals
+    from apps.xero.xero_cube.models import XeroTrailBalance
+    
+    start_time = time.time()
+    
+    try:
+        tenant = XeroTenant.objects.get(tenant_id=tenant_id)
+    except XeroTenant.DoesNotExist:
+        return {'success': False, 'error': f'Tenant {tenant_id} not found'}
+    
+    result = {
+        'success': True,
+        'tenant_id': tenant_id,
+        'tenant_name': tenant.tenant_name,
+        'errors': [],
+        'stats': {}
+    }
+    
+    # Step 1: Update financial data
+    print(f"[CONSOLIDATE] Step 1: Fetching financial data for {tenant.tenant_name}")
+    try:
+        update_result = update_financial_data(tenant_id, user)
+        result['stats']['fetch'] = update_result.get('stats', {})
+        if update_result.get('errors'):
+            result['errors'].extend(update_result['errors'])
+    except Exception as e:
+        error_msg = f"Failed to fetch financial data: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        result['errors'].append(error_msg)
+        result['success'] = False
+        return result
+    
+    # Step 2: Consolidate to trail balance
+    print(f"[CONSOLIDATE] Step 2: Consolidating to trail balance")
+    try:
+        # Get aggregated journal data
+        journals = XeroJournals.objects.get_account_balances(tenant)
+        
+        # Consolidate
+        tb_result = XeroTrailBalance.objects.consolidate_journals(tenant, journals)
+        
+        result['stats']['trail_balance_records'] = tb_result.count()
+        print(f"[CONSOLIDATE] Created {tb_result.count()} trail balance records")
+    except Exception as e:
+        error_msg = f"Failed to consolidate trail balance: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        result['errors'].append(error_msg)
+        result['success'] = False
+    
+    duration = time.time() - start_time
+    result['stats']['total_duration_seconds'] = duration
+    result['success'] = len(result['errors']) == 0
+    
+    print(f"[CONSOLIDATE] Complete in {duration:.2f}s. Success: {result['success']}")
+    
+    return result

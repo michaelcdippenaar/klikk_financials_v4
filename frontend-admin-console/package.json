@@ -1,0 +1,42 @@
+{
+  "name": "klikk-admin-console",
+  "version": "1.0.0",
+  "description": "Admin console for Klikk Financials - Xero data management",
+  "author": "",
+  "private": true,
+  "scripts": {
+    "dev": "quasar dev",
+    "build": "quasar build",
+    "lint": "eslint --ext .js,.ts,.vue ./src",
+    "format": "prettier --write \"**/*.{js,ts,vue,scss,html,md,json}\""
+  },
+  "dependencies": {
+    "@quasar/extras": "^1.16.9",
+    "axios": "^1.6.2",
+    "pinia": "^2.1.7",
+    "quasar": "^2.14.1",
+    "vue": "^3.4.15",
+    "vue-router": "^4.2.5"
+  },
+  "devDependencies": {
+    "@quasar/app-vite": "^1.4.0",
+    "eslint": "^8.57.0",
+    "eslint-plugin-vue": "^9.20.1",
+    "prettier": "^3.2.4"
+  },
+  "browserslist": [
+    "last 10 Chrome versions",
+    "last 10 Firefox versions",
+    "last 4 Edge versions",
+    "last 7 Safari versions",
+    "last 8 Android versions",
+    "last 8 ChromeAndroid versions",
+    "last 8 FirefoxAndroid versions",
+    "last 10 iOS versions",
+    "last 5 Opera versions"
+  ],
+  "engines": {
+    "node": ">= 18.0.0",
+    "npm": ">= 9.0.0"
+  }
+}

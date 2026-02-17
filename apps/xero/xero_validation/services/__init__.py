@@ -29,6 +29,7 @@ from .validation import (
     validate_balance_sheet_complete,
     validate_balance_sheet_accounts,
 )
+from .reconciliation import reconcile_reports_for_financial_year
 from .income_statement import (
     add_income_statement_to_trail_balance_report,
 )
@@ -52,6 +53,7 @@ __all__ = [
     # Validation
     'validate_balance_sheet_complete',
     'validate_balance_sheet_accounts',
+    'reconcile_reports_for_financial_year',
     # Income Statement
     'add_income_statement_to_trail_balance_report',
 ]

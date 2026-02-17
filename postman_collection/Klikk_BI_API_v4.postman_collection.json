@@ -1,0 +1,387 @@
+{
+  "info": {
+    "_postman_id": "klikk-bi-api-v4",
+    "name": "Klikk Financials v4 API",
+    "description": "Postman collection for Klikk Financials v4.\n\n**Auth:** JWT (Register, Login, Refresh, Verify).\n**Xero:** Auth (initiate, callback), Core (tenants), Sync (update), Data (update financial data + process journals), Cube (process, summary, trail-balance, line-items), Metadata (update, account search), Validation (balance sheet, P&L, reconcile, export).\n**Data pipeline:** Transactions + Manual Journals only (paged fetch for line items). Trail balance and line-items: per account, contact, tracking, period.\n**Deployment:** GitHub webhook.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8001", "type": "string" },
+    { "key": "access_token", "value": "", "type": "string" },
+    { "key": "refresh_token", "value": "", "type": "string" },
+    { "key": "tenant_id", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    var jsonData = pm.response.json();",
+                  "    if (jsonData.tokens) {",
+                  "        pm.collectionVariables.set('access_token', jsonData.tokens.access);",
+                  "        pm.collectionVariables.set('refresh_token', jsonData.tokens.refresh);",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"username\": \"testuser\",\n    \"email\": \"test@example.com\",\n    \"password\": \"testpass123\",\n    \"password_confirm\": \"testpass123\",\n    \"first_name\": \"Test\",\n    \"last_name\": \"User\"\n}"
+            },
+            "url": "{{base_url}}/api/auth/register/"
+          }
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var jsonData = pm.response.json();",
+                  "    if (jsonData.tokens) {",
+                  "        pm.collectionVariables.set('access_token', jsonData.tokens.access);",
+                  "        pm.collectionVariables.set('refresh_token', jsonData.tokens.refresh);",
+                  "    }",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"username\": \"testuser\",\n    \"password\": \"testpass123\"\n}"
+            },
+            "url": "{{base_url}}/api/auth/login/"
+          }
+        },
+        {
+          "name": "Refresh Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "    var jsonData = pm.response.json();",
+                  "    if (jsonData.access) pm.collectionVariables.set('access_token', jsonData.access);",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"refresh\": \"{{refresh_token}}\"\n}"
+            },
+            "url": "{{base_url}}/api/auth/refresh/"
+          }
+        },
+        {
+          "name": "Verify Token",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"token\": \"{{access_token}}\"\n}"
+            },
+            "url": "{{base_url}}/api/auth/token/verify/"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Auth",
+      "item": [
+        {
+          "name": "Initiate OAuth",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/xero/auth/initiate/"
+          }
+        },
+        {
+          "name": "Callback (browser)",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/xero/auth/callback/?code=YOUR_AUTH_CODE"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Core",
+      "item": [
+        {
+          "name": "List Tenants",
+          "request": {
+            "method": "GET",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
+            },
+            "url": "{{base_url}}/xero/core/tenants/"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Sync",
+      "item": [
+        {
+          "name": "Update Models",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"tenant_id\": \"{{tenant_id}}\"\n}"
+            },
+            "url": "{{base_url}}/xero/sync/update/"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Data",
+      "item": [
+        {
+          "name": "Update Financial Data",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"tenant_id\": \"{{tenant_id}}\",\n    \"load_all\": false\n}"
+            },
+            "url": "{{base_url}}/xero/data/update/journals/",
+            "description": "Fetches transactions (invoices, bank, payments, etc.) and Manual Journals from Xero, then builds journal entries. Trail balance stays per account, contact, tracking, period. Optional: load_all=true to ignore last update timestamp."
+          }
+        },
+        {
+          "name": "Process Journals",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"tenant_id\": \"{{tenant_id}}\"\n}"
+            },
+            "url": "{{base_url}}/xero/data/process/journals/",
+            "description": "Process journal sources to journal entries (if not already done by Update Financial Data)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Cube",
+      "item": [
+        {
+          "name": "Process Data",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"tenant_id\": \"{{tenant_id}}\",\n    \"rebuild_trail_balance\": false,\n    \"exclude_manual_journals\": false\n}"
+            },
+            "url": "{{base_url}}/xero/cube/process/"
+          }
+        },
+        {
+          "name": "Data Summary",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/xero/cube/summary/?tenant_id={{tenant_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["xero", "cube", "summary", ""],
+              "query": [
+                { "key": "tenant_id", "value": "{{tenant_id}}" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Trail Balance List",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/xero/cube/trail-balance/?tenant_id={{tenant_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["xero", "cube", "trail-balance", ""],
+              "query": [
+                { "key": "tenant_id", "value": "{{tenant_id}}" },
+                { "key": "contact_id", "value": "", "description": "optional: contact UUID" },
+                { "key": "tracking1_id", "value": "", "description": "optional: filter by tracking category 1 (DB id)" },
+                { "key": "tracking2_id", "value": "", "description": "optional: filter by tracking category 2 (DB id)" },
+                { "key": "year", "value": "", "description": "optional" },
+                { "key": "month", "value": "", "description": "optional" },
+                { "key": "account_id", "value": "", "description": "optional" },
+                { "key": "limit", "value": "5000", "description": "max 100000" }
+              ]
+            },
+            "description": "List trail balance records (per account, contact, tracking, period). Filter by contact_id, tracking1_id, tracking2_id, year, month, account_id."
+          }
+        },
+        {
+          "name": "Line Items List",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/xero/cube/line-items/?tenant_id={{tenant_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["xero", "cube", "line-items", ""],
+              "query": [
+                { "key": "tenant_id", "value": "{{tenant_id}}" },
+                { "key": "contact_id", "value": "", "description": "optional: contact UUID" },
+                { "key": "tracking1_id", "value": "", "description": "optional: filter by tracking category 1 (DB id)" },
+                { "key": "tracking2_id", "value": "", "description": "optional: filter by tracking category 2 (DB id)" },
+                { "key": "account_id", "value": "", "description": "optional" },
+                { "key": "year", "value": "", "description": "optional" },
+                { "key": "month", "value": "", "description": "optional" },
+                { "key": "date_from", "value": "", "description": "optional: YYYY-MM-DD" },
+                { "key": "date_to", "value": "", "description": "optional: YYYY-MM-DD" },
+                { "key": "limit", "value": "5000", "description": "max 100000" }
+              ]
+            },
+            "description": "List journal lines (one per line item from invoices, bank txns, credit notes, manual journals). Response includes count (returned), total_count (matching), remaining (still missing after this page), and results. Returns account, amount, tracking1/tracking2, contact, description, transaction_source_type per line."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Metadata",
+      "item": [
+        {
+          "name": "Update Metadata",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"tenant_id\": \"{{tenant_id}}\"\n}"
+            },
+            "url": "{{base_url}}/xero/metadata/update/"
+          }
+        },
+        {
+          "name": "Account Search",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/xero/metadata/accounts/search/?tenant_id={{tenant_id}}&q=Sales",
+              "host": ["{{base_url}}"],
+              "path": ["xero", "metadata", "accounts", "search", ""],
+              "query": [
+                { "key": "tenant_id", "value": "{{tenant_id}}" },
+                { "key": "q", "value": "Sales" }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Xero Validation",
+      "item": [
+        {
+          "name": "Reconcile (P&L + Balance Sheet vs Trail Balance)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/xero/validation/reconcile/?tenant_id={{tenant_id}}&financial_year=2024",
+              "host": ["{{base_url}}"],
+              "path": ["xero", "validation", "reconcile", ""],
+              "query": [
+                { "key": "tenant_id", "value": "{{tenant_id}}" },
+                { "key": "financial_year", "value": "2024", "description": "e.g. 2024 for FY Jul 2024 – Jun 2025" },
+                { "key": "fiscal_year_start_month", "value": "7", "description": "optional, default 7 (July)" },
+                { "key": "tolerance", "value": "0.01", "description": "optional" }
+              ]
+            },
+            "description": "Single process: get P&L and Balance Sheet from Xero, compare to our trail balance, per financial year. Returns report with profit_loss (import + comparison) and balance_sheet (import + validation)."
+          }
+        },
+        {
+          "name": "Balance Sheet Complete",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/xero/validation/balance-sheet/"
+          }
+        },
+        {
+          "name": "Import Profit Loss",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/xero/validation/import-profit-loss/"
+          }
+        },
+        {
+          "name": "Compare Profit Loss",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/xero/validation/compare-profit-loss/"
+          }
+        },
+        {
+          "name": "Export Trail Balance",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/xero/validation/export-trail-balance/"
+          }
+        },
+        {
+          "name": "Export Profit Loss",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/xero/validation/export-profit-loss/"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Deployment",
+      "item": [
+        {
+          "name": "GitHub Webhook",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-GitHub-Event", "value": "push" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n    \"ref\": \"refs/heads/main\",\n    \"repository\": { \"full_name\": \"owner/repo\" }\n}"
+            },
+            "url": "{{base_url}}/deployment/webhook/github/"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -48,12 +48,12 @@ def build_xero_sync_tree(tenant_id: str, user=None) -> ProcessTreeBuilder:
         return result
     
     def fetch_journals(**context):
-        """Fetch regular journals."""
-        logger.info(f"Fetching journals for tenant {tenant_id}")
+        """Fetch manual journals (Journals API removed)."""
+        logger.info(f"Fetching manual journals for tenant {tenant_id}")
         api_client = XeroApiClient(user, tenant_id=tenant_id)
         xero_api = XeroAccountingApi(api_client, tenant_id)
-        xero_api.journals(load_all=False).get()
-        return {'status': 'success', 'endpoint': 'journals'}
+        xero_api.manual_journals(load_all=False).get()
+        return {'status': 'success', 'endpoint': 'manual_journals'}
     
     def fetch_manual_journals(**context):
         """Fetch manual journals."""

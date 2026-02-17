@@ -26,6 +26,8 @@ from .profit_loss_views import (
     ExportProfitLossCompleteView,
 )
 
+from .reconciliation_views import ReconcileReportsView
+
 __all__ = [
     # Trial Balance Views
     'ValidateBalanceSheetCompleteView',
@@ -41,5 +43,7 @@ __all__ = [
     'ImportProfitLossView',
     'CompareProfitLossView',
     'ExportProfitLossCompleteView',
+    # Reconciliation
+    'ReconcileReportsView',
 ]
 

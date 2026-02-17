@@ -8,7 +8,7 @@ from rest_framework.permissions import AllowAny
 
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_auth.models import XeroClientCredentials
-from apps.xero.xero_data.services import update_xero_data
+from apps.xero.xero_data.services import update_financial_data
 from apps.xero.xero_data.models import XeroJournalsSource
 
 
@@ -46,13 +46,12 @@ class XeroUpdateDataView(APIView):
             # Use logged-in user if authenticated, otherwise pass None to let service find credentials with token
             user = request.user if request.user.is_authenticated else None
             
-            # Use the service function for consistency with scheduled tasks
-            # The service will find credentials that have a token for this tenant
-            print ('updating Data')
-            result = update_xero_data(
-                tenant_id, 
+            # Transaction pipeline: transactions + Manual Journals only.
+            print('Updating data (transactions + Manual Journals)')
+            result = update_financial_data(
+                tenant_id,
                 user=user,
-                load_all=load_all
+                load_all=load_all,
             )
             
             if result['success']:

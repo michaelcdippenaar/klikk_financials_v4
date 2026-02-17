@@ -60,6 +60,11 @@ class XeroLastUpdate(models.Model):
         ('journals', 'Journals'),
         ('manual_journals', 'Manual Journals'),
         ('profit_loss', 'Profit & Loss'),
+        ('bank_transactions', 'Bank Transactions'),
+        ('invoices', 'Invoices'),
+        ('credit_notes', 'Credit Notes'),
+        ('prepayments', 'Prepayments'),
+        ('overpayments', 'Overpayments'),
     ]
     
     name = models.CharField(max_length=200, blank=True, null=True, unique=True, help_text="Optional unique name/identifier for this update record")

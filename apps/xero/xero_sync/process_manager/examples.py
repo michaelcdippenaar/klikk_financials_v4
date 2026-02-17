@@ -472,10 +472,11 @@ def example_xero_sync_tree():
         return update_metadata(tenant_id, user=user)
     
     def fetch_journals(**context):
+        """Fetch manual journals (Journals API removed)."""
         api_client = XeroApiClient(user, tenant_id=tenant_id)
         xero_api = XeroAccountingApi(api_client, tenant_id)
-        xero_api.journals(load_all=False).get()
-        return {'status': 'success', 'endpoint': 'journals'}
+        xero_api.manual_journals(load_all=False).get()
+        return {'status': 'success', 'endpoint': 'manual_journals'}
     
     def fetch_manual_journals(**context):
         api_client = XeroApiClient(user, tenant_id=tenant_id)

@@ -21,6 +21,8 @@ from rest_framework.authtoken.views import obtain_auth_token
 from django.conf import settings
 from django.conf.urls.static import static
 
+from apps.xero.xero_auth.views import XeroCallbackView
+
 urlpatterns = [
     path('admin/', admin.site.urls),
     
@@ -30,7 +32,8 @@ urlpatterns = [
     path('login/', auth_views.LoginView.as_view(), name='login'),
     path('logout/', auth_views.LogoutView.as_view(), name='logout'),
     
-    # Xero endpoints
+    # Xero endpoints (callback at /xero/callback/ for Xero redirect URI)
+    path('xero/callback/', XeroCallbackView.as_view(), name='xero-callback'),
     path('xero/auth/', include('apps.xero.xero_auth.urls')),
     path('xero/core/', include('apps.xero.xero_core.urls')),
     path('xero/sync/', include('apps.xero.xero_sync.urls')),

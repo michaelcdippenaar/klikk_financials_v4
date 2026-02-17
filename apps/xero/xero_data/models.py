@@ -81,6 +81,36 @@ class XeroTransactionSourceModelManager(models.Manager):
             organisation, xero_response, 'Payment', 'PaymentID'
         )
 
+    def create_credit_notes_from_xero(self, organisation, xero_response):
+        return self._create_transactions_from_xero(
+            organisation, xero_response, 'CreditNote', 'CreditNoteID'
+        )
+
+    def create_prepayments_from_xero(self, organisation, xero_response):
+        return self._create_transactions_from_xero(
+            organisation, xero_response, 'Prepayment', 'PrepaymentID'
+        )
+
+    def create_overpayments_from_xero(self, organisation, xero_response):
+        return self._create_transactions_from_xero(
+            organisation, xero_response, 'Overpayment', 'OverpaymentID'
+        )
+
+    def create_purchase_orders_from_xero(self, organisation, xero_response):
+        return self._create_transactions_from_xero(
+            organisation, xero_response, 'PurchaseOrder', 'PurchaseOrderID'
+        )
+
+    def create_bank_transfers_from_xero(self, organisation, xero_response):
+        return self._create_transactions_from_xero(
+            organisation, xero_response, 'BankTransfer', 'BankTransferID'
+        )
+
+    def create_expense_claims_from_xero(self, organisation, xero_response):
+        return self._create_transactions_from_xero(
+            organisation, xero_response, 'ExpenseClaim', 'ExpenseClaimID'
+        )
+
 
 class XeroTransactionSource(models.Model):
     organisation = models.ForeignKey(XeroTenant, on_delete=models.CASCADE, related_name='transaction_sources')
@@ -110,7 +140,7 @@ class XeroJournalsSourceManager(models.Manager):
                         This allows incremental updates to only process newly fetched journals.
         """
         from apps.xero.xero_data.models import XeroTransactionSource, XeroJournals
-        from apps.xero.xero_metadata.models import XeroAccount, XeroTracking
+        from apps.xero.xero_metadata.models import XeroAccount, XeroTracking, XeroContacts
         
         print('Creating Journals from Xero', organisation)
         # Pre-fetch all related data into dictionaries for O(1) lookup
@@ -141,12 +171,16 @@ class XeroJournalsSourceManager(models.Manager):
         trackings_dict = {
             t.option_id: t for t in XeroTracking.objects.filter(organisation=organisation)
         }
+        contacts_dict = {
+            c.contacts_id: c for c in XeroContacts.objects.filter(organisation=organisation)
+        }
         
         # Collect all journal line IDs to check existing
         all_journal_line_ids = []
         journal_data_list = []
         journals_to_mark_processed = []
         
+        skipped_by_status = 0
         for j_obj in source:
             j = j_obj.collection
             # Debug: Print journal type to verify it's set correctly
@@ -154,6 +188,15 @@ class XeroJournalsSourceManager(models.Manager):
             is_manual_journal = j_obj.journal_type == 'manual_journal'
             if is_manual_journal:
                 print(f"[PROCESS] Detected manual journal: {j_obj.journal_id}")
+            
+            # Skip non-active journals (VOIDED, DELETED, DRAFT)
+            # Only POSTED manual journals and active regular journals should create journal entries
+            journal_status = j.get('Status', '')
+            if journal_status in ('VOIDED', 'DELETED', 'DRAFT'):
+                print(f"[PROCESS] Skipping {journal_status} journal {j_obj.journal_id}")
+                skipped_by_status += 1
+                journals_to_mark_processed.append(j_obj)
+                continue
             
             # Handle different field names for regular vs manual journals
             if is_manual_journal:
@@ -291,6 +334,13 @@ class XeroJournalsSourceManager(models.Manager):
                     # Regular journals use "TrackingCategories" array
                     tracking_data = jl.get('TrackingCategories', [])
 
+                # Contact: for manual journals use journal-level Contact from API if present
+                contact_instance = None
+                if is_manual_journal and j.get('Contact'):
+                    contact_id = j.get('Contact', {}).get('ContactID')
+                    if contact_id:
+                        contact_instance = contacts_dict.get(contact_id)
+                
                 all_journal_line_ids.append(line_id)
                 journal_entry = {
                     'line_id': line_id,
@@ -304,6 +354,7 @@ class XeroJournalsSourceManager(models.Manager):
                     'journal_source': j_obj,
                     'transaction_source': source_transactions_obj,
                     'journal_type': j_obj.journal_type,  # Include journal type from source
+                    'contact': contact_instance,
                     'tracking1_id': None,
                     'tracking2_id': None,
                 }
@@ -331,6 +382,55 @@ class XeroJournalsSourceManager(models.Manager):
                             elif index == 2:
                                 journal_data_list[-1]['tracking2_id'] = tracking_obj.id
                     index += 1
+                
+                # Inherit tracking from transaction source if journal line has no tracking
+                # This handles cases where Xero's Journals API doesn't carry tracking from
+                # the source document (e.g., invoice tracking not on bank transaction journals)
+                if (journal_data_list[-1]['tracking1_id'] is None and 
+                    source_transactions_obj is not None):
+                    try:
+                        txn_collection = source_transactions_obj.collection or {}
+                        txn_line_items = txn_collection.get('LineItems', [])
+                        # Match by AccountCode (account_instance.code)
+                        acct_code = account_instance.code if account_instance else None
+                        for txn_line in txn_line_items:
+                            txn_tracking = txn_line.get('Tracking', [])
+                            if txn_tracking and txn_line.get('AccountCode') == acct_code:
+                                # Found matching line with tracking
+                                t_index = 1
+                                for tt in txn_tracking:
+                                    option_name = tt.get('Option', '')
+                                    category_id = tt.get('TrackingCategoryID', '')
+                                    # Look up tracking by option name + category
+                                    for tk_id, tk_obj in trackings_dict.items():
+                                        if tk_obj.option == option_name:
+                                            if t_index == 1:
+                                                journal_data_list[-1]['tracking1_id'] = tk_obj.id
+                                            elif t_index == 2:
+                                                journal_data_list[-1]['tracking2_id'] = tk_obj.id
+                                            break
+                                    t_index += 1
+                                break  # Use first matching line
+                        
+                        # If still no tracking and there's only one line item with tracking, use it
+                        if journal_data_list[-1]['tracking1_id'] is None:
+                            for txn_line in txn_line_items:
+                                txn_tracking = txn_line.get('Tracking', [])
+                                if txn_tracking:
+                                    t_index = 1
+                                    for tt in txn_tracking:
+                                        option_name = tt.get('Option', '')
+                                        for tk_id, tk_obj in trackings_dict.items():
+                                            if tk_obj.option == option_name:
+                                                if t_index == 1:
+                                                    journal_data_list[-1]['tracking1_id'] = tk_obj.id
+                                                elif t_index == 2:
+                                                    journal_data_list[-1]['tracking2_id'] = tk_obj.id
+                                                break
+                                        t_index += 1
+                                    break  # Use first line with tracking
+                    except Exception as e:
+                        logger.warning(f"Error inheriting tracking from transaction source: {e}")
             
             # Debug: Print summary for this journal
             if is_manual_journal:
@@ -381,6 +481,8 @@ class XeroJournalsSourceManager(models.Manager):
                     existing.tracking1_id = journal_data['tracking1_id']
                 if journal_data['tracking2_id']:
                     existing.tracking2_id = journal_data['tracking2_id']
+                if journal_data.get('contact') is not None:
+                    existing.contact = journal_data['contact']
                 to_update.append(existing)
             else:
                 # Create new
@@ -404,6 +506,8 @@ class XeroJournalsSourceManager(models.Manager):
                     journal_obj.tracking1_id = journal_data['tracking1_id']
                 if journal_data['tracking2_id']:
                     journal_obj.tracking2_id = journal_data['tracking2_id']
+                if journal_data.get('contact'):
+                    journal_obj.contact = journal_data['contact']
                 to_create.append(journal_obj)
                 if journal_type_from_data == 'manual_journal':
                     print(f"[PROCESS] Creating new manual journal with journal_type='manual_journal' for line_id={line_id}, amount={journal_data['amount']}")
@@ -444,7 +548,7 @@ class XeroJournalsSourceManager(models.Manager):
                     XeroJournals.objects.bulk_update(batch, [
                         'journal_number', 'journal_type', 'account', 'date', 'description', 'reference',
                         'amount', 'tax_amount', 'journal_source', 'transaction_source',
-                        'tracking1', 'tracking2'
+                        'contact', 'tracking1', 'tracking2'
                     ])
                     total_updated += len(batch)
                     print(f"[PROCESS] Bulk updated batch {i // batch_size + 1}: {len(batch)} entries (total: {total_updated}/{len(to_update)})")
@@ -521,6 +625,9 @@ class XeroJournalsManager(models.Manager):
     def get_account_balances(self, organisation, date_from=None, exclude_manual_journals=False):
         """
         Aggregate journals by account, year, month, contact, and tracking categories.
+        Used to build trail balance: per account, per contact, per tracking1/tracking2, per period.
+        Contact comes from journal.contact (manual journals) or transaction_source.contact (invoices, bank, etc.).
+        Tracking comes from journal line tracking (invoices, bank transactions, credit notes, manual journals).
         
         Args:
             organisation: XeroTenant instance
@@ -531,8 +638,10 @@ class XeroJournalsManager(models.Manager):
             QuerySet of aggregated journal data
         """
         from django.db.models import Sum, F
+        from django.db.models.functions import Coalesce
         
-        # Aggregate journals by account, year, month, contact, and tracking categories
+        # Aggregate journals by account, year, month, contact, and tracking categories.
+        # Contact: from direct contact (manual journals) or transaction_source (transaction lines).
         qs = self.filter(organisation=organisation)
         
         # Exclude manual journals if requested
@@ -543,13 +652,12 @@ class XeroJournalsManager(models.Manager):
         if date_from:
             qs = qs.filter(date__gte=date_from)
         
+        # Use contact_id_value to avoid conflicting with model field 'contact'
         qs = qs.annotate(
-            month=Month('date')
-        ).annotate(
-            year=Year('date')
-        ).annotate(
-            contact=F('transaction_source__contact')
-        ).values("account", "year", "month", "contact", "tracking1", "tracking2").order_by().annotate(
+            month=Month('date'),
+            year=Year('date'),
+            contact_id_value=Coalesce(F('contact_id'), F('transaction_source__contact_id')),
+        ).values("account", "year", "month", "contact_id_value", "tracking1", "tracking2").order_by().annotate(
             amount=Sum("amount"),
         )
         return qs
@@ -562,7 +670,7 @@ class XeroJournals(models.Model):
     ]
     
     organisation = models.ForeignKey(XeroTenant, on_delete=models.CASCADE, related_name='journals')
-    journal_id = models.CharField(max_length=51)
+    journal_id = models.CharField(max_length=200)
     journal_number = models.IntegerField()
     journal_type = models.CharField(max_length=20, choices=JOURNAL_TYPE_CHOICES, default='journal', help_text="Type of journal: regular journal or manual journal")
     account = models.ForeignKey(XeroAccount, on_delete=models.CASCADE, related_name='journals', to_field='account_id')
@@ -576,6 +684,15 @@ class XeroJournals(models.Model):
     )
     journal_source = models.ForeignKey(XeroJournalsSource, on_delete=models.CASCADE, related_name='journals',
                                        blank=True, null=True)
+    contact = models.ForeignKey(
+        XeroContacts,
+        on_delete=models.DO_NOTHING,
+        related_name='journals',
+        to_field='contacts_id',
+        blank=True,
+        null=True,
+        help_text='Contact/customer (set for manual journals from API; transaction lines get it via transaction_source)',
+    )
     date = models.DateTimeField()
     tracking1 = models.ForeignKey(XeroTracking, on_delete=models.DO_NOTHING, related_name='journals_track1', blank=True,
                                   null=True)

@@ -49,11 +49,11 @@ class XeroTrailBalanceManager(DataFrameManager):
                 organisation=organisation
             ).only('account_id', 'code', 'name', 'type', 'grouping', 'business_unit_id')
         }
-        contacts_dict = {
-            c.contacts_id: c for c in XeroContacts.objects.filter(
-                organisation=organisation
-            ).only('contacts_id', 'name')
-        }
+        # Key by both raw and str() so lookup works whether aggregation returns string or UUID
+        contacts_dict = {}
+        for c in XeroContacts.objects.filter(organisation=organisation).only('contacts_id', 'name'):
+            contacts_dict[c.contacts_id] = c
+            contacts_dict[str(c.contacts_id)] = c
         trackings_dict = {
             t.id: t for t in XeroTracking.objects.filter(
                 organisation=organisation
@@ -70,12 +70,13 @@ class XeroTrailBalanceManager(DataFrameManager):
         for data in journals:
             logger.debug(f"Processing journal data: {data}")
             
-            # Use dictionary lookups instead of .get() queries
+            # Use dictionary lookups (contact_id_value from get_account_balances; normalize to str for lookup)
             contact = None
-            if data.get('contact'):
-                contact = contacts_dict.get(data['contact'])
+            contact_id = data.get('contact_id_value') or data.get('contact')
+            if contact_id:
+                contact = contacts_dict.get(contact_id) or contacts_dict.get(str(contact_id).strip())
                 if not contact:
-                    logger.warning(f"Contact {data['contact']} not found, setting to None")
+                    logger.warning(f"Contact {contact_id!r} not found in contacts_dict (len={len(contacts_dict)}), setting to None")
 
             account = accounts_dict.get(data['account'])
             if not account:
@@ -170,6 +171,34 @@ class XeroTrailBalance(models.Model):
 
     def __str__(self):
         return f'{self.organisation.tenant_name}: {self.year} {self.month} {self.account} {self.contact} {self.amount}'
+
+
+class XeroPnlByTracking(models.Model):
+    """
+    Stores Xero P&L report values per tracking option, per account, per month.
+    Used to compare Xero's official P&L (filtered by tracking) against the
+    constructed trail balance.
+    """
+    organisation = models.ForeignKey(XeroTenant, on_delete=models.CASCADE, related_name='pnl_by_tracking')
+    tracking = models.ForeignKey(XeroTracking, on_delete=models.CASCADE, null=True, blank=True,
+                                 related_name='pnl_by_tracking',
+                                 help_text="Tracking option. NULL means unfiltered/overall P&L.")
+    account = models.ForeignKey(XeroAccount, on_delete=models.CASCADE, related_name='pnl_by_tracking')
+    year = models.IntegerField()
+    month = models.IntegerField()
+    xero_amount = models.DecimalField(max_digits=30, decimal_places=2, default=0)
+    imported_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('organisation', 'tracking', 'account', 'year', 'month')]
+        indexes = [
+            models.Index(fields=['organisation', 'tracking', 'account', 'year', 'month'],
+                         name='pnl_trk_org_trk_acc_ym_idx'),
+        ]
+
+    def __str__(self):
+        trk = self.tracking.option if self.tracking else 'Overall'
+        return f'{self.organisation.tenant_name}: {trk} / {self.account.code} {self.year}-{self.month:02d} = {self.xero_amount}'
 
 
 class XeroBalanceSheetManager(DataFrameManager):

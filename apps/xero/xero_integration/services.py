@@ -32,10 +32,18 @@ def get_google_credentials():
     
     # Fallback to default path for development (only if file exists)
     if not credentials_path:
-        default_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), 
-                                   'credentials', 'klick-financials01-81b1aeed281d.json')
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        default_path = os.path.join(project_root, 'credentials', 'klick-financials01-81b1aeed281d.json')
         if os.path.exists(default_path):
             credentials_path = default_path
+    # Fallback to v3 sibling project credentials (when running v4 and v3 is alongside)
+    if not credentials_path:
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+        parent_dir = os.path.dirname(project_root)
+        v3_creds = os.path.join(parent_dir, 'klikk_financials_v3', 'credentials', 'klick-financials01-81b1aeed281d.json')
+        if os.path.exists(v3_creds):
+            credentials_path = v3_creds
+            logger.debug(f"Using Google credentials from v3 project: {credentials_path}")
     
     if not credentials_path:
         raise ValueError(

@@ -26,8 +26,12 @@ from .common import (
 
 
 class ImportProfitLossView(APIView):
-    """Import Profit and Loss report from Xero API."""
+    """Import Profit and Loss report from Xero API. Supports both GET (query params) and POST (body)."""
     permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+
+    def get(self, request):
+        """Allow GET with query params: tenant_id, from_date, to_date, periods, timeframe."""
+        return self.post(request)
 
     def post(self, request):
         try:
