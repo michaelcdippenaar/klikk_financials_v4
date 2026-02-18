@@ -37,6 +37,7 @@ def update_metadata(tenant_id, user=None):
         user = credentials.user
     
     stats = {
+        'organisation_updated': 0,
         'accounts_updated': 0,
         'tracking_categories_updated': 0,
         'contacts_updated': 0,
@@ -51,7 +52,9 @@ def update_metadata(tenant_id, user=None):
         stats['api_calls'] += 1  # Initial API client creation
 
         # Define metadata API calls (executed sequentially to respect Xero's 5 concurrent call limit)
+        # Organisation first - fetches fiscal year settings from Xero
         metadata_calls = [
+            ('organisation', lambda: xero_api.organisation().get()),
             ('accounts', lambda: xero_api.accounts().get()),
             ('tracking_categories', lambda: xero_api.tracking_categories().get()),
             ('contacts', lambda: xero_api.contacts().get()),

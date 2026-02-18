@@ -28,10 +28,10 @@ CORS_ALLOW_CREDENTIALS = True
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'klikk_bi_v4',
-        'USER': 'mc',
+        'NAME': 'klikk_financials_v4',
+        'USER': 'klikk_user',
         'PASSWORD': 'Number55dip',
-        'HOST': '127.0.0.1',
+        'HOST': '192.168.1.235',
         'PORT': '5432',
         'CONN_MAX_AGE': 600,  # Reuse connections for 10 minutes (connection pooling)
         'OPTIONS': {

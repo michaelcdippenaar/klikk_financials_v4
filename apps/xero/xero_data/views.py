@@ -1,6 +1,9 @@
 """
 Xero data views - transaction and journal data update endpoints.
 """
+import logging
+
+from django.conf import settings
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -10,6 +13,9 @@ from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_auth.models import XeroClientCredentials
 from apps.xero.xero_data.services import update_financial_data
 from apps.xero.xero_data.models import XeroJournalsSource
+from apps.xero.xero_sync.api_call_logging import log_xero_api_calls
+
+logger = logging.getLogger(__name__)
 
 
 class XeroUpdateDataView(APIView):
@@ -47,13 +53,18 @@ class XeroUpdateDataView(APIView):
             user = request.user if request.user.is_authenticated else None
             
             # Transaction pipeline: transactions + Manual Journals only.
-            print('Updating data (transactions + Manual Journals)')
+            if settings.DEBUG:
+                print("[Sync] Updating data (transactions + Manual Journals)")
             result = update_financial_data(
                 tenant_id,
                 user=user,
                 load_all=load_all,
             )
-            
+
+            # Log API calls for rate limit tracking
+            api_calls = result.get('stats', {}).get('api_calls', 0)
+            log_xero_api_calls('data', api_calls, tenant=tenant)
+
             if result['success']:
                 return Response({
                     "message": result['message'],
@@ -126,6 +137,7 @@ class XeroProcessJournalsView(APIView):
                        f"(Manual={unprocessed_manual}, Regular={unprocessed_regular})")
             
             if unprocessed_count == 0:
+                log_xero_api_calls('journals', 0, tenant=tenant)
                 return Response({
                     "message": f"No unprocessed journals found for tenant {tenant_id}",
                     "journals_processed": 0,
@@ -137,13 +149,14 @@ class XeroProcessJournalsView(APIView):
                         "unprocessed_regular": unprocessed_regular
                     }
                 }, status=status.HTTP_200_OK)
-            
+
             # Process journals from XeroJournalsSource to XeroJournals
             result = XeroJournalsSource.objects.create_journals_from_xero(tenant)
             
             # Count processed journals
             processed_count = result.count()
-            
+            log_xero_api_calls('journals', 0, tenant=tenant)
+
             return Response({
                 "message": f"Successfully processed {processed_count} journal lines for tenant {tenant_id}",
                 "journals_processed": processed_count,

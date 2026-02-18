@@ -2,6 +2,15 @@ import apiClient from './client';
 import { API_ENDPOINTS } from '../utils/constants';
 
 /**
+ * Get Xero API call statistics for rate limit tracking
+ */
+export async function getApiCallStats(tenantId = null) {
+  const params = tenantId ? { tenant_id: tenantId } : {};
+  const response = await apiClient.get(API_ENDPOINTS.API_CALL_STATS, { params });
+  return response.data;
+}
+
+/**
  * Get Xero OAuth2 authorization URL
  */
 export async function getXeroAuthUrl() {

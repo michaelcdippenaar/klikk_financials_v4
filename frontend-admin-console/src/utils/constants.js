@@ -31,6 +31,9 @@ export const API_ENDPOINTS = {
   PNL_SUMMARY: '/xero/cube/pnl-summary/',
   ACCOUNT_SUMMARY: '/xero/cube/account-summary/',
   
+  // Sync
+  API_CALL_STATS: '/xero/sync/api-call-stats/',
+
   // Validation
   RECONCILE: '/xero/validation/reconcile/',
   COMPARE_PROFIT_LOSS: '/xero/validation/compare-profit-loss/',

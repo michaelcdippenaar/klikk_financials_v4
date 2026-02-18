@@ -12,6 +12,17 @@ class XeroTenant(models.Model):
         max_length=64, blank=True, null=True,
         help_text='Xero TrackingCategoryID for slot 2 (second category from API).'
     )
+    fiscal_year_start_month = models.IntegerField(
+        null=True, blank=True,
+        help_text='Month when fiscal year starts (1-12). Fetched from Xero Organisation. Default 7 (July) if not set.'
+    )
+
+    def get_fiscal_year_start_month(self):
+        """Return fiscal year start month (1-12). Uses Xero value if set, else default 7."""
+        if self.fiscal_year_start_month is not None and 1 <= self.fiscal_year_start_month <= 12:
+            return self.fiscal_year_start_month
+        from apps.xero.xero_metadata.utils import DEFAULT_FISCAL_YEAR_START_MONTH
+        return DEFAULT_FISCAL_YEAR_START_MONTH
 
     def __str__(self):
         return self.tenant_name

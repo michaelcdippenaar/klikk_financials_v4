@@ -20,6 +20,8 @@ credit notes. Trail balance is aggregated per tracking1 and tracking2.
 import datetime
 import logging
 import re
+
+from django.conf import settings
 from decimal import Decimal, ROUND_HALF_UP
 from datetime import timezone as dt_timezone
 from django.db import transaction
@@ -928,30 +930,59 @@ class TransactionProcessor:
         return [e for e in entries if e]
     
     @transaction.atomic
-    def process_all_transactions(self, clear_existing=False):
+    def process_all_transactions(self, clear_existing=False, touched_transaction_ids=None):
         """
         Process all transactions for the organisation to journal entries.
-        
+
         Args:
-            clear_existing: If True, delete existing transaction-based journals first
-        
+            clear_existing: If True, delete existing transaction-based journals (full) or
+                only journals for touched transactions (incremental)
+            touched_transaction_ids: Optional set of transaction IDs updated in fetch.
+                If provided and non-empty, incremental mode: only delete and reprocess those.
+                If None or empty, full rebuild: clear all and reprocess everything.
+
         Returns:
             dict: Processing stats
         """
         from apps.xero.xero_data.models import XeroTransactionSource, XeroJournals
         
-        print(f"[PROCESSOR] Starting transaction processing for {self.organisation.tenant_name}")
+        incremental = (
+            touched_transaction_ids is not None
+            and len(touched_transaction_ids) > 0
+        )
+        if touched_transaction_ids is not None and len(touched_transaction_ids) == 0:
+            # Incremental fetch returned no modifications - nothing to do
+            return {
+                'invoices_processed': 0,
+                'bank_transactions_processed': 0,
+                'payments_processed': 0,
+                'credit_notes_processed': 0,
+                'prepayments_processed': 0,
+                'overpayments_processed': 0,
+                'journal_entries_created': 0,
+                'errors': [],
+            }
+        if incremental:
+            pass  # Incremental mode: reprocessing touched transactions
+        else:
+            pass  # Full rebuild: processing all transactions
         
         # Load all lookups
         self._load_lookups()
         
-        # Optionally clear existing transaction-based journals
+        # Clear journals: either all (full rebuild) or only for touched transactions (incremental)
         if clear_existing:
-            deleted = XeroJournals.objects.filter(
-                organisation=self.organisation,
-                journal_type='transaction'
-            ).delete()
-            print(f"[PROCESSOR] Cleared {deleted[0]} existing transaction-based journals")
+            if incremental:
+                deleted = XeroJournals.objects.filter(
+                    organisation=self.organisation,
+                    journal_type='transaction',
+                    transaction_source__transactions_id__in=touched_transaction_ids,
+                ).delete()
+            else:
+                deleted = XeroJournals.objects.filter(
+                    organisation=self.organisation,
+                    journal_type='transaction'
+                ).delete()
         
         stats = {
             'invoices_processed': 0,
@@ -966,8 +997,10 @@ class TransactionProcessor:
         
         all_entries = []
         
-        # Get all transactions
+        # Get transactions: all or only touched (incremental)
         transactions = XeroTransactionSource.objects.filter(organisation=self.organisation)
+        if incremental:
+            transactions = transactions.filter(transactions_id__in=touched_transaction_ids)
         
         # Process by transaction type
         processor_map = {
@@ -997,14 +1030,15 @@ class TransactionProcessor:
         
         # Bulk create journal entries
         if all_entries:
-            # Check for existing entries
-            existing_ids = set(XeroJournals.objects.filter(
-                organisation=self.organisation,
-                journal_id__in=[e['journal_id'] for e in all_entries]
-            ).values_list('journal_id', flat=True))
-            
-            # Filter out existing entries
-            new_entries = [e for e in all_entries if e['journal_id'] not in existing_ids]
+            # When we cleared existing (full or incremental), all entries are new - skip DB check
+            if clear_existing:
+                new_entries = all_entries
+            else:
+                existing_ids = set(XeroJournals.objects.filter(
+                    organisation=self.organisation,
+                    journal_id__in=[e['journal_id'] for e in all_entries]
+                ).values_list('journal_id', flat=True))
+                new_entries = [e for e in all_entries if e['journal_id'] not in existing_ids]
             
             if new_entries:
                 journals_to_create = []
@@ -1037,28 +1071,40 @@ class TransactionProcessor:
                 
                 stats['journal_entries_created'] = len(new_entries)
         
-        print(f"[PROCESSOR] Processing complete:")
-        print(f"  - Invoices: {stats['invoices_processed']}")
-        print(f"  - Bank Transactions: {stats['bank_transactions_processed']}")
-        print(f"  - Payments: {stats['payments_processed']}")
-        print(f"  - Credit Notes: {stats['credit_notes_processed']}")
-        print(f"  - Prepayments: {stats['prepayments_processed']}")
-        print(f"  - Overpayments: {stats['overpayments_processed']}")
-        print(f"  - Journal Entries Created: {stats['journal_entries_created']}")
-        print(f"  - Errors: {len(stats['errors'])}")
-        
+        if settings.DEBUG:
+            print(
+                "[Sync] Transactions updated: invoices=%d, bank_transactions=%d, payments=%d, "
+                "credit_notes=%d, prepayments=%d, overpayments=%d | journal_entries=%d | errors=%d"
+                % (
+                    stats['invoices_processed'],
+                    stats['bank_transactions_processed'],
+                    stats['payments_processed'],
+                    stats['credit_notes_processed'],
+                    stats['prepayments_processed'],
+                    stats['overpayments_processed'],
+                    stats['journal_entries_created'],
+                    len(stats['errors']),
+                )
+            )
+
         return stats
 
 
-def process_transactions_to_journals(organisation):
+def process_transactions_to_journals(organisation, touched_transaction_ids=None):
     """
     Convenience function to process all transactions to journal entries.
-    
+
     Args:
         organisation: XeroTenant instance
-    
+        touched_transaction_ids: Optional set of transaction IDs that were updated in the fetch.
+            If provided and non-empty, only those transactions are reprocessed (incremental).
+            If None or empty, does full rebuild (clear all and reprocess everything).
+
     Returns:
         dict: Processing stats
     """
     processor = TransactionProcessor(organisation)
-    return processor.process_all_transactions(clear_existing=True)
+    return processor.process_all_transactions(
+        clear_existing=True,
+        touched_transaction_ids=touched_transaction_ids,
+    )

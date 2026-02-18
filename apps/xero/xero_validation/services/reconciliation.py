@@ -13,9 +13,6 @@ from .validation import validate_balance_sheet_accounts
 
 logger = logging.getLogger(__name__)
 
-# Default fiscal year start month (July = 7). Override per tenant if needed.
-DEFAULT_FISCAL_YEAR_START_MONTH = 7
-
 
 def _financial_year_dates(financial_year, fiscal_year_start_month):
     """
@@ -77,13 +74,13 @@ def reconcile_reports_for_financial_year(
             "errors": list of str (if any step failed)
         }
     """
-    if fiscal_year_start_month is None:
-        fiscal_year_start_month = DEFAULT_FISCAL_YEAR_START_MONTH
-
     try:
         organisation = XeroTenant.objects.get(tenant_id=tenant_id)
     except XeroTenant.DoesNotExist:
         raise ValueError(f"Tenant {tenant_id} not found")
+
+    if fiscal_year_start_month is None:
+        fiscal_year_start_month = organisation.get_fiscal_year_start_month()
 
     from_date, to_date = _financial_year_dates(financial_year, fiscal_year_start_month)
     from_date_str = from_date.isoformat()

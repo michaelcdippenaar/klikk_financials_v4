@@ -4,6 +4,8 @@ Core Xero API client services.
 import datetime
 import logging
 import requests
+
+from django.conf import settings
 from django.utils import timezone
 from xero_python.accounting import AccountingApi
 from xero_python.api_client import ApiClient, Configuration
@@ -306,7 +308,7 @@ class XeroApiClient:
 
 
 class XeroAccountingApi:
-    def __init__(self, api_client, tenant_id):
+    def __init__(self, api_client, tenant_id, touched_transaction_ids=None):
         from apps.xero.xero_metadata.models import XeroAccount, XeroTracking, XeroContacts
         from apps.xero.xero_data.models import XeroTransactionSource, XeroJournalsSource
         from apps.xero.xero_sync.models import XeroLastUpdate
@@ -314,6 +316,35 @@ class XeroAccountingApi:
         self.tenant_id = tenant_id
         self.api_client = AccountingApi(api_client.api_client)
         self.organisation = XeroTenant.objects.get(tenant_id=tenant_id)
+        self.touched_transaction_ids = touched_transaction_ids  # Mutable set to collect IDs from incremental fetch
+
+    def organisation(self):
+        """Fetch Organisation from Xero and update tenant's fiscal_year_start_month."""
+        from apps.xero.xero_core.services import serialize_model
+        from apps.xero.xero_metadata.utils import financial_year_end_to_start_month
+
+        class Organisation:
+            def __init__(self, parent):
+                self.parent = parent
+                self.api_client = parent.api_client
+                self.organisation = parent.organisation
+
+            def get(self):
+                orgs_obj = self.api_client.get_organisations(self.parent.tenant_id)
+                serialized = serialize_model(orgs_obj)
+                orgs = serialized.get('Organisations') or []
+                if orgs:
+                    org = orgs[0]
+                    end_month = org.get('FinancialYearEndMonth') or org.get('financial_year_end_month')
+                    fiscal_start = financial_year_end_to_start_month(end_month)
+                    self.organisation.fiscal_year_start_month = fiscal_start
+                    self.organisation.save(update_fields=['fiscal_year_start_month'])
+                    logger.info(
+                        "Updated tenant %s: fiscal_year_start_month=%d (from Xero FinancialYearEndMonth=%s)",
+                        self.organisation.tenant_id, fiscal_start, end_month
+                    )
+
+        return Organisation(self)
 
     def accounts(self):
         from apps.xero.xero_metadata.models import XeroAccount
@@ -398,13 +429,18 @@ class XeroAccountingApi:
                         XeroTransactionSource.objects.create_bank_transaction_from_xero(
                             self.organisation, items
                         )
+                        if getattr(self.parent, 'touched_transaction_ids', None) is not None:
+                            for r in items:
+                                tid = r.get('BankTransactionID')
+                                if tid:
+                                    self.parent.touched_transaction_ids.add(tid)
                         total_written += len(items)
-                        logger.info(f"[BANK_TRANSACTIONS] Page {page}: wrote {len(items)} to DB (total so far: {total_written})")
                     if not items or len(items) < page_size:
                         break
                     page += 1
                 XeroLastUpdate.objects.update_or_create_timestamp('bank_transactions', self.organisation)
-                logger.info(f"[BANK_TRANSACTIONS] Completed: {total_written} bank transactions written to DB")
+                if settings.DEBUG and total_written:
+                    print(f"[Sync] Bank transactions: {total_written} fetched")
 
         return BankTransactions(self)
 
@@ -438,17 +474,23 @@ class XeroAccountingApi:
                         XeroTransactionSource.objects.create_invoices_from_xero(
                             self.organisation, items
                         )
+                        if getattr(self.parent, 'touched_transaction_ids', None) is not None:
+                            for r in items:
+                                tid = r.get('InvoiceID')
+                                if tid:
+                                    self.parent.touched_transaction_ids.add(tid)
                         total_written += len(items)
-                        logger.info(f"[INVOICES] Page {page}: wrote {len(items)} to DB (total so far: {total_written})")
                     if not items or len(items) < page_size:
                         break
                     page += 1
                 XeroLastUpdate.objects.update_or_create_timestamp('invoices', self.organisation)
-                logger.info(f"[INVOICES] Completed: {total_written} invoices written to DB")
+                if settings.DEBUG and total_written:
+                    print(f"[Sync] Invoices: {total_written} fetched")
 
         return Invoices(self)
 
     def payments(self):
+        """Get payments from Xero API (paged; incremental via if_modified_since)."""
         from apps.xero.xero_data.models import XeroTransactionSource
         
         class Payments:
@@ -459,9 +501,37 @@ class XeroAccountingApi:
 
             def get(self):
                 from apps.xero.xero_core.services import serialize_model
-                payments_obj = self.api_client.get_payments(self.parent.tenant_id)
-                response = serialize_model(payments_obj)['Payments']
-                XeroTransactionSource.objects.create_payments_from_xero(self.organisation, response)
+                from apps.xero.xero_sync.models import XeroLastUpdate
+                modified_since = XeroLastUpdate.objects.get_utc_date_time('payments', self.organisation)
+                page = 1
+                page_size = 100
+                total_written = 0
+                while True:
+                    kwargs = dict(page=page, page_size=page_size)
+                    if modified_since:
+                        kwargs['if_modified_since'] = modified_since
+                    payments_obj = self.api_client.get_payments(
+                        self.parent.tenant_id,
+                        **kwargs
+                    )
+                    page_data = serialize_model(payments_obj)
+                    items = page_data.get('Payments') or []
+                    if items:
+                        XeroTransactionSource.objects.create_payments_from_xero(
+                            self.organisation, items
+                        )
+                        if getattr(self.parent, 'touched_transaction_ids', None) is not None:
+                            for r in items:
+                                tid = r.get('PaymentID')
+                                if tid:
+                                    self.parent.touched_transaction_ids.add(tid)
+                        total_written += len(items)
+                    if not items or len(items) < page_size:
+                        break
+                    page += 1
+                XeroLastUpdate.objects.update_or_create_timestamp('payments', self.organisation)
+                if settings.DEBUG and total_written:
+                    print(f"[Sync] Payments: {total_written} fetched")
 
         return Payments(self)
 
@@ -479,7 +549,6 @@ class XeroAccountingApi:
                 from apps.xero.xero_core.services import serialize_model
                 from apps.xero.xero_sync.models import XeroLastUpdate
                 modified_since = XeroLastUpdate.objects.get_utc_date_time('credit_notes', self.organisation)
-                logger.info(f"[CREDIT_NOTES] Fetching credit notes for tenant {self.organisation.tenant_id}")
                 page = 1
                 page_size = 100
                 total_written = 0
@@ -497,13 +566,18 @@ class XeroAccountingApi:
                         XeroTransactionSource.objects.create_credit_notes_from_xero(
                             self.organisation, items
                         )
+                        if getattr(self.parent, 'touched_transaction_ids', None) is not None:
+                            for r in items:
+                                tid = r.get('CreditNoteID')
+                                if tid:
+                                    self.parent.touched_transaction_ids.add(tid)
                         total_written += len(items)
-                        logger.info(f"[CREDIT_NOTES] Page {page}: wrote {len(items)} to DB (total so far: {total_written})")
                     if not items or len(items) < page_size:
                         break
                     page += 1
                 XeroLastUpdate.objects.update_or_create_timestamp('credit_notes', self.organisation)
-                logger.info(f"[CREDIT_NOTES] Completed: {total_written} credit notes written to DB")
+                if settings.DEBUG and total_written:
+                    print(f"[Sync] Credit notes: {total_written} fetched")
 
         return CreditNotes(self)
 
@@ -521,7 +595,6 @@ class XeroAccountingApi:
                 from apps.xero.xero_core.services import serialize_model
                 from apps.xero.xero_sync.models import XeroLastUpdate
                 modified_since = XeroLastUpdate.objects.get_utc_date_time('prepayments', self.organisation)
-                logger.info(f"[PREPAYMENTS] Fetching prepayments for tenant {self.organisation.tenant_id}")
                 page = 1
                 page_size = 100
                 total_written = 0
@@ -539,13 +612,18 @@ class XeroAccountingApi:
                         XeroTransactionSource.objects.create_prepayments_from_xero(
                             self.organisation, items
                         )
+                        if getattr(self.parent, 'touched_transaction_ids', None) is not None:
+                            for r in items:
+                                tid = r.get('PrepaymentID')
+                                if tid:
+                                    self.parent.touched_transaction_ids.add(tid)
                         total_written += len(items)
-                        logger.info(f"[PREPAYMENTS] Page {page}: wrote {len(items)} to DB (total so far: {total_written})")
                     if not items or len(items) < page_size:
                         break
                     page += 1
                 XeroLastUpdate.objects.update_or_create_timestamp('prepayments', self.organisation)
-                logger.info(f"[PREPAYMENTS] Completed: {total_written} prepayments written to DB")
+                if settings.DEBUG and total_written:
+                    print(f"[Sync] Prepayments: {total_written} fetched")
 
         return Prepayments(self)
 
@@ -563,7 +641,6 @@ class XeroAccountingApi:
                 from apps.xero.xero_core.services import serialize_model
                 from apps.xero.xero_sync.models import XeroLastUpdate
                 modified_since = XeroLastUpdate.objects.get_utc_date_time('overpayments', self.organisation)
-                logger.info(f"[OVERPAYMENTS] Fetching overpayments for tenant {self.organisation.tenant_id}")
                 page = 1
                 page_size = 100
                 total_written = 0
@@ -581,13 +658,18 @@ class XeroAccountingApi:
                         XeroTransactionSource.objects.create_overpayments_from_xero(
                             self.organisation, items
                         )
+                        if getattr(self.parent, 'touched_transaction_ids', None) is not None:
+                            for r in items:
+                                tid = r.get('OverpaymentID')
+                                if tid:
+                                    self.parent.touched_transaction_ids.add(tid)
                         total_written += len(items)
-                        logger.info(f"[OVERPAYMENTS] Page {page}: wrote {len(items)} to DB (total so far: {total_written})")
                     if not items or len(items) < page_size:
                         break
                     page += 1
                 XeroLastUpdate.objects.update_or_create_timestamp('overpayments', self.organisation)
-                logger.info(f"[OVERPAYMENTS] Completed: {total_written} overpayments written to DB")
+                if settings.DEBUG and total_written:
+                    print(f"[Sync] Overpayments: {total_written} fetched")
 
         return Overpayments(self)
 
@@ -713,42 +795,20 @@ class XeroAccountingApi:
                                 page_size=page_size
                             )
 
-                        # DEBUG: print raw manual journal response to console (only for first page)
-                        if page == 1:
-                            try:
-                                raw_data = serialize_model(journals_obj)
-                                print(f"[MANUAL_JOURNALS] RAW manual journals response (top-level keys): {list(raw_data.keys())}")
-                                manual_journals = raw_data.get('ManualJournals') or []
-                                print(f"[MANUAL_JOURNALS] RAW manual journals count on page 1: {len(manual_journals)}")
-                                if manual_journals:
-                                    print(f"[MANUAL_JOURNALS] RAW first manual journal payload: {manual_journals[0]}")
-                            except Exception as debug_e:
-                                print(f"[MANUAL_JOURNALS] ERROR while printing raw manual journals response: {debug_e}")
-
                         page_data = serialize_model(journals_obj)
                         page_journals = page_data.get('ManualJournals') or []
                         
                         if not page_journals:
-                            print(f"[MANUAL_JOURNALS] No more manual journals found. Final page={page}")
                             break
-                        
-                        print(f"[MANUAL_JOURNALS] Retrieved {len(page_journals)} manual journals on page {page}")
                         journal_set.extend(page_journals)
                         
                         # If we got fewer than page_size, this is the last page
                         if len(page_journals) < page_size:
-                            print(f"[MANUAL_JOURNALS] Last page reached. Final page={page}")
                             break
                         
                         page += 1
                     
                     if journal_set:
-                        print(f"[MANUAL_JOURNALS] Retrieved {len(journal_set)} manual journals")
-                        # Debug: Print first journal structure if available
-                        if journal_set and len(journal_set) > 0:
-                            sample_keys = list(journal_set[0].keys())
-                            print(f"[MANUAL_JOURNALS] Sample journal keys: {sample_keys}")
-                        
                         for journal in journal_set:
                             # Try multiple possible ID field names
                             journal_id = (
@@ -758,7 +818,6 @@ class XeroAccountingApi:
                             )
                             if not journal_id:
                                 logger.warning(f"Skipping journal: No ID found. Available keys: {list(journal.keys())}")
-                                print(f"[MANUAL_JOURNALS] WARNING: Journal missing ID. Keys: {list(journal.keys())}")
                                 continue
                             
                             # Generate journal number from ManualJournalID hash
@@ -770,10 +829,8 @@ class XeroAccountingApi:
                                 'journal_number': journal_number,
                                 'collection': journal,
                             })
-                    else:
-                        print(f"[MANUAL_JOURNALS] No manual journals found")
-                    
-                    print(f"[MANUAL_JOURNALS] Completed fetching all manual journals. Total: {len(journals_to_process)}")
+                    if settings.DEBUG and journals_to_process:
+                        print(f"[Sync] Manual journals: {len(journals_to_process)} fetched")
                     
                     # Update timestamp immediately after API call succeeds, before database processing
                     XeroLastUpdate.objects.update_or_create_timestamp('manual_journals', self.organisation)
@@ -822,7 +879,6 @@ class XeroAccountingApi:
                     # Only process the manual journals that were just fetched (incremental update)
                     XeroJournalsSource.objects.create_journals_from_xero(self.organisation, journal_ids=journal_ids_to_fetch if journals_to_process else None)
                     
-                    logger.info(f"Successfully updated manual journals for tenant {self.organisation.tenant_id}")
                 except Exception as e:
                     # Don't update timestamp on error - preserve last successful date
                     error_msg = str(e)
