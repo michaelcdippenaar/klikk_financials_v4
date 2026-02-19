@@ -69,11 +69,15 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedStaticFilesStorage'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
-# Security settings for staging (HTTPS behind nginx)
-SECURE_SSL_REDIRECT = True   # Redirect HTTP to HTTPS
-SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')  # Trust nginx
+# Security settings for staging (HTTPS via nginx)
+SECURE_SSL_REDIRECT = False  # nginx handles HTTP→HTTPS redirect
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SECURE = True
+CSRF_TRUSTED_ORIGINS = [
+    'https://www.klikk.co.za',
+    'https://klikk.co.za',
+]
 
 # Xero Scheduler Configuration
 XERO_SCHEDULER_ENABLED = True  # Enabled for staging
