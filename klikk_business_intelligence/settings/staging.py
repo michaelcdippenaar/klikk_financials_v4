@@ -64,19 +64,14 @@ GITHUB_WEBHOOK_SECRET = os.environ.get('GITHUB_WEBHOOK_SECRET', '')
 # Update JWT signing key
 SIMPLE_JWT['SIGNING_KEY'] = SECRET_KEY
 
-# Static files configuration for staging
+# Static files configuration for staging (served by WhiteNoise)
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+STATICFILES_STORAGE = 'whitenoise.storage.CompressedStaticFilesStorage'
 
 # Media files (if you have user uploads)
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
-
-# Use WhiteNoise to serve static files when DEBUG=False
-# Install with: pip install whitenoise
-# Add 'whitenoise.middleware.WhiteNoiseMiddleware' to MIDDLEWARE (already in base.py)
-# WhiteNoise should be added after SecurityMiddleware and before other middleware
-# For now, we'll serve static files via URL patterns (see urls.py)
 
 # Security settings for staging
 SECURE_SSL_REDIRECT = False  # Set to True if using HTTPS
