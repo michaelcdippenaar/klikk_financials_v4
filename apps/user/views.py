@@ -3,12 +3,15 @@ User authentication views - Registration and Login with JWT tokens.
 """
 from rest_framework import status, generics
 from rest_framework.response import Response
+from rest_framework.views import APIView
 from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.views import TokenObtainPairView
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
+from rest_framework_simplejwt.exceptions import TokenError
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.http import HttpResponse
 
 User = get_user_model()
 
@@ -203,6 +206,26 @@ class LoginView(TokenObtainPairView):
                 "access": str(refresh.access_token),
             }
         }, status=status.HTTP_200_OK)
+
+
+class NginxAuthCheckView(APIView):
+    """
+    Lightweight endpoint for nginx auth_request.
+    Reads JWT from the klikk_token cookie and verifies it.
+    Returns 200 if valid, 401 if missing/invalid.
+    """
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        token = request.COOKIES.get('klikk_token')
+        if not token:
+            return HttpResponse(status=401)
+        try:
+            AccessToken(token)
+            return HttpResponse(status=200)
+        except TokenError:
+            return HttpResponse(status=401)
 
 
 class RefreshTokenView(generics.GenericAPIView):

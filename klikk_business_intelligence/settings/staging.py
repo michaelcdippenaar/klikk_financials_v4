@@ -16,12 +16,13 @@ DEBUG = False
 
 # Update with your staging server domain
 # Include: IP address, hostname, domain name (if applicable), localhost, and 127.0.0.1
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,192.168.1.235,102.135.240.222,www.klikk.co.za,klikk.co.za').split(',')
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,192.168.1.235,102.135.240.222,www.klikk.co.za,klikk.co.za,paw.klikk.co.za').split(',')
 
 # CORS - allow the staging server to serve the frontend (HTTP and HTTPS)
 CORS_ALLOWED_ORIGINS = [
     'https://www.klikk.co.za',
     'https://klikk.co.za',
+    'https://paw.klikk.co.za',
     'http://102.135.240.222',
     'https://102.135.240.222',
     'http://102.135.240.222:9000',
@@ -77,6 +78,7 @@ CSRF_COOKIE_SECURE = True
 CSRF_TRUSTED_ORIGINS = [
     'https://www.klikk.co.za',
     'https://klikk.co.za',
+    'https://paw.klikk.co.za',
 ]
 
 # Xero Scheduler Configuration
