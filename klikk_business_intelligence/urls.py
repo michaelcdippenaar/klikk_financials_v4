@@ -41,7 +41,8 @@ urlpatterns = [
     path('xero/cube/', include('apps.xero.xero_cube.urls')),
     path('xero/metadata/', include('apps.xero.xero_metadata.urls')),
     path('xero/validation/', include('apps.xero.xero_validation.urls')),
-    
+    path('api/investec/', include('apps.investec.urls')),
+
     # Deployment webhook
     path('deployment/', include('apps.deployment.urls')),
 ]

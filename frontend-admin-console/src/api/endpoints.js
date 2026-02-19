@@ -1,5 +1,5 @@
 import apiClient from './client';
-import { API_ENDPOINTS } from '../utils/constants';
+import { API_ENDPOINTS, API_BASE_URL } from '../utils/constants';
 
 /**
  * Get Xero API call statistics for rate limit tracking
@@ -183,4 +183,120 @@ export async function validateBalanceSheet(tenantId, params) {
     params: queryParams,
   });
   return response.data;
+}
+
+// ---------------------------------------------------------------------------
+// Investec
+// ---------------------------------------------------------------------------
+
+/**
+ * Get Investec transactions (paginated, filterable)
+ */
+export async function getInvestecTransactions(params = {}) {
+  const response = await apiClient.get(API_ENDPOINTS.INVESTEC_TRANSACTIONS, {
+    params: {
+      limit: params.limit ?? 100,
+      offset: params.offset ?? 0,
+      account_number: params.account_number || undefined,
+      share_name: params.share_name || undefined,
+      type: params.type || undefined,
+    },
+  });
+  return response.data;
+}
+
+/**
+ * Upload Investec transactions Excel file
+ */
+export async function uploadInvestecTransactions(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const response = await apiClient.post(API_ENDPOINTS.INVESTEC_UPLOAD, formData, {
+    headers: { 'Content-Type': null },
+  });
+  return response.data;
+}
+
+/**
+ * Upload Investec portfolio Excel file(s)
+ */
+export async function uploadInvestecPortfolio(files) {
+  const formData = new FormData();
+  if (Array.isArray(files) && files.length > 1) {
+    files.forEach((f) => formData.append('files', f));
+  } else {
+    const file = Array.isArray(files) ? files[0] : files;
+    formData.append('file', file);
+  }
+  const response = await apiClient.post(API_ENDPOINTS.INVESTEC_PORTFOLIO_UPLOAD, formData, {
+    headers: { 'Content-Type': null },
+  });
+  return response.data;
+}
+
+/**
+ * Get Investec share name mappings (share_name, company, share_code)
+ */
+export async function getInvestecMappings() {
+  const response = await apiClient.get(API_ENDPOINTS.INVESTEC_MAPPING);
+  return response.data;
+}
+
+/**
+ * Get share names that appear in transactions but are not in the mapping table
+ */
+export async function getInvestecUnmappedShareNames() {
+  const response = await apiClient.get(API_ENDPOINTS.INVESTEC_UNMAPPED_SHARE_NAMES);
+  return response.data;
+}
+
+/**
+ * Upload Investec share name mapping Excel file
+ */
+export async function uploadInvestecMapping(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  const response = await apiClient.post(API_ENDPOINTS.INVESTEC_MAPPING_UPLOAD, formData, {
+    headers: { 'Content-Type': null },
+  });
+  return response.data;
+}
+
+/**
+ * Export share codes, names and company mapping to Excel (for edit and re-upload)
+ */
+export async function getInvestecExportMapping() {
+  const response = await apiClient.get(API_ENDPOINTS.INVESTEC_EXPORT_MAPPING);
+  return response.data;
+}
+
+/**
+ * Export companies from portfolios
+ */
+export async function getInvestecExportCompanies() {
+  const response = await apiClient.get(API_ENDPOINTS.INVESTEC_EXPORT_COMPANIES);
+  return response.data;
+}
+
+/**
+ * Export share names from transactions
+ */
+export async function getInvestecExportShareNames() {
+  const response = await apiClient.get(API_ENDPOINTS.INVESTEC_EXPORT_SHARE_NAMES);
+  return response.data;
+}
+
+/**
+ * Export transactions to Excel (writes to server; returns filename for download)
+ */
+export async function getInvestecExportTransactions() {
+  const response = await apiClient.get(API_ENDPOINTS.INVESTEC_EXPORT_TRANSACTIONS);
+  return response.data;
+}
+
+/**
+ * URL to download an exported Investec Excel file
+ */
+export function getInvestecExportDownloadUrl(filename) {
+  return `${API_BASE_URL}/media/investec/exports/${filename}`;
 }

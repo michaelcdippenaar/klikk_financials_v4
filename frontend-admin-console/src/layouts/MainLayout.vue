@@ -47,6 +47,10 @@
           </q-item-section>
         </q-item>
 
+        <q-item-label header class="text-grey-8">
+          Xero
+        </q-item-label>
+
         <q-item
           clickable
           v-ripple
@@ -86,12 +90,6 @@
           </q-item-section>
         </q-item>
 
-        <q-separator spaced />
-
-        <q-item-label header class="text-grey-8">
-          Settings
-        </q-item-label>
-
         <q-item
           clickable
           v-ripple
@@ -102,6 +100,51 @@
           </q-item-section>
           <q-item-section>
             <q-item-label>Connect to Xero</q-item-label>
+          </q-item-section>
+        </q-item>
+
+        <q-separator spaced />
+
+        <q-item-label header class="text-grey-8">
+          Investec
+        </q-item-label>
+
+        <q-item
+          clickable
+          v-ripple
+          :to="{ name: 'investec-holdings' }"
+        >
+          <q-item-section avatar>
+            <q-icon name="pie_chart" />
+          </q-item-section>
+          <q-item-section>
+            <q-item-label>Holdings</q-item-label>
+          </q-item-section>
+        </q-item>
+
+        <q-item
+          clickable
+          v-ripple
+          :to="{ name: 'investec-transactions' }"
+        >
+          <q-item-section avatar>
+            <q-icon name="list_alt" />
+          </q-item-section>
+          <q-item-section>
+            <q-item-label>Transactions</q-item-label>
+          </q-item-section>
+        </q-item>
+
+        <q-item
+          clickable
+          v-ripple
+          :to="{ name: 'investec-share-codes' }"
+        >
+          <q-item-section avatar>
+            <q-icon name="code" />
+          </q-item-section>
+          <q-item-section>
+            <q-item-label>Share codes</q-item-label>
           </q-item-section>
         </q-item>
 

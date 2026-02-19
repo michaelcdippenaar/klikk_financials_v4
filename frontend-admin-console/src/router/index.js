@@ -1,5 +1,6 @@
 import { route } from 'quasar/wrappers';
 import { createRouter, createMemoryHistory, createWebHashHistory, createWebHistory } from 'vue-router';
+import { useAuthStore } from '../stores/auth';
 import routes from './routes';
 
 /*
@@ -25,7 +26,6 @@ export default route(function (/* { store, ssrContext } */) {
   // Navigation guard for protected routes
   Router.beforeEach((to, from, next) => {
     try {
-      const { useAuthStore } = require('../stores/auth');
       const authStore = useAuthStore();
 
       // Require login for protected routes

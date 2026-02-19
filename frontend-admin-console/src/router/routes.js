@@ -30,6 +30,25 @@ const routes = [
         component: () => import('pages/Comparison.vue'),
       },
       {
+        path: 'investec',
+        redirect: { name: 'investec-holdings' },
+      },
+      {
+        path: 'investec/holdings',
+        name: 'investec-holdings',
+        component: () => import('pages/InvestecHoldings.vue'),
+      },
+      {
+        path: 'investec/transactions',
+        name: 'investec-transactions',
+        component: () => import('pages/InvestecTransactions.vue'),
+      },
+      {
+        path: 'investec/share-codes',
+        name: 'investec-share-codes',
+        component: () => import('pages/InvestecShareCodes.vue'),
+      },
+      {
         path: 'xero-connect',
         name: 'xero-connect',
         component: () => import('pages/XeroConnect.vue'),
