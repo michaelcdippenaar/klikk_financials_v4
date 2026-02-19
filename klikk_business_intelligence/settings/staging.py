@@ -27,28 +27,18 @@ CORS_ALLOWED_ORIGINS = [
 ]
 CORS_ALLOW_CREDENTIALS = True
 
-# Database
-# https://docs.djangoproject.com/en/5.2/ref/settings/#databases
-
+# Database – all values read from environment variables so Docker/bare-metal both work.
+# Bare-metal default: HOST=127.0.0.1 (postgres on same host)
+# Docker default:     HOST=db        (set in docker-compose.yml via environment: DB_HOST=db)
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'klikk_financials_v4',
-        'USER': 'klikk_user',
-        'PASSWORD': 'Number55dip',
-        'HOST': '127.0.0.1',
-        'PORT': '5432',
-        # For gunicorn with multiple workers, use 0 to disable connection pooling
-        # Each worker will manage its own connections
-        'CONN_MAX_AGE': 0,  # Disable persistent connections for gunicorn workers
-        # 'OPTIONS': {
-        #     'connect_timeout': 10,
-        #     # Additional options for better connection handling
-        #     'keepalives': 1,
-        #     'keepalives_idle': 30,
-        #     'keepalives_interval': 10,
-        #     'keepalives_count': 5,
-        # }
+        'NAME': os.environ.get('DB_NAME', 'klikk_financials_v4'),
+        'USER': os.environ.get('DB_USER', 'klikk_user'),
+        'PASSWORD': os.environ.get('DB_PASSWORD', 'Number55dip'),
+        'HOST': os.environ.get('DB_HOST', '127.0.0.1'),
+        'PORT': os.environ.get('DB_PORT', '5432'),
+        'CONN_MAX_AGE': 0,
     }
 }
 

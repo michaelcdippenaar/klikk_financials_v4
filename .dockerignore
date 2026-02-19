@@ -1,0 +1,57 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.Python
+
+# Virtual envs
+.venv/
+venv/
+ENV/
+env/
+
+# Django generated
+staticfiles/
+media/
+db.sqlite3
+
+# Database dumps
+database_dumps/
+*.json.bak
+investec_fixture.json
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+.DS_Store
+
+# Tests / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docs / markdown notes
+*.md
+docs/
+documentation/
+
+# Frontend (not needed in Django container)
+frontend-admin-console/
+
+# Environment files (pass via --env-file or docker-compose env_file)
+.env
+.env.*
+
+# Credentials
+credentials/
+**/klick-financials01-*.json
+
+# Misc
+tm1_processes/
+postman_collection/
+*.xlsx
