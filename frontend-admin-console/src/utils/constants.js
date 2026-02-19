@@ -31,10 +31,25 @@ export const API_ENDPOINTS = {
   PNL_SUMMARY: '/xero/cube/pnl-summary/',
   ACCOUNT_SUMMARY: '/xero/cube/account-summary/',
   
+  // Sync
+  API_CALL_STATS: '/xero/sync/api-call-stats/',
+
   // Validation
   RECONCILE: '/xero/validation/reconcile/',
   COMPARE_PROFIT_LOSS: '/xero/validation/compare-profit-loss/',
   BALANCE_SHEET: '/xero/validation/balance-sheet/',
+
+  // Investec
+  INVESTEC_UPLOAD: '/api/investec/upload/',
+  INVESTEC_TRANSACTIONS: '/api/investec/transactions/',
+  INVESTEC_PORTFOLIO_UPLOAD: '/api/investec/portfolio/upload/',
+  INVESTEC_MAPPING: '/api/investec/mapping/',
+  INVESTEC_UNMAPPED_SHARE_NAMES: '/api/investec/mapping/unmapped-share-names/',
+  INVESTEC_MAPPING_UPLOAD: '/api/investec/mapping/upload/',
+  INVESTEC_EXPORT_MAPPING: '/api/investec/export/mapping/',
+  INVESTEC_EXPORT_COMPANIES: '/api/investec/export/companies/',
+  INVESTEC_EXPORT_SHARE_NAMES: '/api/investec/export/share-names/',
+  INVESTEC_EXPORT_TRANSACTIONS: '/api/investec/export/transactions/',
 };
 
 // Storage Keys

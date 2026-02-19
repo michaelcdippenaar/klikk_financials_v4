@@ -2,6 +2,34 @@
   <q-page class="q-pa-md">
     <div class="text-h5 q-mb-md">Process Runner</div>
 
+    <!-- API Call Stats -->
+    <q-card v-if="apiCallStats" class="q-mb-lg">
+      <q-card-section>
+        <div class="text-subtitle1 q-mb-sm">
+          <q-icon name="api" class="q-mr-sm" />
+          Xero API Calls
+          <q-badge :color="apiCallStats.total_today > 4000 ? 'negative' : 'grey-6'" class="q-ml-sm">
+            {{ apiCallStats.total_today }} today (limit ~5000/day)
+          </q-badge>
+        </div>
+        <div class="row q-col-gutter-md">
+          <div
+            v-for="(proc, key) in processApiLabels"
+            :key="key"
+            class="col-12 col-sm-6 col-md-4"
+          >
+            <div class="q-pa-sm rounded-borders bg-grey-2">
+              <div class="text-caption text-grey-7">{{ proc }}</div>
+              <div class="text-body2">
+                Last run: <strong>{{ (apiCallStats.by_process[key]?.last_run ?? '-') }}</strong>
+                · Today: <strong>{{ (apiCallStats.by_process[key]?.today ?? 0) }}</strong>
+              </div>
+            </div>
+          </div>
+        </div>
+      </q-card-section>
+    </q-card>
+
     <div v-if="!dataStore.selectedTenant" class="q-pa-lg text-center">
       <q-icon name="info" size="3em" color="grey-5" />
       <div class="text-h6 q-mt-md text-grey-7">Please select a tenant first</div>
@@ -170,13 +198,36 @@
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue';
+import { ref, reactive, onMounted, watch } from 'vue';
 import { useDataStore } from '../stores/data';
 import { useProcessStore } from '../stores/processes';
 import ProcessCard from '../components/ProcessCard.vue';
+import { getApiCallStats } from '../api/endpoints';
 
 const dataStore = useDataStore();
 const processStore = useProcessStore();
+
+const apiCallStats = ref(null);
+const processApiLabels = {
+  metadata: 'Update Metadata',
+  data: 'Sync Transactions & Journals',
+  journals: 'Process Journals',
+  'trail-balance': 'Build Trail Balance',
+  'pnl-by-tracking': 'Import P&L by Tracking',
+  reconcile: 'Reconcile Reports',
+};
+
+async function fetchApiCallStats() {
+  try {
+    const tenantId = dataStore.selectedTenant;
+    apiCallStats.value = await getApiCallStats(tenantId || undefined);
+  } catch {
+    apiCallStats.value = null;
+  }
+}
+
+onMounted(fetchApiCallStats);
+watch(() => dataStore.selectedTenant, fetchApiCallStats);
 
 const loading = reactive({
   metadata: false,
@@ -224,6 +275,7 @@ async function runMetadata() {
       tenantId: dataStore.selectedTenant,
     });
     results.metadata = result;
+    await fetchApiCallStats();
   } finally {
     loading.metadata = false;
   }
@@ -238,6 +290,7 @@ async function runDataUpdate() {
       loadAll: dataOptions.loadAll,
     });
     results.data = result;
+    await fetchApiCallStats();
   } finally {
     loading.data = false;
   }
@@ -251,6 +304,7 @@ async function runProcessJournals() {
       tenantId: dataStore.selectedTenant,
     });
     results.journals = result;
+    await fetchApiCallStats();
   } finally {
     loading.journals = false;
   }
@@ -266,6 +320,7 @@ async function runTrailBalance() {
       exclude_manual_journals: trailBalanceOptions.excludeManual,
     });
     results.trailBalance = result;
+    await fetchApiCallStats();
     // Refresh summary after trail balance is built
     await dataStore.fetchSummary();
   } finally {
@@ -283,6 +338,7 @@ async function runPnlByTracking() {
       to_date: pnlTrackingOptions.toDate || undefined,
     });
     results.pnlByTracking = result;
+    await fetchApiCallStats();
   } finally {
     loading.pnlByTracking = false;
   }
@@ -299,6 +355,7 @@ async function runReconcile() {
       tolerance: reconcileOptions.tolerance,
     });
     results.reconcile = result;
+    await fetchApiCallStats();
   } finally {
     loading.reconcile = false;
   }

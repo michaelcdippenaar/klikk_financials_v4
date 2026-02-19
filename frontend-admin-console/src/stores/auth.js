@@ -23,8 +23,9 @@ export const useAuthStore = defineStore('auth', () => {
   async function login(username, password) {
     try {
       const data = await apiLogin(username, password);
-      token.value = data.access;
-      refreshTokenValue.value = data.refresh;
+      // API returns { user, tokens: { access, refresh } }
+      token.value = data.tokens?.access ?? data.access;
+      refreshTokenValue.value = data.tokens?.refresh ?? data.refresh;
       user.value = data.user || { username };
 
       // Store in localStorage

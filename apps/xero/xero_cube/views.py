@@ -11,6 +11,7 @@ from apps.xero.xero_metadata.models import XeroAccount
 from apps.xero.xero_data.models import XeroJournals
 from apps.xero.xero_cube.models import XeroTrailBalance, XeroBalanceSheet, XeroPnlByTracking
 from apps.xero.xero_cube.services import process_xero_data, import_pnl_by_tracking
+from apps.xero.xero_sync.api_call_logging import log_xero_api_calls
 
 
 class XeroProcessDataView(APIView):
@@ -37,7 +38,9 @@ class XeroProcessDataView(APIView):
         try:
             # Use the service function for consistency with scheduled tasks
             result = process_xero_data(tenant_id, rebuild_trail_balance=rebuild_trail_balance, exclude_manual_journals=exclude_manual_journals)
-            
+            tenant = XeroTenant.objects.get(tenant_id=tenant_id)
+            log_xero_api_calls('trail-balance', 0, tenant=tenant)
+
             return Response({
                 "message": result['message'],
                 "stats": result['stats']
@@ -312,12 +315,15 @@ class ImportPnlByTrackingView(APIView):
         to_date = request.data.get('to_date')
 
         try:
+            tenant = XeroTenant.objects.get(tenant_id=tenant_id)
             result = import_pnl_by_tracking(
                 tenant_id=tenant_id,
                 from_date=from_date,
                 to_date=to_date,
                 user=request.user if request.user.is_authenticated else None,
             )
+            api_calls = result.get('stats', {}).get('api_calls', 0)
+            log_xero_api_calls('pnl-by-tracking', api_calls, tenant=tenant)
             return Response(result)
         except XeroTenant.DoesNotExist:
             return Response({"error": "Tenant not found"}, status=status.HTTP_404_NOT_FOUND)

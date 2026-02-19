@@ -1,8 +1,17 @@
 from django.contrib import admin
 from apps.xero.xero_sync.models import (
-    XeroLastUpdate, XeroTenantSchedule, XeroTaskExecutionLog, 
+    XeroLastUpdate, XeroTenantSchedule, XeroTaskExecutionLog, XeroApiCallLog,
     ProcessTree, Trigger, ProcessTreeSchedule
 )
+
+
+@admin.register(XeroApiCallLog)
+class XeroApiCallLogAdmin(admin.ModelAdmin):
+    list_display = ('process', 'tenant', 'api_calls', 'created_at')
+    list_filter = ('process', 'created_at')
+    search_fields = ('process', 'tenant__tenant_name')
+    readonly_fields = ('created_at',)
+    date_hierarchy = 'created_at'
 
 
 @admin.register(XeroLastUpdate)

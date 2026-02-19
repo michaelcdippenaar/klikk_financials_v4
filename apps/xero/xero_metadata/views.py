@@ -12,6 +12,7 @@ from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_metadata.models import XeroAccount
 from apps.xero.xero_auth.models import XeroClientCredentials
 from apps.xero.xero_metadata.services import update_metadata
+from apps.xero.xero_sync.api_call_logging import log_xero_api_calls
 
 
 @login_required
@@ -66,7 +67,11 @@ class XeroUpdateMetadataView(APIView):
             
             # Trigger metadata update
             result = update_metadata(tenant_id, user=user)
-            
+
+            # Log API calls for rate limit tracking
+            api_calls = result.get('stats', {}).get('api_calls', 0)
+            log_xero_api_calls('metadata', api_calls, tenant=tenant)
+
             if result['success']:
                 return Response({
                     "message": result['message'],

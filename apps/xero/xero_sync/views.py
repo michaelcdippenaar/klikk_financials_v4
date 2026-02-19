@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 
 from apps.xero.xero_core.models import XeroTenant
+from apps.xero.xero_sync.api_call_logging import get_api_call_stats
 from apps.xero.xero_auth.models import XeroClientCredentials
 from apps.xero.xero_sync.services import update_xero_models
 
@@ -52,3 +53,16 @@ class XeroUpdateModelsView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         except Exception as e:
             return Response({"error": f"Failed to update data: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class XeroApiCallStatsView(APIView):
+    """
+    Get Xero API call statistics for Admin Console display.
+    Query params: tenant_id (optional) - filter by tenant
+    """
+    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+
+    def get(self, request):
+        tenant_id = request.query_params.get('tenant_id')
+        stats = get_api_call_stats(tenant_id=tenant_id)
+        return Response(stats)

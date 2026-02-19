@@ -1,4 +1,5 @@
 from django.db import models
+from django.conf import settings
 import datetime
 from datetime import timezone as dt_timezone
 import logging
@@ -8,6 +9,16 @@ from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_metadata.models import XeroContacts, XeroAccount, XeroTracking
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_tracking_slot(tracking_obj, organisation, fallback_idx=None):
+    """Return 1 or 2 for tracking1/tracking2. Uses TrackingCategoryID (stable); fallback to category_slot/index."""
+    slot = organisation.get_tracking_slot(tracking_obj.tracking_category_id)
+    if slot is None and tracking_obj.category_slot:
+        slot = min(tracking_obj.category_slot, 2)
+    if slot is None and fallback_idx is not None:
+        slot = 1 if fallback_idx == 0 else 2
+    return slot
 
 
 class XeroTransactionSourceModelManager(models.Manager):
@@ -130,7 +141,7 @@ class XeroTransactionSource(models.Model):
 
 
 class XeroJournalsSourceManager(models.Manager):
-    def create_journals_from_xero(self, organisation, journal_ids=None):
+    def create_journals_from_xero(self, organisation, journal_ids=None, force_reprocess=False):
         """
         Process journals from XeroJournalsSource to XeroJournals.
         
@@ -138,28 +149,27 @@ class XeroJournalsSourceManager(models.Manager):
             organisation: The XeroTenant organisation
             journal_ids: Optional list of journal IDs to process. If None, processes all unprocessed journals.
                         This allows incremental updates to only process newly fetched journals.
+            force_reprocess: If True, process all journal sources (including already processed) to fix tracking.
         """
         from apps.xero.xero_data.models import XeroTransactionSource, XeroJournals
         from apps.xero.xero_metadata.models import XeroAccount, XeroTracking, XeroContacts
         
-        print('Creating Journals from Xero', organisation)
         # Pre-fetch all related data into dictionaries for O(1) lookup
         source_transactions_dict = {
             t.transactions_id: t for t in XeroTransactionSource.objects.filter(organisation=organisation)
         }
         
-        # Filter source journals: if journal_ids provided, only process those; otherwise process all unprocessed
-        source = XeroJournalsSource.objects.filter(organisation=organisation, processed=False)
-        if journal_ids:
-            source = source.filter(journal_id__in=journal_ids)
-            print(f"[PROCESS] Processing only newly fetched journals: {len(journal_ids)} journal IDs")
+        # Filter source journals: force_reprocess processes all; otherwise only unprocessed
+        if force_reprocess:
+            source = XeroJournalsSource.objects.filter(organisation=organisation)
+            if journal_ids:
+                source = source.filter(journal_id__in=journal_ids)
+        elif journal_ids:
+            source = XeroJournalsSource.objects.filter(organisation=organisation, processed=False, journal_id__in=journal_ids)
         else:
-            print(f"[PROCESS] Processing all unprocessed journals")
-        
-        # Debug: Count journals by type
+            source = XeroJournalsSource.objects.filter(organisation=organisation, processed=False)
         manual_count = source.filter(journal_type='manual_journal').count()
         regular_count = source.filter(journal_type='journal').count()
-        print(f"[PROCESS] Unprocessed journals: {manual_count} manual, {regular_count} regular, {source.count()} total")
         # Create accounts dict by ID for regular journals
         accounts_dict = {
             acc.account_id: acc for acc in XeroAccount.objects.filter(organisation=organisation)
@@ -183,17 +193,12 @@ class XeroJournalsSourceManager(models.Manager):
         skipped_by_status = 0
         for j_obj in source:
             j = j_obj.collection
-            # Debug: Print journal type to verify it's set correctly
-            print(f"[PROCESS] Processing journal {j_obj.journal_id}, journal_type from source: {j_obj.journal_type}")
             is_manual_journal = j_obj.journal_type == 'manual_journal'
-            if is_manual_journal:
-                print(f"[PROCESS] Detected manual journal: {j_obj.journal_id}")
-            
+
             # Skip non-active journals (VOIDED, DELETED, DRAFT)
             # Only POSTED manual journals and active regular journals should create journal entries
             journal_status = j.get('Status', '')
             if journal_status in ('VOIDED', 'DELETED', 'DRAFT'):
-                print(f"[PROCESS] Skipping {journal_status} journal {j_obj.journal_id}")
                 skipped_by_status += 1
                 journals_to_mark_processed.append(j_obj)
                 continue
@@ -217,7 +222,6 @@ class XeroJournalsSourceManager(models.Manager):
                 source_transactions_obj = source_transactions_dict.get(source_id)
 
             # Parse date field (handles both JournalDate and Date)
-            logger.info(f"Processing journal {j_obj.journal_id} (type: {j_obj.journal_type}), Date: {date_raw} (type: {type(date_raw)})")
             date = None
             
             if isinstance(date_raw, str):
@@ -263,16 +267,12 @@ class XeroJournalsSourceManager(models.Manager):
             # Process JournalLines - handle different structures for regular vs manual journals
             journal_lines = j.get('JournalLines', [])
             journal_lines_count = len(journal_lines) if journal_lines else 0
-            print(f"[PROCESS] Journal {j_obj.journal_id} ({j_obj.journal_type}) has {journal_lines_count} journal lines")
-            
             # Handle empty JournalLines array
             if not journal_lines or journal_lines_count == 0:
                 if is_manual_journal:
-                    print(f"[PROCESS] WARNING: Manual journal {j_obj.journal_id} has no JournalLines. Narration: {j.get('Narration', 'N/A')[:50]}")
-                    logger.warning(f"Manual journal {j_obj.journal_id} has no JournalLines. Full data: {j}")
+                    logger.warning("Manual journal %s has no JournalLines. Narration: %s", j_obj.journal_id, j.get('Narration', 'N/A')[:50])
                 else:
-                    print(f"[PROCESS] WARNING: Regular journal {j_obj.journal_id} has no JournalLines. Reference: {j.get('Reference', 'N/A')[:50]}")
-                    logger.warning(f"Regular journal {j_obj.journal_id} has no JournalLines. Full data: {j}")
+                    logger.warning("Regular journal %s has no JournalLines. Reference: %s", j_obj.journal_id, j.get('Reference', 'N/A')[:50])
                 # Still mark as processed to avoid reprocessing empty journals
                 journals_to_mark_processed.append(j_obj)
                 continue
@@ -280,15 +280,12 @@ class XeroJournalsSourceManager(models.Manager):
             for line_index, jl in enumerate(journal_lines):
                 if is_manual_journal:
                     # Manual journals: Generate line ID, use AccountCode, LineAmount
-                    print(f"[PROCESS] Processing manual journal line {line_index} for journal {j_obj.journal_id}")
                     line_id = f"{j_obj.journal_id}_{line_index}"  # Generate line ID
                     account_code = jl.get('AccountCode')
-                    print(f"[PROCESS] Manual journal line {line_index}: AccountCode={account_code}, LineAmount={jl.get('LineAmount')}, Description={jl.get('Description', '')[:50]}")
                     
                     if not account_code:
                         error_msg = f"Skipping manual journal line {line_index}: No AccountCode found. Line data: {jl}"
                         logger.warning(error_msg)
-                        print(f"[PROCESS] ERROR: {error_msg}")
                         continue
                     
                     # Look up account by code instead of ID
@@ -298,10 +295,7 @@ class XeroJournalsSourceManager(models.Manager):
                         available_codes = list(accounts_by_code_dict.keys())[:10]  # Show first 10 for debugging
                         error_msg = f"Skipping manual journal line {line_index}: Account code '{account_code}' not found. Available codes (sample): {available_codes}"
                         logger.warning(error_msg)
-                        print(f"[PROCESS] ERROR: {error_msg}")
                         continue
-                    
-                    print(f"[PROCESS] Found account for code '{account_code}': {account_instance.name} (ID: {account_instance.account_id})")
                     
                     amount = jl.get('LineAmount', 0)  # Manual journals use "LineAmount"
                     tax_amount = jl.get('TaxAmount', 0)
@@ -309,7 +303,6 @@ class XeroJournalsSourceManager(models.Manager):
                     
                     # Manual journals use "Tracking" array (different structure)
                     tracking_data = jl.get('Tracking', [])
-                    print(f"[PROCESS] Manual journal line {line_index}: amount={amount}, tax_amount={tax_amount}, tracking_count={len(tracking_data)}")
                 else:
                     # Regular journals: Use JournalLineID, AccountID, NetAmount
                     line_id = jl.get('JournalLineID')
@@ -360,28 +353,21 @@ class XeroJournalsSourceManager(models.Manager):
                 }
                 journal_data_list.append(journal_entry)
                 
-                if is_manual_journal:
-                    print(f"[PROCESS] Added manual journal line to list: line_id={line_id}, journal_type={journal_entry['journal_type']}, amount={amount}")
                 
-                # Process tracking categories/tracking (different structures)
-                index = 1
-                for t in tracking_data:
+                # Process tracking categories/tracking - use category_slot from Xero API order
+                for idx, t in enumerate(tracking_data):
                     if is_manual_journal:
-                        # Manual journals: Tracking structure may be different
-                        # Check if it's a dict with TrackingOptionID or similar
                         tracking_option_id = t.get('TrackingOptionID') or t.get('OptionID') or t.get('ID')
                     else:
-                        # Regular journals: Use TrackingOptionID
                         tracking_option_id = t.get('TrackingOptionID')
-                    
                     if tracking_option_id:
                         tracking_obj = trackings_dict.get(tracking_option_id)
                         if tracking_obj:
-                            if index == 1:
+                            slot = _resolve_tracking_slot(tracking_obj, organisation, idx)
+                            if slot == 1:
                                 journal_data_list[-1]['tracking1_id'] = tracking_obj.id
-                            elif index == 2:
+                            elif slot == 2:
                                 journal_data_list[-1]['tracking2_id'] = tracking_obj.id
-                    index += 1
                 
                 # Inherit tracking from transaction source if journal line has no tracking
                 # This handles cases where Xero's Journals API doesn't carry tracking from
@@ -396,53 +382,43 @@ class XeroJournalsSourceManager(models.Manager):
                         for txn_line in txn_line_items:
                             txn_tracking = txn_line.get('Tracking', [])
                             if txn_tracking and txn_line.get('AccountCode') == acct_code:
-                                # Found matching line with tracking
-                                t_index = 1
+                                # Found matching line with tracking - use category_slot from API order
+                                t_idx = 0
                                 for tt in txn_tracking:
                                     option_name = tt.get('Option', '')
-                                    category_id = tt.get('TrackingCategoryID', '')
-                                    # Look up tracking by option name + category
                                     for tk_id, tk_obj in trackings_dict.items():
                                         if tk_obj.option == option_name:
-                                            if t_index == 1:
+                                            slot = _resolve_tracking_slot(tk_obj, organisation, t_idx)
+                                            if slot == 1:
                                                 journal_data_list[-1]['tracking1_id'] = tk_obj.id
-                                            elif t_index == 2:
+                                            elif slot == 2:
                                                 journal_data_list[-1]['tracking2_id'] = tk_obj.id
                                             break
-                                    t_index += 1
-                                break  # Use first matching line
+                                    t_idx += 1
+                                break  # Use first matching line - exit txn_line loop
                         
                         # If still no tracking and there's only one line item with tracking, use it
                         if journal_data_list[-1]['tracking1_id'] is None:
                             for txn_line in txn_line_items:
                                 txn_tracking = txn_line.get('Tracking', [])
                                 if txn_tracking:
-                                    t_index = 1
+                                    t_idx = 0
                                     for tt in txn_tracking:
                                         option_name = tt.get('Option', '')
                                         for tk_id, tk_obj in trackings_dict.items():
                                             if tk_obj.option == option_name:
-                                                if t_index == 1:
+                                                slot = _resolve_tracking_slot(tk_obj, organisation, t_idx)
+                                                if slot == 1:
                                                     journal_data_list[-1]['tracking1_id'] = tk_obj.id
-                                                elif t_index == 2:
+                                                elif slot == 2:
                                                     journal_data_list[-1]['tracking2_id'] = tk_obj.id
                                                 break
-                                        t_index += 1
+                                        t_idx += 1
                                     break  # Use first line with tracking
                     except Exception as e:
                         logger.warning(f"Error inheriting tracking from transaction source: {e}")
             
-            # Debug: Print summary for this journal
-            if is_manual_journal:
-                lines_added = sum(1 for entry in journal_data_list if entry.get('journal_source') == j_obj)
-                print(f"[PROCESS] Manual journal {j_obj.journal_id}: Added {lines_added} lines to processing list (out of {journal_lines_count} total lines)")
-            
             journals_to_mark_processed.append(j_obj)
-
-        # Debug: Print total summary before processing
-        manual_journal_lines = sum(1 for entry in journal_data_list if entry.get('journal_type') == 'manual_journal')
-        regular_journal_lines = sum(1 for entry in journal_data_list if entry.get('journal_type') == 'journal')
-        print(f"[PROCESS] Total journal lines to process: {manual_journal_lines} manual, {regular_journal_lines} regular, {len(journal_data_list)} total")
 
         # Fetch existing journals in one query
         existing_journals = {
@@ -458,10 +434,6 @@ class XeroJournalsSourceManager(models.Manager):
         for journal_data in journal_data_list:
             line_id = journal_data['line_id']
             journal_type_from_data = journal_data['journal_type']
-            # Debug: Print journal type being set
-            if journal_type_from_data == 'manual_journal':
-                print(f"[PROCESS] Setting journal_type='manual_journal' for line_id={line_id}")
-            
             if line_id in existing_journals:
                 # Update existing
                 existing = existing_journals[line_id]
@@ -476,11 +448,10 @@ class XeroJournalsSourceManager(models.Manager):
                 existing.transaction_source = journal_data['transaction_source']
                 existing.journal_type = journal_type_from_data  # Update journal type
                 if existing.journal_type != journal_type_from_data:
-                    print(f"[PROCESS] WARNING: journal_type mismatch for {line_id}. Existing: {existing.journal_type}, Setting: {journal_type_from_data}")
-                if journal_data['tracking1_id']:
-                    existing.tracking1_id = journal_data['tracking1_id']
-                if journal_data['tracking2_id']:
-                    existing.tracking2_id = journal_data['tracking2_id']
+                    logger.warning("[PROCESS] journal_type mismatch for %s. Existing: %s, Setting: %s", line_id, existing.journal_type, journal_type_from_data)
+                # Always set both to fix wrongly-assigned tracking (e.g. category2 in tracking1)
+                existing.tracking1_id = journal_data['tracking1_id']
+                existing.tracking2_id = journal_data['tracking2_id']
                 if journal_data.get('contact') is not None:
                     existing.contact = journal_data['contact']
                 to_update.append(existing)
@@ -500,8 +471,6 @@ class XeroJournalsSourceManager(models.Manager):
                     journal_source=journal_data['journal_source'],
                     transaction_source=journal_data['transaction_source'],
                 )
-                if journal_type_from_data == 'manual_journal':
-                    print(f"[PROCESS] Creating new journal with journal_type='manual_journal' for line_id={line_id}")
                 if journal_data['tracking1_id']:
                     journal_obj.tracking1_id = journal_data['tracking1_id']
                 if journal_data['tracking2_id']:
@@ -509,18 +478,10 @@ class XeroJournalsSourceManager(models.Manager):
                 if journal_data.get('contact'):
                     journal_obj.contact = journal_data['contact']
                 to_create.append(journal_obj)
-                if journal_type_from_data == 'manual_journal':
-                    print(f"[PROCESS] Creating new manual journal with journal_type='manual_journal' for line_id={line_id}, amount={journal_data['amount']}")
-        
-        # Debug: Print counts before bulk operations
-        manual_to_create = sum(1 for j in to_create if j.journal_type == 'manual_journal')
-        manual_to_update = sum(1 for j in to_update if j.journal_type == 'manual_journal')
-        print(f"[PROCESS] Bulk operations: {manual_to_create} manual journals to create, {manual_to_update} manual journals to update")
-        print(f"[PROCESS] Bulk operations: {len(to_create)} total to create, {len(to_update)} total to update")
-        
+
+        # Bulk operations
         # Bulk create and update
         if to_create:
-            print(f"[PROCESS] Bulk creating {len(to_create)} journal entries...")
             try:
                 # Batch bulk_create to avoid database locks and timeouts with large datasets
                 batch_size = 5000
@@ -529,16 +490,11 @@ class XeroJournalsSourceManager(models.Manager):
                     batch = to_create[i:i + batch_size]
                     created = XeroJournals.objects.bulk_create(batch, ignore_conflicts=True)
                     total_created += len(created)
-                    print(f"[PROCESS] Bulk created batch {i // batch_size + 1}: {len(created)} entries (total: {total_created}/{len(to_create)})")
-                
-                print(f"[PROCESS] Successfully bulk created {total_created} journal entries")
             except Exception as e:
-                print(f"[PROCESS] ERROR during bulk_create: {str(e)}")
-                logger.error(f"Failed to bulk create journals: {str(e)}", exc_info=True)
+                logger.error("Failed to bulk create journals: %s", str(e), exc_info=True)
                 raise
         
         if to_update:
-            print(f"[PROCESS] Bulk updating {len(to_update)} journal entries...")
             try:
                 # Batch bulk_update to avoid database locks and timeouts with large datasets
                 batch_size = 5000
@@ -551,29 +507,29 @@ class XeroJournalsSourceManager(models.Manager):
                         'contact', 'tracking1', 'tracking2'
                     ])
                     total_updated += len(batch)
-                    print(f"[PROCESS] Bulk updated batch {i // batch_size + 1}: {len(batch)} entries (total: {total_updated}/{len(to_update)})")
-                
-                print(f"[PROCESS] Successfully bulk updated {total_updated} journal entries")
             except Exception as e:
-                print(f"[PROCESS] ERROR during bulk_update: {str(e)}")
-                logger.error(f"Failed to bulk update journals: {str(e)}", exc_info=True)
+                logger.error("Failed to bulk update journals: %s", str(e), exc_info=True)
                 raise
         
         # Mark journals as processed in bulk
         if journals_to_mark_processed:
-            manual_processed = sum(1 for j in journals_to_mark_processed if j.journal_type == 'manual_journal')
-            print(f"[PROCESS] Marking {manual_processed} manual journals and {len(journals_to_mark_processed) - manual_processed} regular journals as processed")
             XeroJournalsSource.objects.filter(
                 id__in=[j.id for j in journals_to_mark_processed]
             ).update(processed=True)
-            print(f"[PROCESS] Successfully marked {len(journals_to_mark_processed)} journals as processed")
 
         # Final summary
         result_queryset = XeroJournals.objects.filter(organisation=organisation, journal_id__in=all_journal_line_ids)
-        manual_in_result = result_queryset.filter(journal_type='manual_journal').count()
-        regular_in_result = result_queryset.filter(journal_type='journal').count()
-        print(f"[PROCESS] Final result: {manual_in_result} manual journals, {regular_in_result} regular journals in database")
-        
+
+        if settings.DEBUG:
+            manual_in = result_queryset.filter(journal_type='manual_journal').count()
+            regular_in = result_queryset.filter(journal_type='journal').count()
+            print("[Sync] Manual journals: %d created, %d updated | Regular journals: %d created, %d updated" % (
+                sum(1 for j in to_create if j.journal_type == 'manual_journal'),
+                sum(1 for j in to_update if j.journal_type == 'manual_journal'),
+                sum(1 for j in to_create if j.journal_type == 'journal'),
+                sum(1 for j in to_update if j.journal_type == 'journal'),
+            ))
+
         return result_queryset
 
 

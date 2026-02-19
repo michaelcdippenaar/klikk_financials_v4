@@ -16,6 +16,8 @@ Usage:
 import time
 import logging
 
+from django.conf import settings
+
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_core.services import XeroApiClient, XeroAccountingApi
 from apps.xero.xero_auth.models import XeroClientCredentials, XeroTenantToken
@@ -117,7 +119,8 @@ def update_xero_transactions(tenant_id, user=None, load_all=False):
     
     try:
         api_client = XeroApiClient(user, tenant_id=tenant_id)
-        xero_api = XeroAccountingApi(api_client, tenant_id)
+        touched_transaction_ids = set()
+        xero_api = XeroAccountingApi(api_client, tenant_id, touched_transaction_ids=touched_transaction_ids)
         stats['api_calls'] += 1
         
         # Transaction calls (sequential). Manual Journals only; deprecated Journals API not used.
@@ -131,34 +134,39 @@ def update_xero_transactions(tenant_id, user=None, load_all=False):
             ('manual_journals', lambda: xero_api.manual_journals(load_all=load_all).get()),
         ]
         
-        print(f"[TRANSACTION UPDATE] Starting transaction updates for tenant {tenant_id}")
-        
         for name, call in transaction_calls:
             try:
-                print(f"[TRANSACTION UPDATE] Fetching {name}...")
                 call()
                 stats[f'{name}_updated'] = 1
                 stats['api_calls'] += 1
-                print(f"[TRANSACTION UPDATE] ✓ {name} finished")
-                logger.info(f"Successfully updated {name} for tenant {tenant_id}")
             except Exception as e:
                 error_msg = f"Failed to update {name}: {str(e)}"
-                print(f"[TRANSACTION UPDATE] ✗ {name} failed: {str(e)}")
-                logger.error(error_msg)
+                logger.error("Failed to update %s: %s", name, str(e))
                 errors.append(error_msg)
         
         duration = time.time() - start_time
         stats['duration_seconds'] = duration
         stats['total_errors'] = len(errors)
+
+        if settings.DEBUG:
+            ok = [n for n, _ in transaction_calls if stats.get(f'{n}_updated')]
+            fail = [n for n, _ in transaction_calls if not stats.get(f'{n}_updated')]
+            touched = len(touched_transaction_ids) if touched_transaction_ids else 0
+            print(
+                "[Sync] Fetched: %s (%.2fs) | touched_transaction_ids=%d | errors=%d"
+                % (', '.join(ok), duration, touched, len(errors))
+            )
+            if fail:
+                print("[Sync] Failed: %s" % ', '.join(fail))
         
-        print(f"[TRANSACTION UPDATE] All updates completed in {duration:.2f} seconds. Errors: {len(errors)}")
-        
-        return {
+        result = {
             'success': len(errors) == 0,
             'message': f"Transaction data updated for tenant {tenant_id}",
             'errors': errors,
             'stats': stats
         }
+        result['touched_transaction_ids'] = touched_transaction_ids
+        return result
         
     except ValueError as e:
         duration = time.time() - start_time
@@ -186,8 +194,6 @@ def update_financial_data(tenant_id, user=None, process_to_journals=True, load_a
     Returns:
         dict: Result with status, message, errors, and stats
     """
-    print(f"[FINANCIAL DATA] Updating for tenant {tenant_id}")
-    
     # Step 1: Fetch all transactions + manual journals
     result = update_xero_transactions(tenant_id, user, load_all=load_all)
     
@@ -198,11 +204,8 @@ def update_financial_data(tenant_id, user=None, process_to_journals=True, load_a
             from apps.xero.xero_data.models import XeroJournalsSource
             
             tenant = XeroTenant.objects.get(tenant_id=tenant_id)
-            print(f"[FINANCIAL DATA] Processing transactions to journal entries...")
-            
-            process_stats = process_transactions_to_journals(tenant)
-            
-            print(f"[FINANCIAL DATA] Processing manual journal sources to journal entries...")
+            touched_ids = result.get('touched_transaction_ids') or set()
+            process_stats = process_transactions_to_journals(tenant, touched_transaction_ids=touched_ids)
             XeroJournalsSource.objects.create_journals_from_xero(tenant)
             
             result['stats']['journal_entries_created'] = process_stats.get('journal_entries_created', 0)
@@ -212,7 +215,6 @@ def update_financial_data(tenant_id, user=None, process_to_journals=True, load_a
                 result['errors'].extend(process_stats['errors'])
                 result['success'] = False
             
-            print(f"[FINANCIAL DATA] Processing complete: {process_stats.get('journal_entries_created', 0)} entries created")
         except Exception as e:
             error_msg = f"Failed to process transactions to journals: {str(e)}"
             logger.error(error_msg, exc_info=True)
@@ -257,7 +259,6 @@ def update_and_consolidate(tenant_id, user=None):
     }
     
     # Step 1: Update financial data
-    print(f"[CONSOLIDATE] Step 1: Fetching financial data for {tenant.tenant_name}")
     try:
         update_result = update_financial_data(tenant_id, user)
         result['stats']['fetch'] = update_result.get('stats', {})
@@ -271,7 +272,6 @@ def update_and_consolidate(tenant_id, user=None):
         return result
     
     # Step 2: Consolidate to trail balance
-    print(f"[CONSOLIDATE] Step 2: Consolidating to trail balance")
     try:
         # Get aggregated journal data
         journals = XeroJournals.objects.get_account_balances(tenant)
@@ -280,7 +280,8 @@ def update_and_consolidate(tenant_id, user=None):
         tb_result = XeroTrailBalance.objects.consolidate_journals(tenant, journals)
         
         result['stats']['trail_balance_records'] = tb_result.count()
-        print(f"[CONSOLIDATE] Created {tb_result.count()} trail balance records")
+        if settings.DEBUG:
+            print("[Sync] Consolidate: %d trail balance records" % tb_result.count())
     except Exception as e:
         error_msg = f"Failed to consolidate trail balance: {str(e)}"
         logger.error(error_msg, exc_info=True)
@@ -291,6 +292,7 @@ def update_and_consolidate(tenant_id, user=None):
     result['stats']['total_duration_seconds'] = duration
     result['success'] = len(result['errors']) == 0
     
-    print(f"[CONSOLIDATE] Complete in {duration:.2f}s. Success: {result['success']}")
+    if settings.DEBUG:
+        print("[Sync] Consolidate complete in %.2fs. Success: %s" % (duration, result['success']))
     
     return result

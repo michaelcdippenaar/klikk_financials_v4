@@ -16,13 +16,20 @@ from apps.xero.xero_cube.models import XeroTrailBalance, XeroBalanceSheet
 logger = logging.getLogger(__name__)
 
 
-def process_journals(tenant_id):
-    """Process journals from source."""
+def process_journals(tenant_id, force_reprocess=False):
+    """Process journals from source.
+    
+    Args:
+        tenant_id: Xero tenant ID
+        force_reprocess: If True, re-process all journal sources (including already processed)
+                        to fix tracking assignment. Use when rebuilding trail balance after
+                        metadata/tracking slot changes.
+    """
     print('[PROCESS JOURNALS] Start Processing Journals from XeroJournalsSource')
     logger.info(f'Start Processing Journals for tenant {tenant_id}')
     organisation = XeroTenant.objects.get(tenant_id=tenant_id)
     from apps.xero.xero_data.models import XeroJournalsSource
-    result = XeroJournalsSource.objects.create_journals_from_xero(organisation)
+    result = XeroJournalsSource.objects.create_journals_from_xero(organisation, force_reprocess=force_reprocess)
     print(f'[PROCESS JOURNALS] Journals processing complete')
     logger.info(f'Journals processing complete for tenant {tenant_id}')
 
@@ -383,11 +390,21 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
     
     try:
         # Step 1: Process journals from XeroJournalsSource to XeroJournals
+        # When rebuilding trail balance, force reprocess to fix tracking assignment
         logger.info(f'Start Processing Journals for tenant {tenant_id}')
         print(f"[PROCESS] Starting journal processing for tenant {tenant_id}")
-        process_journals(tenant_id)
+        process_journals(tenant_id, force_reprocess=rebuild_trail_balance)
         stats['journals_processed'] = True
         print(f"[PROCESS] ✓ Journals processed")
+
+        # Step 1b: When rebuilding, also reprocess transaction-based journals
+        # (invoices, bank transactions, etc.) so tracking slot fixes take effect.
+        if rebuild_trail_balance:
+            from apps.xero.xero_data.transaction_processor import process_transactions_to_journals
+            print(f"[PROCESS] REBUILD mode: reprocessing transaction-based journals (invoices, bank txns, etc.)")
+            txn_stats = process_transactions_to_journals(tenant)
+            print(f"[PROCESS] ✓ Transaction journals reprocessed: {txn_stats.get('journal_entries_created', 0)} created")
+            stats['transaction_journals_reprocessed'] = True
         logger.info(f'Journals processed for tenant {tenant_id}')
         
         # Step 2: Create trail balance from processed journals

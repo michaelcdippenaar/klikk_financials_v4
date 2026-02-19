@@ -94,8 +94,9 @@ class XeroTrailBalanceManager(DataFrameManager):
                 tracking2 = trackings_dict.get(data['tracking2'])
 
             date = datetime.datetime(data['year'], data['month'], 1)
-            fin_year = fiscal_year_to_financial_year(data['year'], data['month'], 6)
-            fin_period = fiscal_month_to_financial_period(data['month'], 6)
+            fiscal_start = organisation.get_fiscal_year_start_month()
+            fin_year = fiscal_year_to_financial_year(data['year'], data['month'], fiscal_start)
+            fin_period = fiscal_month_to_financial_period(data['month'], fiscal_start)
             
             if data['amount'] != 0:
                 lst.append(self.model(

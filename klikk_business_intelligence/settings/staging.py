@@ -16,7 +16,16 @@ DEBUG = False
 
 # Update with your staging server domain
 # Include: IP address, hostname, domain name (if applicable), localhost, and 127.0.0.1
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,192.168.1.235,192.168.1.236').split(',')
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,192.168.1.235,102.135.240.222').split(',')
+
+# CORS - allow the staging server to serve the frontend
+CORS_ALLOWED_ORIGINS = [
+    'http://102.135.240.222',
+    'http://102.135.240.222:9000',
+    'http://localhost:9000',
+    'http://127.0.0.1:9000',
+]
+CORS_ALLOW_CREDENTIALS = True
 
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases

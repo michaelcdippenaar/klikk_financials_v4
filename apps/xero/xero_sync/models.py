@@ -62,6 +62,7 @@ class XeroLastUpdate(models.Model):
         ('profit_loss', 'Profit & Loss'),
         ('bank_transactions', 'Bank Transactions'),
         ('invoices', 'Invoices'),
+        ('payments', 'Payments'),
         ('credit_notes', 'Credit Notes'),
         ('prepayments', 'Prepayments'),
         ('overpayments', 'Overpayments'),
@@ -156,6 +157,35 @@ class XeroTenantSchedule(models.Model):
         # Process doesn't have a separate schedule - it runs immediately after update
         # So we don't set next_process_run anymore
         self.save()
+
+
+class XeroApiCallLog(models.Model):
+    """
+    Log Xero API call counts per process run.
+    Used to track usage against Xero's rate limits and display in Admin Console.
+    """
+    PROCESS_CHOICES = [
+        ('metadata', 'Update Metadata'),
+        ('data', 'Sync Transactions & Journals'),
+        ('journals', 'Process Journals'),
+        ('trail-balance', 'Build Trail Balance'),
+        ('pnl-by-tracking', 'Import P&L by Tracking'),
+        ('reconcile', 'Reconcile Reports'),
+    ]
+
+    process = models.CharField(max_length=50, choices=PROCESS_CHOICES)
+    tenant = models.ForeignKey(
+        XeroTenant, on_delete=models.CASCADE, related_name='api_call_logs', null=True, blank=True
+    )
+    api_calls = models.IntegerField(default=0, help_text="Number of Xero API calls made in this run")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['process', 'created_at'], name='api_call_process_date_idx'),
+            models.Index(fields=['tenant', 'created_at'], name='api_call_tenant_date_idx'),
+        ]
 
 
 class XeroTaskExecutionLog(models.Model):
