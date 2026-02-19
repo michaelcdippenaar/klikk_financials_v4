@@ -16,14 +16,20 @@ DEBUG = False
 
 # Update with your staging server domain
 # Include: IP address, hostname, domain name (if applicable), localhost, and 127.0.0.1
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,192.168.1.235,102.135.240.222').split(',')
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,192.168.1.235,102.135.240.222,www.klikk.co.za,klikk.co.za').split(',')
 
-# CORS - allow the staging server to serve the frontend
+# CORS - allow the staging server to serve the frontend (HTTP and HTTPS)
 CORS_ALLOWED_ORIGINS = [
+    'https://www.klikk.co.za',
+    'https://klikk.co.za',
     'http://102.135.240.222',
+    'https://102.135.240.222',
     'http://102.135.240.222:9000',
+    'https://102.135.240.222:9000',
     'http://localhost:9000',
+    'https://localhost:9000',
     'http://127.0.0.1:9000',
+    'https://127.0.0.1:9000',
 ]
 CORS_ALLOW_CREDENTIALS = True
 
@@ -63,10 +69,11 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedStaticFilesStorage'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
-# Security settings for staging
-SECURE_SSL_REDIRECT = False  # Set to True if using HTTPS
-SESSION_COOKIE_SECURE = False  # Set to True if using HTTPS
-CSRF_COOKIE_SECURE = False  # Set to True if using HTTPS
+# Security settings for staging (HTTPS behind nginx)
+SECURE_SSL_REDIRECT = True   # Redirect HTTP to HTTPS
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')  # Trust nginx
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
 
 # Xero Scheduler Configuration
 XERO_SCHEDULER_ENABLED = True  # Enabled for staging
