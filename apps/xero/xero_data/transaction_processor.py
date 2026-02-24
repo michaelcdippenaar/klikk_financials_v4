@@ -259,7 +259,7 @@ class TransactionProcessor:
     
     def _create_journal_entry(self, transaction_source, account, amount, date, 
                               description='', reference='', tracking1_id=None, 
-                              tracking2_id=None, journal_type='transaction'):
+                              tracking2_id=None, journal_type='transaction', tax_amount=None):
         """
         Create a journal entry dict for later bulk creation.
         
@@ -273,6 +273,7 @@ class TransactionProcessor:
             tracking1_id: First tracking category DB ID
             tracking2_id: Second tracking category DB ID
             journal_type: Type of journal entry
+            tax_amount: Optional tax amount for this line (default 0)
         
         Returns:
             dict: Journal entry data for bulk creation
@@ -301,7 +302,7 @@ class TransactionProcessor:
             'description': description[:500] if description else '',
             'reference': reference[:500] if reference else '',
             'amount': amount,
-            'tax_amount': Decimal('0'),  # Tax handled separately
+            'tax_amount': round_amount(tax_amount) if tax_amount is not None else Decimal('0'),
             'tracking1_id': tracking1_id,
             'tracking2_id': tracking2_id,
         }
@@ -383,7 +384,8 @@ class TransactionProcessor:
                 reference=reference,
                 tracking1_id=tracking1_id,
                 tracking2_id=tracking2_id,
-                journal_type='transaction'
+                journal_type='transaction',
+                tax_amount=tax_amount,
             )
             if entry:
                 entries.append(entry)
@@ -409,7 +411,8 @@ class TransactionProcessor:
                     date=date,
                     description=f"Tax - {reference}",
                     reference=reference,
-                    journal_type='transaction'
+                    journal_type='transaction',
+                    tax_amount=abs(total_tax),
                 )
                 if entry:
                     entries.append(entry)
@@ -526,7 +529,8 @@ class TransactionProcessor:
                 reference=reference,
                 tracking1_id=tracking1_id,
                 tracking2_id=tracking2_id,
-                journal_type='transaction'
+                journal_type='transaction',
+                tax_amount=tax_amount,
             )
             if entry:
                 entries.append(entry)
@@ -552,7 +556,8 @@ class TransactionProcessor:
                     date=date,
                     description=f"Tax - {reference}",
                     reference=reference,
-                    journal_type='transaction'
+                    journal_type='transaction',
+                    tax_amount=abs(total_tax),
                 )
                 if entry:
                     entries.append(entry)
@@ -745,7 +750,8 @@ class TransactionProcessor:
                 reference=reference,
                 tracking1_id=tracking1_id,
                 tracking2_id=tracking2_id,
-                journal_type='transaction'
+                journal_type='transaction',
+                tax_amount=tax_amount,
             )
             if entry:
                 entries.append(entry)
@@ -772,7 +778,8 @@ class TransactionProcessor:
                     date=date,
                     description=f"Tax - Credit Note {reference}",
                     reference=reference,
-                    journal_type='transaction'
+                    journal_type='transaction',
+                    tax_amount=abs(total_tax),
                 )
                 if entry:
                     entries.append(entry)

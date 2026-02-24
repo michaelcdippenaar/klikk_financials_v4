@@ -16,9 +16,16 @@ DEBUG = False
 
 # Update with your staging server domain
 # Include: IP address, hostname, domain name (if applicable), localhost, and 127.0.0.1
-ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1,192.168.1.235,102.135.240.222,www.klikk.co.za,klikk.co.za,paw.klikk.co.za').split(',')
+# Include host:port for direct access (e.g. http://192.168.1.235:8001/admin/)
+_base = os.environ.get(
+    'ALLOWED_HOSTS',
+    'localhost,127.0.0.1,192.168.1.235,102.135.240.222,www.klikk.co.za,klikk.co.za,paw.klikk.co.za'
+).split(',')
+_extra = ['192.168.1.235', '127.0.0.1:8001', '192.168.1.235:8001']
+ALLOWED_HOSTS = [h.strip() for h in _base if h.strip()] + [h for h in _extra if h not in _base]
 
 # CORS - allow the staging server to serve the frontend (HTTP and HTTPS)
+# :8080 = portal container direct; :9000 = legacy
 CORS_ALLOWED_ORIGINS = [
     'https://www.klikk.co.za',
     'https://klikk.co.za',
@@ -27,10 +34,20 @@ CORS_ALLOWED_ORIGINS = [
     'https://102.135.240.222',
     'http://102.135.240.222:9000',
     'https://102.135.240.222:9000',
+    'http://102.135.240.222:8080',
+    'https://102.135.240.222:8080',
+    'http://192.168.1.235',
+    'https://192.168.1.235',
+    'http://192.168.1.235:8080',
+    'https://192.168.1.235:8080',
     'http://localhost:9000',
     'https://localhost:9000',
+    'http://localhost:8080',
+    'https://localhost:8080',
     'http://127.0.0.1:9000',
     'https://127.0.0.1:9000',
+    'http://127.0.0.1:8080',
+    'https://127.0.0.1:8080',
 ]
 CORS_ALLOW_CREDENTIALS = True
 
@@ -73,12 +90,28 @@ MEDIA_ROOT = BASE_DIR / 'media'
 # Security settings for staging (HTTPS via nginx)
 SECURE_SSL_REDIRECT = False  # nginx handles HTTP→HTTPS redirect
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-SESSION_COOKIE_SECURE = True
-CSRF_COOKIE_SECURE = True
+# Allow cookies over HTTP so admin works at http://192.168.1.235:8001/admin/
+SESSION_COOKIE_SECURE = False
+CSRF_COOKIE_SECURE = False
 CSRF_TRUSTED_ORIGINS = [
     'https://www.klikk.co.za',
     'https://klikk.co.za',
     'https://paw.klikk.co.za',
+    'http://192.168.1.235',
+    'https://192.168.1.235',
+    'http://192.168.1.235:8001',
+    'https://192.168.1.235:8001',
+    'http://192.168.1.235:8080',
+    'https://192.168.1.235:8080',
+    'http://102.135.240.222',
+    'https://102.135.240.222',
+    'http://102.135.240.222:8080',
+    'https://102.135.240.222:8080',
+    'http://localhost:8080',
+    'https://localhost:8080',
+    'http://127.0.0.1:8001',
+    'http://127.0.0.1:8080',
+    'https://127.0.0.1:8080',
 ]
 
 # Xero Scheduler Configuration
