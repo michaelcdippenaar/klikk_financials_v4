@@ -393,6 +393,16 @@ class TransactionProcessor:
             total_amount += net_amount
             total_tax += tax_amount
         
+        # Fallback: Xero API sometimes omits TaxAmount on LineItems but provides invoice-level TotalTax
+        if total_tax == Decimal('0'):
+            invoice_total_tax = round_amount(invoice.get('TotalTax', 0))
+            if invoice_total_tax != Decimal('0'):
+                total_tax = invoice_total_tax
+                # Allocate total_tax to revenue/expense entries proportionally by net amount
+                if total_amount > 0 and entries:
+                    for e in entries:
+                        e['tax_amount'] = round_amount(total_tax * (abs(e['amount']) / total_amount))
+        
         # Add tax entry if there's tax
         if total_tax != Decimal('0'):
             tax_account = self._get_tax_account(invoice_type)
@@ -537,6 +547,15 @@ class TransactionProcessor:
             
             total_amount += net_amount
             total_tax += tax_amount
+        
+        # Fallback: use bank transaction-level TotalTax when line-level TaxAmount is missing
+        if total_tax == Decimal('0'):
+            txn_total_tax = round_amount(bank_txn.get('TotalTax', 0))
+            if txn_total_tax != Decimal('0'):
+                total_tax = txn_total_tax
+                if total_amount > 0 and entries:
+                    for e in entries:
+                        e['tax_amount'] = round_amount(total_tax * (abs(e['amount']) / total_amount))
         
         # Add tax entry if there's tax
         if total_tax != Decimal('0'):
@@ -758,6 +777,15 @@ class TransactionProcessor:
             
             total_amount += net_amount
             total_tax += tax_amount
+        
+        # Fallback: use credit note-level TotalTax when line-level TaxAmount is missing
+        if total_tax == Decimal('0'):
+            cn_total_tax = round_amount(credit_note.get('TotalTax', 0))
+            if cn_total_tax != Decimal('0'):
+                total_tax = cn_total_tax
+                if total_amount > 0 and entries:
+                    for e in entries:
+                        e['tax_amount'] = round_amount(total_tax * (abs(e['amount']) / total_amount))
         
         # Add tax entry if there's tax (opposite of invoice)
         if total_tax != Decimal('0'):
