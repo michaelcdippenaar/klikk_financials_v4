@@ -38,6 +38,7 @@ def run_pipeline(
         tm1_processes: list of {name, parameters} dicts. If None, loaded from DB.
     """
     results = []
+    touched_transaction_ids = None
 
     # Step 1 - Update Metadata (accounts, contacts, tracking categories)
     step = {'step': 'update_metadata', 'success': False}
@@ -53,12 +54,13 @@ def run_pipeline(
     step['elapsed_s'] = round(time.time() - t0, 1)
     results.append(step)
 
-    # Step 2 - Update Postgres
+    # Step 2 - Update Postgres (capture touched_transaction_ids for incremental processing)
     step = {'step': 'update_postgres', 'success': False}
     t0 = time.time()
     try:
         from apps.xero.xero_data.services import update_financial_data
-        update_financial_data(tenant_id, load_all=load_all)
+        sync_result = update_financial_data(tenant_id, load_all=load_all)
+        touched_transaction_ids = sync_result.get('touched_transaction_ids') or None
         step['success'] = True
         step['message'] = 'Postgres updated from Xero'
     except Exception as exc:
@@ -76,6 +78,7 @@ def run_pipeline(
             rebuild_trail_balance=rebuild_trail_balance,
             exclude_manual_journals=exclude_manual_journals,
             calculate_pnl_ytd=calculate_pnl_ytd,
+            touched_transaction_ids=touched_transaction_ids,
         )
         step['success'] = True
         step['message'] = result.get('message', 'Xero data processed')

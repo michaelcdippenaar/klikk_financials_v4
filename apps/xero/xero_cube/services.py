@@ -6,8 +6,6 @@ import time
 import logging
 import pandas as pd
 from decimal import Decimal
-from django.db.models import Q, Sum, F
-from django.db.models.functions import Coalesce
 
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_data.models import XeroJournals, Month, Year
@@ -36,8 +34,8 @@ def process_journals(tenant_id, force_reprocess=False):
 
 def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_manual_journals=False):
     """
-    Create trail balance from journals.
-    
+    Create trail balance from journals via a single SQL INSERT...SELECT.
+
     Args:
         tenant_id: Xero tenant ID
         incremental: If True, only process journals updated since last run
@@ -45,141 +43,68 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
         exclude_manual_journals: If True, only build trail balance from regular journals (exclude manual journals)
     """
     from apps.xero.xero_sync.models import XeroLastUpdate
-    
+
     organisation = XeroTenant.objects.get(tenant_id=tenant_id)
-    
-    # If rebuild is True, force full rebuild regardless of incremental setting
-    last_update_date = None
+
+    affected_periods = None  # None = full rebuild
+
     if rebuild:
-        logger.info("Rebuild mode: forcing full rebuild and ignoring existing data")
-        print(f"[TRAIL BALANCE] REBUILD mode: forcing full rebuild, ignoring existing data")
-        if exclude_manual_journals:
-            print(f"[TRAIL BALANCE] REBUILD mode: excluding manual journals - only using regular journals")
+        logger.info("Rebuild mode: forcing full rebuild")
+        print(f"[TRAIL BALANCE] REBUILD mode: forcing full rebuild")
         incremental = False
-    # Get last update date for incremental updates
     elif incremental:
         try:
-            last_update = XeroLastUpdate.objects.get(
-                end_point='journals',
-                organisation=organisation
-            )
+            last_update = XeroLastUpdate.objects.get(end_point='journals', organisation=organisation)
             if last_update.date:
                 last_update_date = last_update.date
-                logger.info(f"Using incremental update from {last_update_date}")
-                print(f"[TRAIL BALANCE] Using incremental update from {last_update_date}")
+                print(f"[TRAIL BALANCE] Incremental from {last_update_date}")
+
+                new_journals_filter = XeroJournals.objects.filter(
+                    organisation=organisation, date__gte=last_update_date
+                )
+                if exclude_manual_journals:
+                    new_journals_filter = new_journals_filter.exclude(journal_type='manual_journal')
+
+                periods_qs = new_journals_filter.annotate(
+                    _month=Month('date'), _year=Year('date')
+                ).values('_year', '_month').distinct()
+
+                affected_periods = [(p['_year'], p['_month']) for p in periods_qs]
+                print(f"[TRAIL BALANCE] {len(affected_periods)} affected periods: {affected_periods}")
+
+                if not affected_periods:
+                    logger.warning("No affected periods in incremental mode, falling back to full rebuild")
+                    print(f"[TRAIL BALANCE] WARNING: no affected periods, falling back to full rebuild")
+                    affected_periods = None
         except XeroLastUpdate.DoesNotExist:
             logger.info("No previous update found, doing full rebuild")
-            print(f"[TRAIL BALANCE] No previous update found, doing full rebuild")
-            last_update_date = None
-    
-    # Get account balances - filter by date if incremental
-    if last_update_date:
-        # For incremental updates, we need to:
-        # 1. First, get the affected periods (year/month) from new journals
-        # 2. Then get ALL journals for those periods (not just new ones) to recalculate totals correctly
-        logger.info(f"Incremental update mode: identifying affected periods since {last_update_date}")
-        print(f"[TRAIL BALANCE] Incremental update mode: identifying affected periods since {last_update_date}")
-        
-        # Step 1: Get new journals to identify affected periods
-        new_journals_filter = XeroJournals.objects.filter(
-            organisation=organisation,
-            date__gte=last_update_date
-        )
-        # Exclude manual journals if requested
-        if exclude_manual_journals:
-            new_journals_filter = new_journals_filter.exclude(journal_type='manual_journal')
-        
-        new_journals = new_journals_filter.annotate(
-            month=Month('date'),
-            year=Year('date')
-        ).values('year', 'month').distinct()
-        
-        affected_periods = list(new_journals)
-        logger.info(f"Affected periods: {affected_periods}")
-        print(f"[TRAIL BALANCE] Found {len(affected_periods)} affected periods: {affected_periods}")
-        
-        if affected_periods:
-            # Step 2: Get ALL journals for affected periods (not just new ones)
-            # This ensures we recalculate totals correctly
-            period_filters = Q()
-            for period in affected_periods:
-                period_filters |= Q(
-                    date__year=period['year'],
-                    date__month=period['month']
-                )
-            
-            # Get all journals for affected periods
-            qs = XeroJournals.objects.filter(
-                organisation=organisation
-            ).filter(period_filters)
-            # Exclude manual journals if requested
-            if exclude_manual_journals:
-                qs = qs.exclude(journal_type='manual_journal')
-            
-            qs = qs.annotate(
-                month=Month('date'),
-                year=Year('date'),
-                contact_id_value=Coalesce(F('contact_id'), F('transaction_source__contact_id')),
-            ).values("account", "year", "month", "contact_id_value", "tracking1", "tracking2").order_by().annotate(
-                amount=Sum("amount"),
-            )
-            logger.info(f"Incremental update: recalculating {len(affected_periods)} affected periods with all journals")
-            print(f"[TRAIL BALANCE] Recalculating {len(affected_periods)} affected periods, found {qs.count()} journal aggregates")
-        else:
-            logger.warning("No affected periods found in incremental mode, but continuing with full rebuild")
-            print(f"[TRAIL BALANCE] WARNING: No affected periods found, falling back to full rebuild")
-            # Fall back to full rebuild if no affected periods
-            qs = XeroJournals.objects.get_account_balances(organisation, exclude_manual_journals=exclude_manual_journals)
-            last_update_date = None  # Clear last_update_date to trigger full rebuild in consolidate_journals
-    else:
-        # Get all balances for full rebuild
-        logger.info("Full rebuild mode: getting all account balances")
-        print(f"[TRAIL BALANCE] Full rebuild mode: getting all account balances")
-        if exclude_manual_journals:
-            print(f"[TRAIL BALANCE] Excluding manual journals - only using regular journals")
-        qs = XeroJournals.objects.get_account_balances(organisation, exclude_manual_journals=exclude_manual_journals)
-        print(f"[TRAIL BALANCE] Found {qs.count()} journal aggregates for full rebuild")
-    
-    print(f'[TRAIL BALANCE] Start Consolidate Journal Process - {qs.count()} journal aggregates to process')
-    logger.info(f"Consolidating {qs.count()} journal aggregates into trail balance")
-    
-    # Convert queryset to list to ensure we can iterate multiple times
-    journals_list = list(qs)
-    print(f'[TRAIL BALANCE] Converted to list: {len(journals_list)} items')
-    
-    # Track Trail Balance creation
-    from apps.xero.xero_sync.models import XeroLastUpdate
-    
+            print(f"[TRAIL BALANCE] No previous update, full rebuild")
+
     try:
-        result = XeroTrailBalance.objects.consolidate_journals(organisation, journals_list, last_update_date=last_update_date)
-        print(f'[TRAIL BALANCE] Consolidation complete, checking created records...')
-        
+        XeroTrailBalance.objects.consolidate_journals(
+            organisation,
+            exclude_manual_journals=exclude_manual_journals,
+            affected_periods=affected_periods,
+        )
+
         tb = XeroTrailBalance.objects.filter(organisation=organisation).select_related(
             'account', 'account__business_unit', 'contact', 'tracking1', 'tracking2', 'organisation'
         )
         tb_count = tb.count()
-        
-        # Check for errors - if consolidation returned empty or count is 0, don't update timestamp
+
         if tb_count == 0:
-            error_msg = "Trail Balance creation resulted in 0 records"
-            logger.error(error_msg)
-            print(f'[TRAIL BALANCE] ERROR: {error_msg}')
-            # Don't update timestamp on error - preserve last successful date
+            logger.error("Trail Balance creation resulted in 0 records")
+            print(f'[TRAIL BALANCE] ERROR: 0 records created')
         else:
-            # Success - update timestamp
             XeroLastUpdate.objects.update_or_create_timestamp('trail_balance', organisation)
-            print(f'[TRAIL BALANCE] Successfully created {tb_count} records')
+            print(f'[TRAIL BALANCE] ✓ {tb_count} records')
     except Exception as e:
-        error_msg = f"Trail Balance creation failed: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        print(f'[TRAIL BALANCE] ERROR: {error_msg}')
-        # Don't update timestamp on error - preserve last successful date
+        logger.error(f"Trail Balance creation failed: {e}", exc_info=True)
+        print(f'[TRAIL BALANCE] ERROR: {e}')
         raise
-    print(f'[TRAIL BALANCE] Total trail balance records after consolidation: {tb_count}')
-    logger.info(f"Trail balance consolidation complete: {tb_count} total records")
-    
+
+    # BigQuery export
     print('Start Trail Balance - Google Export')
-    
     df = tb.to_dataframe([
         'organisation__tenant_id', 'organisation__tenant_name',
         'year', 'month', 'fin_year', 'fin_period',
@@ -200,24 +125,19 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
         'balance_to_date'
     ])
 
-    print('Trail Balance - DataFrame Created')
-
-    # Filter zero amounts and convert to numeric types for BigQuery
     df = df[df.amount != 0].copy()
     df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
     df['fin_period'] = pd.to_numeric(df['fin_period'], errors='coerce')
-    # Convert balance_to_date to numeric (may be NaN for non-P&L accounts)
     df['balance_to_date'] = pd.to_numeric(df['balance_to_date'], errors='coerce')
     table_id = f'Xero.TrailBalance_Movement_V2_{tenant_id.replace("-", "_")}'
-    
-    # Export to BigQuery (optional; skip if credentials not configured)
+
     from apps.xero.xero_integration.services import update_google_big_query, run_async_export, update_google_big_query_async
     try:
         run_async_export(update_google_big_query_async(df, table_id))
         print('End Trail Balance - Google Export')
     except Exception as e:
         try:
-            logger.warning(f"Async export failed, using sync: {str(e)}")
+            logger.warning(f"Async export failed, using sync: {e}")
             update_google_big_query(df, table_id)
             print('End Trail Balance - Google Export')
         except Exception as e2:
@@ -227,100 +147,49 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
 
 def calculate_profit_loss_balance_to_date(tenant_id):
     """
-    Calculate balance_to_date (YTD) for Profit & Loss accounts.
-    
-    For P&L accounts (REVENUE and EXPENSE), calculates the cumulative sum
-    of all previous months up to and including the current month.
-    This is done after processing the cube.
-    
+    Calculate balance_to_date (YTD) for Profit & Loss accounts using a single
+    SQL UPDATE with a window function instead of per-combination queries.
+
     Args:
         tenant_id: Xero tenant ID
     """
-    from apps.xero.xero_cube.models import XeroTrailBalance
-    
+    from django.db import connection
+
     logger.info(f'Start calculating P&L balance_to_date for tenant {tenant_id}')
     print(f"[P&L YTD] Starting balance_to_date calculation for tenant {tenant_id}")
-    
+
     try:
-        organisation = XeroTenant.objects.get(tenant_id=tenant_id)
+        XeroTenant.objects.get(tenant_id=tenant_id)
     except XeroTenant.DoesNotExist:
         raise ValueError(f"Tenant {tenant_id} not found")
-    
-    # P&L account types
-    pnl_account_types = ['REVENUE', 'EXPENSE']
-    
-    # Get all P&L accounts for this organisation
-    pnl_accounts = XeroTrailBalance.objects.filter(
-        organisation=organisation,
-        account__type__in=pnl_account_types
-    ).select_related('account', 'contact', 'tracking1', 'tracking2').order_by(
-        'account', 'contact', 'tracking1', 'tracking2', 'year', 'month'
-    )
-    
-    if not pnl_accounts.exists():
-        logger.info(f"No P&L accounts found for tenant {tenant_id}")
-        print(f"[P&L YTD] No P&L accounts found")
-        return
-    
-    # Group by account, contact, tracking1, tracking2 to calculate YTD for each combination
-    # Balance to date = total of all previous months (cumulative from the start)
-    # Get distinct combinations
-    distinct_combinations = pnl_accounts.values(
-        'account', 'contact', 'tracking1', 'tracking2'
-    ).distinct()
-    
-    total_updated = 0
-    batch_size = 1000
-    to_update = []
-    
-    print(f"[P&L YTD] Processing {distinct_combinations.count()} account/contact/tracking combinations")
-    logger.info(f"Processing {distinct_combinations.count()} account/contact/tracking combinations")
-    
-    for combo in distinct_combinations:
-        # Get all records for this combination, ordered by year and month
-        # This ensures we calculate cumulative balance correctly across all periods
-        records = pnl_accounts.filter(
-            account=combo['account'],
-            contact=combo['contact'],
-            tracking1=combo['tracking1'],
-            tracking2=combo['tracking2']
-        ).order_by('year', 'month')
-        
-        # Calculate cumulative balance (balance_to_date) for each record
-        # Balance to date = sum of all previous months up to and including current month
-        cumulative_balance = Decimal('0')
-        
-        for record in records:
-            # Add current month's amount to cumulative balance
-            cumulative_balance += record.amount
-            
-            # Update balance_to_date if it's different
-            if record.balance_to_date != cumulative_balance:
-                record.balance_to_date = cumulative_balance
-                to_update.append(record)
-                
-                # Batch update when we reach batch_size
-                if len(to_update) >= batch_size:
-                    XeroTrailBalance.objects.bulk_update(
-                        to_update,
-                        ['balance_to_date'],
-                        batch_size=batch_size
-                    )
-                    total_updated += len(to_update)
-                    print(f"[P&L YTD] Updated {total_updated} records...")
-                    to_update = []
-    
-    # Update remaining records
-    if to_update:
-        XeroTrailBalance.objects.bulk_update(
-            to_update,
-            ['balance_to_date'],
-            batch_size=batch_size
-        )
-        total_updated += len(to_update)
-    
+
+    sql = """
+        UPDATE xero_cube_xerotrailbalance tb
+        SET balance_to_date = sub.running_total
+        FROM (
+            SELECT tb_inner.id,
+                   SUM(tb_inner.amount) OVER (
+                       PARTITION BY tb_inner.account_id, tb_inner.contact_id,
+                                    tb_inner.tracking1_id, tb_inner.tracking2_id
+                       ORDER BY tb_inner.year, tb_inner.month
+                   ) AS running_total
+            FROM xero_cube_xerotrailbalance tb_inner
+            WHERE tb_inner.organisation_id = %s
+              AND tb_inner.account_id IN (
+                  SELECT account_id FROM xero_metadata_xeroaccount
+                  WHERE organisation_id = %s AND type IN ('REVENUE', 'EXPENSE')
+              )
+        ) sub
+        WHERE tb.id = sub.id
+          AND tb.balance_to_date IS DISTINCT FROM sub.running_total
+    """
+
+    with connection.cursor() as cursor:
+        cursor.execute(sql, [tenant_id, tenant_id])
+        total_updated = cursor.rowcount
+
     logger.info(f"Completed balance_to_date calculation: updated {total_updated} P&L records")
-    print(f"[P&L YTD] ✓ Completed: updated {total_updated} P&L records")
+    print(f"[P&L YTD] ✓ Completed: updated {total_updated} P&L records (single SQL window function)")
 
 
 def create_balance_sheet(tenant_id):
@@ -353,7 +222,8 @@ def create_balance_sheet(tenant_id):
             logger.warning(f"BigQuery export skipped for balance sheet: {e2}")
 
 
-def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_journals=False, calculate_pnl_ytd=True):
+def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_journals=False,
+                      calculate_pnl_ytd=True, touched_transaction_ids=None):
     """
     Service function to process Xero data (trail balance, etc.).
     Extracted from XeroProcessDataView for use in scheduled tasks.
@@ -370,6 +240,10 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
         rebuild_trail_balance: If True, force full rebuild of trail balance and ignore existing data
         exclude_manual_journals: If True, only build trail balance from regular journals (exclude manual journals)
         calculate_pnl_ytd: If True (default), calculate P&L balance_to_date after trail balance. Set False to skip.
+        touched_transaction_ids: Optional set of transaction IDs updated in the preceding sync step.
+            When provided, only those transactions are reprocessed (incremental).
+            When None, all transactions are reprocessed (full rebuild).
+            Ignored when rebuild_trail_balance=True (always full rebuild).
     
     Returns:
         dict: Result with status, message, and stats
@@ -399,10 +273,12 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
         print(f"[PROCESS] ✓ Journals processed")
 
         # Step 1b: Reprocess transaction-based journals (invoices, bank transactions, etc.)
-        # to ensure tracking1, tracking2, and contact are correctly populated.
+        # Full rebuild when explicitly requested; incremental when touched IDs are available.
         from apps.xero.xero_data.transaction_processor import process_transactions_to_journals
-        print(f"[PROCESS] Reprocessing transaction-based journals (invoices, bank txns, etc.)")
-        txn_stats = process_transactions_to_journals(tenant)
+        txn_ids = None if rebuild_trail_balance else touched_transaction_ids
+        mode = "FULL" if txn_ids is None else f"INCREMENTAL ({len(txn_ids)} transactions)"
+        print(f"[PROCESS] Reprocessing transaction-based journals — {mode}")
+        txn_stats = process_transactions_to_journals(tenant, touched_transaction_ids=txn_ids)
         print(f"[PROCESS] ✓ Transaction journals reprocessed: {txn_stats.get('journal_entries_created', 0)} created")
         stats['transaction_journals_reprocessed'] = True
         logger.info(f'Journals processed for tenant {tenant_id}')

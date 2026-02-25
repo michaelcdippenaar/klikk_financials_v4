@@ -5,137 +5,102 @@ import pandas as pd
 import logging
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_metadata.models import XeroAccount, XeroContacts, XeroTracking
-from apps.xero.xero_metadata.utils import fiscal_year_to_financial_year, fiscal_month_to_financial_period
 
 logger = logging.getLogger(__name__)
 
 
 class XeroTrailBalanceManager(DataFrameManager):
-    def consolidate_journals(self, organisation, journals, last_update_date=None):
+    def consolidate_journals(self, organisation, exclude_manual_journals=False,
+                             affected_periods=None):
         """
-        Consolidate journals into trail balance.
-        
+        Consolidate journals into trail balance using a single SQL INSERT...SELECT.
+
         Args:
             organisation: XeroTenant instance
-            journals: QuerySet or list of journal data from get_account_balances()
-            last_update_date: Optional datetime for incremental updates. If provided,
-                            only deletes and rebuilds affected periods instead of all data.
+            exclude_manual_journals: If True, exclude manual journals from aggregation
+            affected_periods: list of (year, month) tuples for incremental mode.
+                If None, does a full rebuild (deletes all then re-inserts).
         """
-        # For incremental updates, only delete affected periods
-        if last_update_date:
-            print('Start Incremental Consolidation for Trail Balance')
-            # Get affected year/month combinations from new journals
-            affected_periods = set()
-            for data in journals:
-                affected_periods.add((data['year'], data['month']))
-            
-            # Delete only affected periods
+        from django.db import connection
+
+        tenant_id = organisation.tenant_id
+        fiscal_start = organisation.get_fiscal_year_start_month()
+
+        # --- Delete phase ---
+        if affected_periods:
+            print(f'[CONSOLIDATE] Incremental: rebuilding {len(affected_periods)} periods')
             for year, month in affected_periods:
-                deleted_count = self.filter(
-                    organisation=organisation,
-                    year=year,
-                    month=month
-                ).delete()[0]
-                if deleted_count > 0:
-                    logger.info(f"Deleted {deleted_count} trail balance records for {year}-{month:02d}")
+                deleted = self.filter(organisation=organisation, year=year, month=month).delete()[0]
+                if deleted:
+                    logger.info(f"Deleted {deleted} trail balance records for {year}-{month:02d}")
         else:
-            # Full rebuild - delete all
-            self.filter(organisation=organisation).delete()
-            print('Start Full Consolidation for Trail Balance Creation')
-        
-        # Pre-fetch all related objects into dictionaries for O(1) lookup
-        accounts_dict = {
-            acc.account_id: acc for acc in XeroAccount.objects.filter(
-                organisation=organisation
-            ).only('account_id', 'code', 'name', 'type', 'grouping', 'business_unit_id')
-        }
-        # Key by both raw and str() so lookup works whether aggregation returns string or UUID
-        contacts_dict = {}
-        for c in XeroContacts.objects.filter(organisation=organisation).only('contacts_id', 'name'):
-            contacts_dict[c.contacts_id] = c
-            contacts_dict[str(c.contacts_id)] = c
-        trackings_dict = {
-            t.id: t for t in XeroTracking.objects.filter(
-                organisation=organisation
-            ).only('id', 'option')
-        }
-        
-        print(f'[CONSOLIDATE] Pre-fetched {len(accounts_dict)} accounts, {len(contacts_dict)} contacts, {len(trackings_dict)} trackings')
-        logger.info(f"Pre-fetched {len(accounts_dict)} accounts, {len(contacts_dict)} contacts, {len(trackings_dict)} trackings")
-        
-        lst = []
-        skipped_accounts = 0
-        skipped_zero_amounts = 0
+            deleted = self.filter(organisation=organisation).delete()[0]
+            print(f'[CONSOLIDATE] Full rebuild: deleted {deleted} existing records')
 
-        for data in journals:
-            logger.debug(f"Processing journal data: {data}")
-            
-            # Use dictionary lookups (contact_id_value from get_account_balances; normalize to str for lookup)
-            contact = None
-            contact_id = data.get('contact_id_value') or data.get('contact')
-            if contact_id:
-                contact = contacts_dict.get(contact_id) or contacts_dict.get(str(contact_id).strip())
-                if not contact:
-                    logger.warning(f"Contact {contact_id!r} not found in contacts_dict (len={len(contacts_dict)}), setting to None")
+        # --- Build WHERE clause fragments ---
+        params = [fiscal_start, fiscal_start, fiscal_start, fiscal_start, tenant_id]
+        where_extra = ""
 
-            account = accounts_dict.get(data['account'])
-            if not account:
-                skipped_accounts += 1
-                logger.warning(f"Skipping trail balance entry: Account {data['account']} not found")
-                continue
+        if exclude_manual_journals:
+            where_extra += " AND j.journal_type != 'manual_journal'"
 
-            # Handle tracking1 and tracking2 using dictionary lookups
-            tracking1 = None
-            if data.get('tracking1'):
-                tracking1 = trackings_dict.get(data['tracking1'])
+        if affected_periods:
+            period_clauses = []
+            for year, month in affected_periods:
+                period_clauses.append(
+                    "(EXTRACT(YEAR FROM j.date)::int = %s AND EXTRACT(MONTH FROM j.date)::int = %s)"
+                )
+                params.extend([year, month])
+            where_extra += " AND (" + " OR ".join(period_clauses) + ")"
 
-            tracking2 = None
-            if data.get('tracking2'):
-                tracking2 = trackings_dict.get(data['tracking2'])
+        sql = f"""
+            INSERT INTO xero_cube_xerotrailbalance
+                (organisation_id, account_id, date, year, month,
+                 fin_year, fin_period,
+                 contact_id, tracking1_id, tracking2_id,
+                 amount, tax_amount, balance_to_date)
+            SELECT
+                j.organisation_id,
+                j.account_id,
+                make_date(EXTRACT(YEAR FROM j.date)::int, EXTRACT(MONTH FROM j.date)::int, 1),
+                EXTRACT(YEAR FROM j.date)::int,
+                EXTRACT(MONTH FROM j.date)::int,
+                CASE
+                    WHEN EXTRACT(MONTH FROM j.date) >= %s
+                        THEN EXTRACT(YEAR FROM j.date)::int
+                    ELSE EXTRACT(YEAR FROM j.date)::int - 1
+                END,
+                CASE
+                    WHEN EXTRACT(MONTH FROM j.date) >= %s
+                        THEN EXTRACT(MONTH FROM j.date)::int - %s + 1
+                    ELSE EXTRACT(MONTH FROM j.date)::int + (12 - %s) + 1
+                END,
+                COALESCE(j.contact_id, ts.contact_id),
+                j.tracking1_id,
+                j.tracking2_id,
+                SUM(j.amount),
+                SUM(j.tax_amount),
+                NULL
+            FROM xero_data_xerojournals j
+            LEFT JOIN xero_data_xerotransactionsource ts
+                ON j.transaction_source_id = ts.transactions_id
+            WHERE j.organisation_id = %s
+                {where_extra}
+            GROUP BY
+                j.organisation_id, j.account_id,
+                EXTRACT(YEAR FROM j.date), EXTRACT(MONTH FROM j.date),
+                COALESCE(j.contact_id, ts.contact_id),
+                j.tracking1_id, j.tracking2_id
+            HAVING SUM(j.amount) != 0
+        """
 
-            date = datetime.datetime(data['year'], data['month'], 1)
-            fiscal_start = organisation.get_fiscal_year_start_month()
-            fin_year = fiscal_year_to_financial_year(data['year'], data['month'], fiscal_start)
-            fin_period = fiscal_month_to_financial_period(data['month'], fiscal_start)
-            
-            if data['amount'] != 0:
-                lst.append(self.model(
-                    organisation=organisation,
-                    account=account,
-                    date=date,
-                    year=data['year'],
-                    month=data['month'],
-                    fin_year=fin_year,
-                    fin_period=fin_period,
-                    contact=contact,
-                    tracking1=tracking1,
-                    tracking2=tracking2,
-                    amount=data['amount'],
-                    tax_amount=data.get('tax_amount') or 0,
-                ))
-            else:
-                skipped_zero_amounts += 1
-        
-        print(f'[CONSOLIDATE] Processed {len(journals)} journal aggregates: {len(lst)} to create, {skipped_accounts} skipped (account not found), {skipped_zero_amounts} skipped (zero amount)')
-        logger.info(f"Processed {len(journals)} journal aggregates: {len(lst)} to create, {skipped_accounts} skipped (account not found), {skipped_zero_amounts} skipped (zero amount)")
-        
-        if not lst:
-            logger.warning("No trail balance records to create!")
-            print('[CONSOLIDATE] WARNING: No trail balance records to create!')
-            return self.filter(organisation=organisation)
-        
-        # Batch bulk_create in chunks to avoid memory issues with very large datasets
-        batch_size = 5000
-        total_created = 0
-        for i in range(0, len(lst), batch_size):
-            batch = lst[i:i + batch_size]
-            created = self.bulk_create(batch, ignore_conflicts=True)
-            total_created += len(created)
-            print(f'[CONSOLIDATE] Created batch {i // batch_size + 1}: {len(created)} records (total: {total_created}/{len(lst)})')
-        
-        logger.info(f"Created {total_created} trail balance records in {len(lst) // batch_size + 1} batches")
-        print(f'[CONSOLIDATE] Successfully created {total_created} trail balance records')
-        
+        with connection.cursor() as cursor:
+            cursor.execute(sql, params)
+            total_created = cursor.rowcount
+
+        print(f'[CONSOLIDATE] Inserted {total_created} trail balance records (single SQL statement)')
+        logger.info(f"Inserted {total_created} trail balance records via INSERT...SELECT")
+
         return self.filter(organisation=organisation)
 
 

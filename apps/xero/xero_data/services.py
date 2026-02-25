@@ -180,48 +180,20 @@ def update_xero_transactions(tenant_id, user=None, load_all=False):
         raise Exception(error_msg) from e
 
 
-def update_financial_data(tenant_id, user=None, process_to_journals=True, load_all=False):
+def update_financial_data(tenant_id, user=None, load_all=False):
     """
-    Update financial data from Xero: fetch transactions and Manual Journals, then build journal entries.
-    Trail balance remains per account, per contact, per tracking, per period.
+    Fetch transaction data from Xero API. Journal processing is handled
+    separately by process_xero_data() to avoid duplicate work.
     
     Args:
         tenant_id: Xero tenant ID
         user: User object (optional)
-        process_to_journals: If True, process transactions to journal entries after fetching.
         load_all: If True, manual journals are loaded in full (ignore modified_since). Default False.
     
     Returns:
-        dict: Result with status, message, errors, and stats
+        dict: Result with status, message, errors, stats, and touched_transaction_ids
     """
-    # Step 1: Fetch all transactions + manual journals
-    result = update_xero_transactions(tenant_id, user, load_all=load_all)
-    
-    # Step 2: Process transactions and manual journal sources to journal entries
-    if process_to_journals and result.get('success', False):
-        try:
-            from apps.xero.xero_data.transaction_processor import process_transactions_to_journals
-            from apps.xero.xero_data.models import XeroJournalsSource
-            
-            tenant = XeroTenant.objects.get(tenant_id=tenant_id)
-            touched_ids = result.get('touched_transaction_ids') or set()
-            process_stats = process_transactions_to_journals(tenant, touched_transaction_ids=touched_ids)
-            XeroJournalsSource.objects.create_journals_from_xero(tenant)
-            
-            result['stats']['journal_entries_created'] = process_stats.get('journal_entries_created', 0)
-            result['stats']['processing_errors'] = len(process_stats.get('errors', []))
-            
-            if process_stats.get('errors'):
-                result['errors'].extend(process_stats['errors'])
-                result['success'] = False
-            
-        except Exception as e:
-            error_msg = f"Failed to process transactions to journals: {str(e)}"
-            logger.error(error_msg, exc_info=True)
-            result['errors'].append(error_msg)
-            result['success'] = False
-    
-    return result
+    return update_xero_transactions(tenant_id, user, load_all=load_all)
 
 
 def update_and_consolidate(tenant_id, user=None):
@@ -271,14 +243,10 @@ def update_and_consolidate(tenant_id, user=None):
         result['success'] = False
         return result
     
-    # Step 2: Consolidate to trail balance
+    # Step 2: Consolidate to trail balance (full rebuild via SQL)
     try:
-        # Get aggregated journal data
-        journals = XeroJournals.objects.get_account_balances(tenant)
-        
-        # Consolidate
-        tb_result = XeroTrailBalance.objects.consolidate_journals(tenant, journals)
-        
+        tb_result = XeroTrailBalance.objects.consolidate_journals(tenant)
+
         result['stats']['trail_balance_records'] = tb_result.count()
         if settings.DEBUG:
             print("[Sync] Consolidate: %d trail balance records" % tb_result.count())
