@@ -34,10 +34,10 @@ class XeroProcessDataView(APIView):
         
         rebuild_trail_balance = request.data.get('rebuild_trail_balance', False)
         exclude_manual_journals = request.data.get('exclude_manual_journals', False)
+        calculate_pnl_ytd = request.data.get('calculate_pnl_ytd', True)
         
         try:
-            # Use the service function for consistency with scheduled tasks
-            result = process_xero_data(tenant_id, rebuild_trail_balance=rebuild_trail_balance, exclude_manual_journals=exclude_manual_journals)
+            result = process_xero_data(tenant_id, rebuild_trail_balance=rebuild_trail_balance, exclude_manual_journals=exclude_manual_journals, calculate_pnl_ytd=calculate_pnl_ytd)
             tenant = XeroTenant.objects.get(tenant_id=tenant_id)
             log_xero_api_calls('trail-balance', 0, tenant=tenant)
 

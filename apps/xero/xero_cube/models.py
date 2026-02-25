@@ -110,7 +110,8 @@ class XeroTrailBalanceManager(DataFrameManager):
                     contact=contact,
                     tracking1=tracking1,
                     tracking2=tracking2,
-                    amount=data['amount']
+                    amount=data['amount'],
+                    tax_amount=data.get('tax_amount') or 0,
                 ))
             else:
                 skipped_zero_amounts += 1
@@ -155,6 +156,8 @@ class XeroTrailBalance(models.Model):
                                   blank=True,
                                   null=True)
     amount = models.DecimalField(max_digits=30, decimal_places=2)
+    tax_amount = models.DecimalField(max_digits=30, decimal_places=2, default=0, blank=True,
+                                     help_text="Sum of journal line tax_amount for this account/period/contact/tracking.")
     balance_to_date = models.DecimalField(max_digits=30, decimal_places=2, null=True, blank=True,
                                           help_text="Balance to date for P&L accounts (REVENUE/EXPENSE) - cumulative sum of all previous months up to and including current month")
 

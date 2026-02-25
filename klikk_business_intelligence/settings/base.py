@@ -38,6 +38,7 @@ INSTALLED_APPS = [
     'apps.xero.xero_sync',
     'apps.xero.xero_validation',
     'apps.investec',
+    'apps.planning_analytics',
 ]
 
 MIDDLEWARE = [

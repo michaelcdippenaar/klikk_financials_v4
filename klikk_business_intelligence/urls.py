@@ -43,6 +43,9 @@ urlpatterns = [
     path('xero/validation/', include('apps.xero.xero_validation.urls')),
     path('api/investec/', include('apps.investec.urls')),
 
+    # Planning Analytics
+    path('api/planning-analytics/', include('apps.planning_analytics.urls')),
+
     # Deployment webhook
     path('deployment/', include('apps.deployment.urls')),
 ]

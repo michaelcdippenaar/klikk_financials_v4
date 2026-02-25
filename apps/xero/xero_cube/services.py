@@ -353,7 +353,7 @@ def create_balance_sheet(tenant_id):
             logger.warning(f"BigQuery export skipped for balance sheet: {e2}")
 
 
-def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_journals=False):
+def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_journals=False, calculate_pnl_ytd=True):
     """
     Service function to process Xero data (trail balance, etc.).
     Extracted from XeroProcessDataView for use in scheduled tasks.
@@ -361,7 +361,7 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
     Processing order:
     1. Process journals from XeroJournalsSource to XeroJournals
     2. Create trail balance from processed journals
-    3. Calculate balance_to_date for P&L accounts
+    3. Calculate balance_to_date for P&L accounts (optional, can be slow)
     
     Note: Metadata and Data Source updates must complete before this runs.
     
@@ -369,6 +369,7 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
         tenant_id: Xero tenant ID
         rebuild_trail_balance: If True, force full rebuild of trail balance and ignore existing data
         exclude_manual_journals: If True, only build trail balance from regular journals (exclude manual journals)
+        calculate_pnl_ytd: If True (default), calculate P&L balance_to_date after trail balance. Set False to skip.
     
     Returns:
         dict: Result with status, message, and stats
@@ -397,14 +398,13 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
         stats['journals_processed'] = True
         print(f"[PROCESS] ✓ Journals processed")
 
-        # Step 1b: When rebuilding, also reprocess transaction-based journals
-        # (invoices, bank transactions, etc.) so tracking slot fixes take effect.
-        if rebuild_trail_balance:
-            from apps.xero.xero_data.transaction_processor import process_transactions_to_journals
-            print(f"[PROCESS] REBUILD mode: reprocessing transaction-based journals (invoices, bank txns, etc.)")
-            txn_stats = process_transactions_to_journals(tenant)
-            print(f"[PROCESS] ✓ Transaction journals reprocessed: {txn_stats.get('journal_entries_created', 0)} created")
-            stats['transaction_journals_reprocessed'] = True
+        # Step 1b: Reprocess transaction-based journals (invoices, bank transactions, etc.)
+        # to ensure tracking1, tracking2, and contact are correctly populated.
+        from apps.xero.xero_data.transaction_processor import process_transactions_to_journals
+        print(f"[PROCESS] Reprocessing transaction-based journals (invoices, bank txns, etc.)")
+        txn_stats = process_transactions_to_journals(tenant)
+        print(f"[PROCESS] ✓ Transaction journals reprocessed: {txn_stats.get('journal_entries_created', 0)} created")
+        stats['transaction_journals_reprocessed'] = True
         logger.info(f'Journals processed for tenant {tenant_id}')
         
         # Step 2: Create trail balance from processed journals
@@ -418,12 +418,16 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
         stats['trail_balance_created'] = True
         print(f"[PROCESS] ✓ Trail balance created")
         
-        # Step 3: Calculate balance_to_date for P&L accounts
-        logger.info(f'Start calculating P&L balance_to_date for tenant {tenant_id}')
-        print(f"[PROCESS] Starting P&L balance_to_date calculation for tenant {tenant_id}")
-        calculate_profit_loss_balance_to_date(tenant_id)
-        stats['pnl_balance_to_date_calculated'] = True
-        print(f"[PROCESS] ✓ P&L balance_to_date calculated")
+        # Step 3: Calculate balance_to_date for P&L accounts (optional)
+        if calculate_pnl_ytd:
+            logger.info(f'Start calculating P&L balance_to_date for tenant {tenant_id}')
+            print(f"[PROCESS] Starting P&L balance_to_date calculation for tenant {tenant_id}")
+            calculate_profit_loss_balance_to_date(tenant_id)
+            stats['pnl_balance_to_date_calculated'] = True
+            print(f"[PROCESS] ✓ P&L balance_to_date calculated")
+        else:
+            stats['pnl_balance_to_date_calculated'] = False
+            print(f"[PROCESS] Skipped P&L balance_to_date calculation (calculate_pnl_ytd=False)")
         
         # Uncomment if needed
         # create_balance_sheet(tenant_id)

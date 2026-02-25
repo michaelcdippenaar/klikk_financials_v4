@@ -615,6 +615,7 @@ class XeroJournalsManager(models.Manager):
             contact_id_value=Coalesce(F('contact_id'), F('transaction_source__contact_id')),
         ).values("account", "year", "month", "contact_id_value", "tracking1", "tracking2").order_by().annotate(
             amount=Sum("amount"),
+            tax_amount=Sum("tax_amount"),
         )
         return qs
 

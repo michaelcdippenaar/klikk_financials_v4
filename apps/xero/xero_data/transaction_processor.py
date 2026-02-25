@@ -242,7 +242,12 @@ class TransactionProcessor:
                     if tk_obj.option == option_name and (not category_name or tk_obj.name == category_name):
                         tracking_obj = tk_obj
                         break
-            
+
+            # Auto-create: if the tracking option exists on the transaction but
+            # not in our metadata, create it so the data isn't silently dropped.
+            if tracking_obj is None and tracking.get('Option') and tracking.get('Name'):
+                tracking_obj = self._auto_create_tracking(tracking)
+
             if tracking_obj:
                 # Prefer TrackingCategoryID (stable across renames); fallback to category_slot/index
                 slot = self.organisation.get_tracking_slot(tracking_obj.tracking_category_id)
@@ -257,9 +262,61 @@ class TransactionProcessor:
         
         return tracking1_id, tracking2_id
     
-    def _create_journal_entry(self, transaction_source, account, amount, date, 
-                              description='', reference='', tracking1_id=None, 
-                              tracking2_id=None, journal_type='transaction', tax_amount=None):
+    def _auto_create_tracking(self, tracking_dict):
+        """
+        Auto-create a XeroTracking record when an invoice/transaction references
+        a tracking option that doesn't exist in our metadata table. This prevents
+        silent data loss when Xero options are added/renamed between metadata syncs.
+        """
+        from apps.xero.xero_metadata.models import XeroTracking
+        import uuid
+
+        option_name = tracking_dict.get('Option', '')
+        category_name = tracking_dict.get('Name', '')
+        category_id = tracking_dict.get('TrackingCategoryID', '')
+        # Use TrackingOptionID if present, otherwise generate a synthetic one
+        option_id = (
+            tracking_dict.get('TrackingOptionID')
+            or tracking_dict.get('OptionID')
+            or f"auto_{uuid.uuid4().hex[:16]}"
+        )
+
+        slot = self.organisation.get_tracking_slot(category_id)
+
+        try:
+            obj, created = XeroTracking.objects.get_or_create(
+                organisation=self.organisation,
+                option_id=option_id,
+                defaults={
+                    'name': category_name,
+                    'option': option_name,
+                    'tracking_category_id': category_id or None,
+                    'category_slot': slot,
+                    'collection': tracking_dict,
+                },
+            )
+            self._trackings_dict[option_id] = obj
+            if created:
+                logger.info(
+                    f"Auto-created tracking: [{category_name}] {option_name} "
+                    f"(option_id={option_id}, slot={slot})"
+                )
+            return obj
+        except Exception as exc:
+            logger.warning(f"Failed to auto-create tracking [{category_name}] {option_name}: {exc}")
+            return None
+
+    def _resolve_contact(self, txn_data):
+        """Resolve a XeroContacts instance from a transaction's Contact dict."""
+        contact_id = (txn_data or {}).get('Contact', {}).get('ContactID')
+        if contact_id and self._contacts_dict:
+            return self._contacts_dict.get(contact_id)
+        return None
+
+    def _create_journal_entry(self, transaction_source, account, amount, date,
+                              description='', reference='', tracking1_id=None,
+                              tracking2_id=None, journal_type='transaction', tax_amount=None,
+                              contact=None):
         """
         Create a journal entry dict for later bulk creation.
         
@@ -305,6 +362,7 @@ class TransactionProcessor:
             'tax_amount': round_amount(tax_amount) if tax_amount is not None else Decimal('0'),
             'tracking1_id': tracking1_id,
             'tracking2_id': tracking2_id,
+            'contact': contact,
         }
     
     def process_invoice(self, transaction_source):
@@ -328,6 +386,7 @@ class TransactionProcessor:
         date = self._parse_date(invoice.get('Date') or invoice.get('DateString'))
         reference = invoice.get('InvoiceNumber', '')
         contact_name = invoice.get('Contact', {}).get('Name', '')
+        contact_obj = self._resolve_contact(invoice)
         
         # Skip voided, deleted, and draft invoices
         # DRAFT invoices are not yet approved and don't appear in Xero P&L
@@ -386,6 +445,7 @@ class TransactionProcessor:
                 tracking2_id=tracking2_id,
                 journal_type='transaction',
                 tax_amount=tax_amount,
+                contact=contact_obj,
             )
             if entry:
                 entries.append(entry)
@@ -482,6 +542,7 @@ class TransactionProcessor:
         date = self._parse_date(bank_txn.get('Date') or bank_txn.get('DateString'))
         reference = bank_txn.get('Reference', '')
         contact_name = bank_txn.get('Contact', {}).get('Name', '')
+        contact_obj = self._resolve_contact(bank_txn)
         
         # Skip deleted or voided bank transactions
         status = bank_txn.get('Status', '')
@@ -541,6 +602,7 @@ class TransactionProcessor:
                 tracking2_id=tracking2_id,
                 journal_type='transaction',
                 tax_amount=tax_amount,
+                contact=contact_obj,
             )
             if entry:
                 entries.append(entry)
@@ -716,6 +778,7 @@ class TransactionProcessor:
         date = self._parse_date(credit_note.get('Date') or credit_note.get('DateString'))
         reference = credit_note.get('CreditNoteNumber', '')
         contact_name = credit_note.get('Contact', {}).get('Name', '')
+        contact_obj = self._resolve_contact(credit_note)
         
         # Skip voided, deleted, and draft credit notes
         status = credit_note.get('Status', '')
@@ -771,6 +834,7 @@ class TransactionProcessor:
                 tracking2_id=tracking2_id,
                 journal_type='transaction',
                 tax_amount=tax_amount,
+                contact=contact_obj,
             )
             if entry:
                 entries.append(entry)
@@ -863,6 +927,7 @@ class TransactionProcessor:
         date = self._parse_date(prepayment.get('Date') or prepayment.get('DateString'))
         reference = prepayment.get('Reference', '')
         contact_name = prepayment.get('Contact', {}).get('Name', '')
+        contact_obj = self._resolve_contact(prepayment)
         
         # Skip voided prepayments
         status = prepayment.get('Status', '')
@@ -924,6 +989,7 @@ class TransactionProcessor:
         date = self._parse_date(overpayment.get('Date') or overpayment.get('DateString'))
         reference = overpayment.get('Reference', '')
         contact_name = overpayment.get('Contact', {}).get('Name', '')
+        contact_obj = self._resolve_contact(overpayment)
         
         # Skip voided overpayments
         status = overpayment.get('Status', '')
@@ -1096,6 +1162,8 @@ class TransactionProcessor:
                         journal.tracking1_id = entry['tracking1_id']
                     if entry['tracking2_id']:
                         journal.tracking2_id = entry['tracking2_id']
+                    if entry.get('contact'):
+                        journal.contact = entry['contact']
                     journals_to_create.append(journal)
                 
                 # Batch create
