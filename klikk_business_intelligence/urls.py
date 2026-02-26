@@ -45,6 +45,7 @@ urlpatterns = [
 
     # Planning Analytics
     path('api/planning-analytics/', include('apps.planning_analytics.urls')),
+    path('api/ai-agent/', include('apps.ai_agent.urls')),
 
     # Deployment webhook
     path('deployment/', include('apps.deployment.urls')),

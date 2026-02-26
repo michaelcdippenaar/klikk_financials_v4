@@ -5,11 +5,38 @@ These settings are shared across all environments (development, staging, product
 Environment-specific settings should be defined in their respective files.
 """
 
+import os
 from pathlib import Path
 from datetime import timedelta
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+def _load_env_file(path: Path) -> None:
+    """
+    Lightweight .env loader (no dependency).
+    Uses os.environ.setdefault so real environment vars win.
+    """
+    try:
+        if not path.exists() or not path.is_file():
+            return
+        for raw_line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip("'").strip('"')
+            if key:
+                os.environ.setdefault(key, value)
+    except Exception:
+        # Never fail app startup due to env parsing.
+        return
+
+
+# Load local env files early so settings modules can read os.environ.
+_load_env_file(BASE_DIR / ".env")
+_load_env_file(BASE_DIR / ".env.local")
 
 
 # Application definition
@@ -39,6 +66,7 @@ INSTALLED_APPS = [
     'apps.xero.xero_validation',
     'apps.investec',
     'apps.planning_analytics',
+    'apps.ai_agent',
 ]
 
 MIDDLEWARE = [
