@@ -145,10 +145,117 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
             print(f"BigQuery export skipped: {e2}")
 
 
+def fill_balance_sheet_gaps(tenant_id):
+    """
+    Insert zero-amount gap-fill rows into XeroTrailBalance for balance sheet
+    accounts so that every partition (account, contact, tracking1, tracking2)
+    has a row for every month from its first movement to the account's latest
+    month.  This is required so that the subsequent balance_to_date window
+    function produces a value for every month, not just months with movement.
+
+    Args:
+        tenant_id: Xero tenant ID
+
+    Returns:
+        int: number of gap-fill rows inserted
+    """
+    from django.db import connection
+
+    organisation = XeroTenant.objects.get(tenant_id=tenant_id)
+    fiscal_start = organisation.get_fiscal_year_start_month()
+
+    logger.info(f'Starting balance sheet gap-fill for tenant {tenant_id}')
+    print(f"[BS GAP-FILL] Starting gap-fill for tenant {tenant_id}")
+
+    sql = """
+        INSERT INTO xero_cube_xerotrailbalance
+            (organisation_id, account_id, date, year, month,
+             fin_year, fin_period,
+             contact_id, tracking1_id, tracking2_id,
+             amount, tax_amount, balance_to_date)
+        SELECT
+            p.organisation_id,
+            p.account_id,
+            make_date(gs.yr, gs.mo, 1),
+            gs.yr,
+            gs.mo,
+            CASE WHEN gs.mo >= %s THEN gs.yr ELSE gs.yr - 1 END,
+            CASE WHEN gs.mo >= %s THEN gs.mo - %s + 1
+                                  ELSE gs.mo + (12 - %s) + 1 END,
+            p.contact_id,
+            p.tracking1_id,
+            p.tracking2_id,
+            0,
+            0,
+            NULL
+        FROM (
+            SELECT
+                tb.organisation_id,
+                tb.account_id,
+                tb.contact_id,
+                tb.tracking1_id,
+                tb.tracking2_id,
+                MIN(make_date(tb.year, tb.month, 1)) AS min_date,
+                MAX(make_date(acct_max.max_y, acct_max.max_m, 1)) AS max_date
+            FROM xero_cube_xerotrailbalance tb
+            JOIN xero_metadata_xeroaccount acc
+                ON acc.account_id = tb.account_id
+            JOIN (
+                SELECT account_id,
+                       MAX(year)  FILTER (WHERE year * 100 + month = max_ym) AS max_y,
+                       MAX(month) FILTER (WHERE year * 100 + month = max_ym) AS max_m
+                FROM (
+                    SELECT account_id, year, month,
+                           MAX(year * 100 + month) OVER (PARTITION BY account_id) AS max_ym
+                    FROM xero_cube_xerotrailbalance
+                    WHERE organisation_id = %s
+                ) sub
+                GROUP BY account_id
+            ) acct_max ON acct_max.account_id = tb.account_id
+            WHERE tb.organisation_id = %s
+              AND acc.grouping IN ('ASSET', 'LIABILITY', 'EQUITY')
+            GROUP BY tb.organisation_id, tb.account_id,
+                     tb.contact_id, tb.tracking1_id, tb.tracking2_id
+        ) p
+        CROSS JOIN LATERAL generate_series(
+            p.min_date, p.max_date, '1 month'::interval
+        ) AS gs_date
+        CROSS JOIN LATERAL (
+            SELECT EXTRACT(YEAR  FROM gs_date)::int AS yr,
+                   EXTRACT(MONTH FROM gs_date)::int AS mo
+        ) gs
+        WHERE NOT EXISTS (
+            SELECT 1 FROM xero_cube_xerotrailbalance ex
+            WHERE ex.organisation_id = p.organisation_id
+              AND ex.account_id      = p.account_id
+              AND ex.contact_id      IS NOT DISTINCT FROM p.contact_id
+              AND ex.tracking1_id    IS NOT DISTINCT FROM p.tracking1_id
+              AND ex.tracking2_id    IS NOT DISTINCT FROM p.tracking2_id
+              AND ex.year  = gs.yr
+              AND ex.month = gs.mo
+        )
+    """
+
+    params = [
+        fiscal_start, fiscal_start, fiscal_start, fiscal_start,
+        tenant_id, tenant_id,
+    ]
+
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        total_inserted = cursor.rowcount
+
+    logger.info(f"Gap-fill complete: inserted {total_inserted} zero-amount rows")
+    print(f"[BS GAP-FILL] ✓ Inserted {total_inserted} zero-amount rows")
+    return total_inserted
+
+
 def calculate_balance_sheet_balance_to_date(tenant_id):
     """
-    Calculate balance_to_date (YTD) for balance sheet accounts (ASSET, LIABILITY, EQUITY)
-    using a single SQL UPDATE with a window function.
+    Calculate balance_to_date (YTD) for balance sheet accounts (ASSET, LIABILITY, EQUITY).
+
+    1. Fill monthly gaps so every partition has a row for every month.
+    2. Run a single SQL UPDATE with a window function to set balance_to_date.
 
     Args:
         tenant_id: Xero tenant ID
@@ -162,6 +269,8 @@ def calculate_balance_sheet_balance_to_date(tenant_id):
         XeroTenant.objects.get(tenant_id=tenant_id)
     except XeroTenant.DoesNotExist:
         raise ValueError(f"Tenant {tenant_id} not found")
+
+    fill_balance_sheet_gaps(tenant_id)
 
     sql = """
         UPDATE xero_cube_xerotrailbalance tb

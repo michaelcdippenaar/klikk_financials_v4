@@ -526,8 +526,8 @@ class TransactionProcessor:
         Process a bank transaction to journal entries.
         
         Transaction types:
-        - SPEND: Payment made (Credit Bank, Debit Expense, Debit Tax Paid)
-        - RECEIVE: Payment received (Debit Bank, Credit Revenue, Credit Tax Collected)
+        - SPEND / SPEND-OVERPAYMENT / SPEND-PREPAYMENT: Credit Bank, Debit Expense
+        - RECEIVE / RECEIVE-OVERPAYMENT / RECEIVE-PREPAYMENT: Debit Bank, Credit Revenue
         
         Returns:
             list: Journal entry dicts
@@ -539,6 +539,7 @@ class TransactionProcessor:
             return entries
         
         txn_type = bank_txn.get('Type', '')
+        is_spend = txn_type.startswith('SPEND')
         date = self._parse_date(bank_txn.get('Date') or bank_txn.get('DateString'))
         reference = bank_txn.get('Reference', '')
         contact_name = bank_txn.get('Contact', {}).get('Name', '')
@@ -584,12 +585,12 @@ class TransactionProcessor:
             if line_amount_types == 'Inclusive':
                 net_amount = line_amount - tax_amount
             
-            # For SPEND: Expense is DEBIT (positive)
-            # For RECEIVE: Revenue is CREDIT (negative)
-            if txn_type == 'SPEND':
-                amount = net_amount   # Debit to expense
-            else:  # RECEIVE
-                amount = -net_amount  # Credit to revenue
+            # SPEND*: Expense is DEBIT (positive)
+            # RECEIVE*: Revenue is CREDIT (negative)
+            if is_spend:
+                amount = net_amount
+            else:
+                amount = -net_amount
             
             entry = self._create_journal_entry(
                 transaction_source=transaction_source,
@@ -623,12 +624,10 @@ class TransactionProcessor:
         if total_tax != Decimal('0'):
             tax_account = self._get_tax_account(txn_type)
             if tax_account:
-                # For SPEND: Debit Tax Paid (positive)
-                # For RECEIVE: Credit Tax Collected (negative)
-                if txn_type == 'SPEND':
-                    tax_entry_amount = total_tax   # Debit tax paid
-                else:  # RECEIVE
-                    tax_entry_amount = -total_tax  # Credit tax collected
+                if is_spend:
+                    tax_entry_amount = total_tax
+                else:
+                    tax_entry_amount = -total_tax
                 
                 entry = self._create_journal_entry(
                     transaction_source=transaction_source,
@@ -645,12 +644,10 @@ class TransactionProcessor:
         
         # Add bank account entry (total including tax)
         if bank_account:
-            # For SPEND: Credit Bank (negative)
-            # For RECEIVE: Debit Bank (positive)
-            if txn_type == 'SPEND':
-                bank_amount = -(total_amount + total_tax)  # Credit bank
-            else:  # RECEIVE
-                bank_amount = total_amount + total_tax   # Debit bank
+            if is_spend:
+                bank_amount = -(total_amount + total_tax)
+            else:
+                bank_amount = total_amount + total_tax
             
             entry = self._create_journal_entry(
                 transaction_source=transaction_source,
