@@ -354,11 +354,13 @@ class TransactionProcessor:
             'journal_type': journal_type,
             'account': account,
             'transaction_source': transaction_source,
-            'journal_source': None,  # No journal source for transaction-based entries
+            'journal_source': None,
             'date': date,
             'description': description[:500] if description else '',
             'reference': reference[:500] if reference else '',
             'amount': amount,
+            'debit': max(amount, Decimal('0')),
+            'credit': min(amount, Decimal('0')),
             'tax_amount': round_amount(tax_amount) if tax_amount is not None else Decimal('0'),
             'tracking1_id': tracking1_id,
             'tracking2_id': tracking2_id,
@@ -1153,6 +1155,8 @@ class TransactionProcessor:
                         description=entry['description'],
                         reference=entry['reference'],
                         amount=entry['amount'],
+                        debit=entry.get('debit', max(entry['amount'], Decimal('0'))),
+                        credit=entry.get('credit', min(entry['amount'], Decimal('0'))),
                         tax_amount=entry['tax_amount'],
                     )
                     if entry['tracking1_id']:

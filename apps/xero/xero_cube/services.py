@@ -122,11 +122,15 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
         'tracking1__option',
         'tracking2__option',
         'amount',
+        'debit',
+        'credit',
         'balance_to_date'
     ])
 
     df = df[df.amount != 0].copy()
     df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+    df['debit'] = pd.to_numeric(df['debit'], errors='coerce')
+    df['credit'] = pd.to_numeric(df['credit'], errors='coerce')
     df['fin_period'] = pd.to_numeric(df['fin_period'], errors='coerce')
     df['balance_to_date'] = pd.to_numeric(df['balance_to_date'], errors='coerce')
     table_id = f'Xero.TrailBalance_Movement_V2_{tenant_id.replace("-", "_")}'
@@ -172,7 +176,7 @@ def fill_balance_sheet_gaps(tenant_id):
             (organisation_id, account_id, date, year, month,
              fin_year, fin_period,
              contact_id, tracking1_id, tracking2_id,
-             amount, tax_amount, balance_to_date)
+             amount, debit, credit, tax_amount, balance_to_date)
         SELECT
             p.organisation_id,
             p.account_id,
@@ -185,6 +189,8 @@ def fill_balance_sheet_gaps(tenant_id):
             p.contact_id,
             p.tracking1_id,
             p.tracking2_id,
+            0,
+            0,
             0,
             0,
             NULL

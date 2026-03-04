@@ -37,7 +37,7 @@ vTrk1 = TRIM(pTracking1Id);
 vTrk2 = TRIM(pTracking2Id);
 
 # Base SELECT (includes fin_year, fin_period for PAW dimensions)
-vSQL = 'SELECT id, journal_id, journal_number, journal_type, date, year, month, fin_year, fin_period, account_code, contact_name, tracking1_option, tracking2_option, description, reference, amount, tax_amount, transaction_source_type FROM v_xero_journal_drill WHERE 1=1';
+vSQL = 'SELECT id, journal_id, journal_number, journal_type, date, year, month, fin_year, fin_period, account_code, contact_name, tracking1_option, tracking2_option, description, reference, amount, debit, credit, tax_amount, transaction_source_type FROM v_xero_journal_drill WHERE 1=1';
 
 # Add WHERE conditions for required params
 vSQL = vSQL | ' AND tenant_id = ''' | vTenant | '''';

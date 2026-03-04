@@ -443,6 +443,9 @@ class XeroJournalsSourceManager(models.Manager):
                 existing.description = journal_data['description']
                 existing.reference = journal_data['reference']
                 existing.amount = journal_data['amount']
+                amt = journal_data['amount']
+                existing.debit = max(amt, 0)
+                existing.credit = min(amt, 0)
                 existing.tax_amount = journal_data['tax_amount']
                 existing.journal_source = journal_data['journal_source']
                 existing.transaction_source = journal_data['transaction_source']
@@ -457,16 +460,19 @@ class XeroJournalsSourceManager(models.Manager):
                 to_update.append(existing)
             else:
                 # Create new
+                amt = journal_data['amount']
                 journal_obj = XeroJournals(
                     organisation=organisation,
                     journal_id=line_id,
                     journal_number=journal_data['journal_number'],
-                    journal_type=journal_type_from_data,  # Include journal type
+                    journal_type=journal_type_from_data,
                     account=journal_data['account'],
                     date=journal_data['date'],
                     description=journal_data['description'],
                     reference=journal_data['reference'],
-                    amount=journal_data['amount'],
+                    amount=amt,
+                    debit=max(amt, 0),
+                    credit=min(amt, 0),
                     tax_amount=journal_data['tax_amount'],
                     journal_source=journal_data['journal_source'],
                     transaction_source=journal_data['transaction_source'],
@@ -503,7 +509,7 @@ class XeroJournalsSourceManager(models.Manager):
                     batch = to_update[i:i + batch_size]
                     XeroJournals.objects.bulk_update(batch, [
                         'journal_number', 'journal_type', 'account', 'date', 'description', 'reference',
-                        'amount', 'tax_amount', 'journal_source', 'transaction_source',
+                        'amount', 'debit', 'credit', 'tax_amount', 'journal_source', 'transaction_source',
                         'contact', 'tracking1', 'tracking2'
                     ])
                     total_updated += len(batch)
@@ -658,6 +664,10 @@ class XeroJournals(models.Model):
     description = models.TextField(blank=True)
     reference = models.TextField(blank=True)
     amount = models.DecimalField(max_digits=30, decimal_places=2)
+    debit = models.DecimalField(max_digits=30, decimal_places=2, default=0,
+                                help_text="Positive portion of amount (debit >= 0). debit + credit = amount.")
+    credit = models.DecimalField(max_digits=30, decimal_places=2, default=0,
+                                 help_text="Negative portion of amount (credit <= 0). debit + credit = amount.")
     tax_amount = models.DecimalField(max_digits=30, decimal_places=2)
 
     objects = XeroJournalsManager()

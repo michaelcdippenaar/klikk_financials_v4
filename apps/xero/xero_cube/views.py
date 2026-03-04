@@ -164,6 +164,8 @@ class XeroTrailBalanceListView(APIView):
                 'tracking1': rec.tracking1.option if rec.tracking1 else None,
                 'tracking2': rec.tracking2.option if rec.tracking2 else None,
                 'amount': str(rec.amount),
+                'debit': str(rec.debit),
+                'credit': str(rec.credit),
                 'balance_to_date': str(rec.balance_to_date) if rec.balance_to_date is not None else None,
                 'xero_pnl': str(xero_pnl) if xero_pnl is not None else None,
             }
@@ -278,6 +280,8 @@ class XeroLineItemsListView(APIView):
                 'description': rec.description,
                 'reference': rec.reference,
                 'amount': str(rec.amount),
+                'debit': str(rec.debit),
+                'credit': str(rec.credit),
                 'tax_amount': str(rec.tax_amount),
                 'transaction_source_type': rec.transaction_source.transaction_source if rec.transaction_source else None,
             }

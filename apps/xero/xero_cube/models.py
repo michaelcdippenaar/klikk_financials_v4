@@ -58,7 +58,7 @@ class XeroTrailBalanceManager(DataFrameManager):
                 (organisation_id, account_id, date, year, month,
                  fin_year, fin_period,
                  contact_id, tracking1_id, tracking2_id,
-                 amount, tax_amount, balance_to_date)
+                 amount, debit, credit, tax_amount, balance_to_date)
             SELECT
                 j.organisation_id,
                 j.account_id,
@@ -79,6 +79,8 @@ class XeroTrailBalanceManager(DataFrameManager):
                 j.tracking1_id,
                 j.tracking2_id,
                 SUM(j.amount),
+                SUM(CASE WHEN j.amount > 0 THEN j.amount ELSE 0 END),
+                SUM(CASE WHEN j.amount < 0 THEN j.amount ELSE 0 END),
                 SUM(j.tax_amount),
                 NULL
             FROM xero_data_xerojournals j
@@ -121,6 +123,10 @@ class XeroTrailBalance(models.Model):
                                   blank=True,
                                   null=True)
     amount = models.DecimalField(max_digits=30, decimal_places=2)
+    debit = models.DecimalField(max_digits=30, decimal_places=2, default=0,
+                                help_text="Positive portion of amount (debit >= 0). debit + credit = amount.")
+    credit = models.DecimalField(max_digits=30, decimal_places=2, default=0,
+                                 help_text="Negative portion of amount (credit <= 0). debit + credit = amount.")
     tax_amount = models.DecimalField(max_digits=30, decimal_places=2, default=0, blank=True,
                                      help_text="Sum of journal line tax_amount for this account/period/contact/tracking.")
     balance_to_date = models.DecimalField(max_digits=30, decimal_places=2, null=True, blank=True,
