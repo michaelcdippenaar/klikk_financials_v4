@@ -132,7 +132,7 @@ def parse_profit_loss_dict(raw_data, organisation, from_date, to_date, periods=1
                         pass
                 
                 # Extract period values (skip first cell which is account name)
-                # Xero returns periods in reverse chronological order (latest first)
+                # Xero API returns periods in reverse chronological order (latest first).
                 # Cell 0 = Account name
                 # Cell 1 = Latest period (should be period_{periods-1})
                 # Cell 2 = Previous period (should be period_{periods-2})
@@ -148,14 +148,12 @@ def parse_profit_loss_dict(raw_data, organisation, from_date, to_date, periods=1
                     for idx, cell in enumerate(period_cells[:min(5, len(period_cells))]):
                         print(f"[PARSER]   Period cell {idx}: Value='{cell.get('Value', '')}'")
                 
-                # Map periods in reverse order: latest period (cell 0) -> period_{periods-1}, oldest period (cell N-1) -> period_0
                 for cell_idx, cell in enumerate(period_cells):
                     cell_value = cell.get("Value", "")
                     decimal_value = safe_decimal(cell_value)
                     # Reverse the index: cell 0 (latest) maps to period_{periods-1}, cell N-1 (oldest) maps to period_0
                     period_idx = num_periods - 1 - cell_idx
                     period_values[f'period_{period_idx}'] = str(decimal_value)
-                    # Debug: Log non-zero values
                     if len(parsed_rows) < 3 and decimal_value != Decimal("0"):
                         print(f"[PARSER]   Cell {cell_idx} (latest first) -> Period {period_idx}: {decimal_value}")
                 
@@ -245,18 +243,17 @@ def parse_profit_loss_report(organisation, data, from_date, to_date, periods=12)
     """
     print(f"[PARSER] Starting P&L report creation for {from_date} to {to_date}...")
     
-    # Check if report already exists
-    existing_report = XeroProfitAndLossReport.objects.filter(
+    # Delete any existing report for the same date range so we always use fresh data
+    existing_reports = XeroProfitAndLossReport.objects.filter(
         organisation=organisation,
         from_date=from_date,
         to_date=to_date,
         periods=periods
-    ).first()
-    
-    if existing_report:
-        logger.info(f"P&L report already exists for {from_date} to {to_date}, returning existing report")
-        print(f"[PARSER] Report already exists (ID: {existing_report.id}), skipping creation")
-        return existing_report
+    )
+    if existing_reports.exists():
+        count = existing_reports.count()
+        existing_reports.delete()
+        print(f"[PARSER] Deleted {count} existing P&L report(s) for {from_date} to {to_date}")
     
     # Create report
     report = XeroProfitAndLossReport.objects.create(
@@ -296,5 +293,203 @@ def parse_profit_loss_report(organisation, data, from_date, to_date, periods=12)
     
     logger.info(f"Created P&L report with {lines_created} lines for {from_date} to {to_date}")
     
+    return report
+
+
+def _extract_account_period_values_from_response(raw_data, batch_months):
+    """
+    Extract from one P&L API response the period values per account.
+    batch_months: list of (year, month) in chronological order (oldest first).
+    API returns cells in reverse chronological order (latest first).
+
+    Returns:
+        (account_rows, period_values_by_account)
+        account_rows: dict account_key -> { account, account_code, account_name, account_type, row_type, section_title, raw_row }
+        period_values_by_account: dict account_key -> dict (y, m) -> str(value)
+    """
+    from decimal import Decimal, InvalidOperation
+
+    def safe_decimal(value):
+        if value in (None, "", 0, "0"):
+            return Decimal("0")
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return Decimal("0")
+
+    reports = raw_data.get("Reports", []) if isinstance(raw_data, dict) else []
+    if not reports:
+        return {}, {}
+
+    report = reports[0]
+    rows = report.get("Rows") or []
+    account_rows = {}
+    period_values_by_account = {}
+
+    def walk_rows(row_list, section_title=""):
+        for row in row_list:
+            row_type = row.get("RowType", "")
+            cells = row.get("Cells", [])
+            if row_type == "Section":
+                nested = row.get("Rows", [])
+                if nested:
+                    walk_rows(nested, row.get("Title", section_title))
+                continue
+            if row_type == "Header":
+                continue
+            nested = row.get("Rows")
+            if nested:
+                walk_rows(nested, section_title)
+            if row_type not in ("Row", "SummaryRow") or not cells:
+                continue
+
+            first_cell = cells[0]
+            account_name = str(first_cell.get("Value", "")).strip()
+            account_id_uuid = None
+            account_code = None
+            account_type = None
+            for attr in first_cell.get("Attributes", []):
+                if attr.get("Id") == "account":
+                    account_id_uuid = attr.get("Value")
+                elif attr.get("Id") == "accountcode":
+                    account_code = attr.get("Value")
+                elif attr.get("Id") == "accounttype":
+                    account_type = attr.get("Value")
+
+            account_key = account_id_uuid or account_name or ""
+            if not account_key:
+                continue
+
+            period_cells = cells[1:]
+            num_periods = len(period_cells)
+            if num_periods != len(batch_months):
+                continue
+            values_for_account = {}
+            for cell_idx, cell in enumerate(period_cells):
+                # cell_idx 0 = latest = batch_months[-1], so batch_idx = num_periods - 1 - cell_idx
+                batch_idx = num_periods - 1 - cell_idx
+                if 0 <= batch_idx < len(batch_months):
+                    ym = batch_months[batch_idx]
+                    values_for_account[ym] = str(safe_decimal(cell.get("Value", "")))
+
+            period_values_by_account[account_key] = values_for_account
+            if account_key not in account_rows:
+                account_rows[account_key] = {
+                    "account_id_uuid": account_id_uuid,
+                    "account_name": account_name,
+                    "account_code": account_code,
+                    "account_type": account_type,
+                    "row_type": row_type,
+                    "section_title": section_title,
+                    "raw_row": row,
+                }
+
+    walk_rows(rows)
+    return account_rows, period_values_by_account
+
+
+def parse_profit_loss_report_multi(organisation, api_responses, from_date, to_date):
+    """
+    Merge multiple P&L API responses (from 31-day anchor calls) into one report.
+    api_responses: list of (raw_data, batch_months) where batch_months is list of (year, month) in chronological order for that response.
+
+    Returns:
+        XeroProfitAndLossReport instance with period_0 = first month, period_1 = second, etc.
+    """
+    from datetime import date
+
+    report_months = []
+    cur = from_date
+    while (cur.year, cur.month) <= (to_date.year, to_date.month):
+        report_months.append((cur.year, cur.month))
+        if cur.month == 12:
+            cur = date(cur.year + 1, 1, 1)
+        else:
+            cur = date(cur.year, cur.month + 1, 1)
+
+    num_periods = len(report_months)
+    if num_periods == 0:
+        raise ValueError("Report date range has no months")
+
+    # Extract from each response: account_key -> (y,m) -> value; and row metadata
+    all_account_rows = {}
+    all_period_values = {}
+
+    for raw_data, batch_months in api_responses:
+        account_rows, period_values_by_account = _extract_account_period_values_from_response(raw_data, batch_months)
+        for k, meta in account_rows.items():
+            if k not in all_account_rows:
+                all_account_rows[k] = meta
+        for k, values in period_values_by_account.items():
+            if k not in all_period_values:
+                all_period_values[k] = {}
+            for ym, val in values.items():
+                # Prefer first response for each month (31-day anchor data); don't overwrite
+                if ym not in all_period_values[k]:
+                    all_period_values[k][ym] = val
+
+    # Resolve account from first row that has account_id_uuid
+    account_lookup = {}
+    for key, meta in all_account_rows.items():
+        uuid_val = meta.get("account_id_uuid")
+        if uuid_val:
+            try:
+                acc = XeroAccount.objects.get(organisation=organisation, account_id=uuid_val)
+                account_lookup[key] = acc
+            except XeroAccount.DoesNotExist:
+                account_lookup[key] = None
+
+    # Delete any existing report for this range
+    existing = XeroProfitAndLossReport.objects.filter(
+        organisation=organisation,
+        from_date=from_date,
+        to_date=to_date,
+    )
+    if existing.exists():
+        existing.delete()
+        print(f"[PARSER] Deleted existing P&L report(s) for {from_date} to {to_date}")
+
+    # Use first response's raw_data for storage (for debugging)
+    first_raw = api_responses[0][0] if api_responses else {}
+    report = XeroProfitAndLossReport.objects.create(
+        organisation=organisation,
+        from_date=from_date,
+        to_date=to_date,
+        periods=num_periods,
+        timeframe="MONTH",
+        raw_data=first_raw,
+    )
+    print(f"[PARSER] Created merged P&L report (ID: {report.id}) with {num_periods} periods")
+
+    lines_created = 0
+    for account_key, meta in all_account_rows.items():
+        account = account_lookup.get(account_key)
+        values_by_ym = all_period_values.get(account_key, {})
+        period_values = {}
+        for p, ym in enumerate(report_months):
+            period_values[f"period_{p}"] = values_by_ym.get(ym, "0")
+
+        if account:
+            account_code = account.code
+            account_type = account.type
+        else:
+            account_code = meta.get("account_code") or ""
+            account_type = meta.get("account_type") or ""
+
+        XeroProfitAndLossReportLine.objects.create(
+            report=report,
+            account=account,
+            account_code=account_code,
+            account_name=meta.get("account_name") or "",
+            account_type=account_type,
+            row_type=meta.get("row_type") or "Row",
+            section_title=meta.get("section_title") or "",
+            period_values=period_values,
+            raw_cell_data={"row": meta.get("raw_row")},
+        )
+        lines_created += 1
+
+    print(f"[PARSER] P&L merged report: {lines_created} lines created")
+    logger.info(f"Created merged P&L report with {lines_created} lines for {from_date} to {to_date}")
     return report
 

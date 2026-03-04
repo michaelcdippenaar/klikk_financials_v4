@@ -64,3 +64,23 @@ XERO_SCHEDULER_ENABLED = False  # Disabled for development
 _v4_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _v3_creds = os.path.join(os.path.dirname(_v4_root), 'klikk_financials_v3', 'credentials', 'klick-financials01-81b1aeed281d.json')
 GOOGLE_APPLICATION_CREDENTIALS = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS') or (_v3_creds if os.path.exists(_v3_creds) else None)
+
+# AI Agent Configuration
+AI_AGENT_OPENAI_API_KEY = os.environ.get("AI_AGENT_OPENAI_API_KEY", "")
+# OpenAI chat model: gpt-4o-mini, gpt-4o, gpt-5.2, gpt-5.2-instant, gpt-5.2-thinking, gpt-5.2-pro, gpt-5-mini, etc.
+AI_AGENT_MODEL = os.environ.get("AI_AGENT_MODEL", "gpt-5.2")
+# Web search (Serper): get a key at https://serper.dev to enable "current price", "look up", stock quotes, etc.
+SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "")
+
+# Keep Gemini disabled in development so OpenAI is used explicitly.
+AI_AGENT_GEMINI_API_KEY = ""
+AI_AGENT_GEMINI_MODEL = "gemini-2.5-flash"
+
+# Embeddings (vectorisation)
+# Set in your shell, e.g.:
+# export AI_AGENT_EMBEDDING_MODEL="text-embedding-3-small"
+AI_AGENT_EMBEDDING_MODEL = os.environ.get("AI_AGENT_EMBEDDING_MODEL", "text-embedding-3-small")
+
+# Development-only: disable ai_agent auth + TM1 write policy guardrails for easier testing.
+AI_AGENT_DISABLE_SECURITY = True
+

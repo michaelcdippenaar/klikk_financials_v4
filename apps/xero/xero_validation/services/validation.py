@@ -10,6 +10,7 @@ from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_metadata.models import XeroAccount
 from apps.xero.xero_cube.models import XeroTrailBalance
 from ..models import XeroTrailBalanceReport, XeroTrailBalanceReportLine
+from ..helpers.balance_sheet_excel_parser import parse_balance_sheet_excel
 from .imports import import_trail_balance_from_xero
 from .comparisons import compare_trail_balance
 from .exports import export_all_line_items_to_csv
@@ -494,4 +495,241 @@ def validate_balance_sheet_accounts(tenant_id, report_id=None, report_date=None,
         },
         'validations': validations
     }
+
+
+def validate_balance_sheet_from_excel(tenant_id, file_path, report_date=None, tolerance=Decimal('0.01'), **parser_kwargs):
+    """
+    Validate balance sheet data from a Xero Balance Sheet Excel export against the database.
+
+    Uses the same DB logic as validate_balance_sheet_accounts: cumulative XeroTrailBalance
+    for ASSET/LIABILITY/EQUITY to report_date, plus Retained Earnings (960) adjustment from P&L.
+
+    Args:
+        tenant_id: Xero tenant ID
+        file_path: Path to the .xlsx Balance Sheet file
+        report_date: Report date (required if not present in Excel)
+        tolerance: Tolerance for numeric comparison (default 0.01)
+        **parser_kwargs: Optional kwargs passed to parse_balance_sheet_excel
+
+    Returns:
+        dict: Same shape as validate_balance_sheet_accounts (validations, statistics, overall_status, etc.)
+    """
+    from datetime import date
+
+    try:
+        organisation = XeroTenant.objects.get(tenant_id=tenant_id)
+    except XeroTenant.DoesNotExist:
+        raise ValueError(f"Tenant {tenant_id} not found")
+
+    parsed = parse_balance_sheet_excel(file_path, **parser_kwargs)
+    excel_rows = parsed.get('rows') or []
+    report_date = report_date or parsed.get('report_date')
+    if not report_date:
+        raise ValueError("report_date is required (not found in Excel and not provided)")
+
+    if isinstance(report_date, str):
+        from datetime import datetime
+        report_date = datetime.strptime(report_date, '%Y-%m-%d').date()
+
+    BALANCE_SHEET_GROUPINGS = ['ASSET', 'LIABILITY', 'EQUITY']
+
+    # Resolve each Excel row to XeroAccount (by code then name), filter to balance sheet only
+    excel_balances = {}  # account_id -> value
+    excel_account_names = {}  # account_id -> account_name for output
+    unmatched_rows = []
+
+    for row in excel_rows:
+        account_name = (row.get('account_name') or '').strip()
+        account_code = (row.get('account_code') or '').strip()
+        value = row.get('value') or Decimal('0')
+        if isinstance(value, str):
+            try:
+                value = Decimal(value)
+            except Exception:
+                value = Decimal('0')
+
+        account = None
+        if account_code:
+            account = (
+                XeroAccount.objects.filter(organisation=organisation, code=account_code)
+                .first()
+            )
+        if not account and account_name:
+            account = (
+                XeroAccount.objects.filter(organisation=organisation)
+                .filter(
+                    Q(name__iexact=account_name) | Q(name__icontains=account_name)
+                )
+                .first()
+            )
+        if not account:
+            unmatched_rows.append({'account_name': account_name, 'account_code': account_code, 'value': value})
+            continue
+
+        grouping = (account.grouping or '').upper()
+        if grouping not in BALANCE_SHEET_GROUPINGS:
+            continue
+
+        excel_balances[account.account_id] = value
+        excel_account_names[account.account_id] = account_name
+
+    logger.info(
+        "Excel parsed: %d rows, %d matched to balance sheet accounts, %d unmatched",
+        len(excel_rows), len(excel_balances), len(unmatched_rows),
+    )
+
+    # DB: cumulative balances to report_date (same as validate_balance_sheet_accounts)
+    report_year = report_date.year
+    report_month = report_date.month
+
+    db_trail_balance = XeroTrailBalance.objects.filter(
+        organisation=organisation,
+        account__grouping__in=BALANCE_SHEET_GROUPINGS
+    ).filter(
+        Q(year__lt=report_year) |
+        (Q(year=report_year) & Q(month__lte=report_month))
+    ).values('account').annotate(total_amount=Sum('amount'))
+
+    db_balances = {}
+    for item in db_trail_balance:
+        account_id = item['account']
+        db_balances[account_id] = Decimal(str(item['total_amount']))
+
+    revenue_total = XeroTrailBalance.objects.filter(
+        organisation=organisation,
+        account__grouping='REVENUE'
+    ).filter(
+        Q(year__lt=report_year) |
+        (Q(year=report_year) & Q(month__lte=report_month))
+    ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
+
+    expense_total = XeroTrailBalance.objects.filter(
+        organisation=organisation,
+        account__grouping='EXPENSE'
+    ).filter(
+        Q(year__lt=report_year) |
+        (Q(year=report_year) & Q(month__lte=report_month))
+    ).aggregate(total=Sum('amount'))['total'] or Decimal('0')
+
+    cumulative_pnl = revenue_total + expense_total
+
+    validations = []
+    matches = 0
+    mismatches = 0
+    missing_in_db = 0
+    missing_in_excel = 0
+    total_xero_value = Decimal('0')
+    total_db_value = Decimal('0')
+
+    for account_id, xero_value in excel_balances.items():
+        try:
+            account = XeroAccount.objects.get(account_id=account_id)
+        except XeroAccount.DoesNotExist:
+            continue
+
+        db_value = db_balances.get(account_id, Decimal('0'))
+        original_db_value = db_value
+
+        account_name_lower = (account.name or '').lower()
+        is_retained_earnings = (
+            (account.code == '960' or (account.grouping == 'EQUITY' and 'retained' in account_name_lower))
+        )
+        if is_retained_earnings:
+            db_value = db_value + cumulative_pnl
+
+        total_xero_value += xero_value
+        total_db_value += db_value
+        difference = xero_value - db_value
+        abs_difference = abs(difference)
+
+        if abs_difference <= tolerance:
+            status = 'match'
+            matches += 1
+        else:
+            if db_value == 0:
+                status = 'missing_in_db'
+                missing_in_db += 1
+            else:
+                status = 'mismatch'
+                mismatches += 1
+
+        validations.append({
+            'account_id': account_id,
+            'account_code': account.code or '',
+            'account_name': account.name or excel_account_names.get(account_id, ''),
+            'account_grouping': account.grouping,
+            'account_type': account.type,
+            'xero_value': str(xero_value),
+            'db_value': str(db_value),
+            'difference': str(difference),
+            'abs_difference': str(abs_difference),
+            'status': status,
+        })
+        if is_retained_earnings:
+            validations[-1]['cumulative_pnl_added'] = str(cumulative_pnl)
+            validations[-1]['db_value_before_pnl'] = str(original_db_value)
+
+    # DB accounts not in Excel
+    for account_id, db_value in db_balances.items():
+        if account_id in excel_balances:
+            continue
+        if abs(db_value) <= tolerance:
+            continue
+        try:
+            account = XeroAccount.objects.get(account_id=account_id)
+            if (account.grouping or '').upper() not in BALANCE_SHEET_GROUPINGS:
+                continue
+            validations.append({
+                'account_id': account_id,
+                'account_code': account.code or account_id,
+                'account_name': account.name,
+                'account_grouping': account.grouping,
+                'account_type': account.type,
+                'xero_value': '0',
+                'db_value': str(db_value),
+                'difference': str(-db_value),
+                'abs_difference': str(abs(db_value)),
+                'status': 'missing_in_xero',
+            })
+            missing_in_excel += 1
+            total_db_value += db_value
+        except XeroAccount.DoesNotExist:
+            pass
+
+    total_difference = total_xero_value - total_db_value
+    total_abs_difference = abs(total_difference)
+    overall_status = 'pass' if total_abs_difference <= tolerance and mismatches == 0 and missing_in_db == 0 else 'fail'
+
+    result = {
+        'success': True,
+        'overall_status': overall_status,
+        'message': f"Balance sheet Excel validation {'PASSED' if overall_status == 'pass' else 'FAILED'} for report dated {report_date}",
+        'report_date': report_date,
+        'file_path': file_path,
+        'cumulative_pnl': str(cumulative_pnl),
+        'statistics': {
+            'total_accounts_validated': len(validations),
+            'matches': matches,
+            'mismatches': mismatches,
+            'missing_in_db': missing_in_db,
+            'missing_in_xero': missing_in_excel,
+            'match_percentage': (matches / len(validations) * 100) if validations else 0,
+            'total_xero_value': str(total_xero_value),
+            'total_db_value': str(total_db_value),
+            'total_difference': str(total_difference),
+            'total_abs_difference': str(total_abs_difference),
+            'tolerance': str(tolerance),
+            'cumulative_pnl': str(cumulative_pnl),
+            'excel_rows_parsed': len(excel_rows),
+            'excel_rows_matched': len(excel_balances),
+            'excel_rows_unmatched': len(unmatched_rows),
+        },
+        'validations': validations,
+    }
+    if unmatched_rows:
+        result['unmatched_excel_rows'] = [
+            {'account_name': r['account_name'], 'account_code': r.get('account_code'), 'value': str(r.get('value'))}
+            for r in unmatched_rows[:50]
+        ]
+    return result
 

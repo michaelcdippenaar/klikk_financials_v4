@@ -12,7 +12,7 @@ from apps.xero.xero_core.services import XeroApiClient, XeroAccountingApi, seria
 from apps.xero.xero_metadata.models import XeroAccount
 from ..models import XeroTrailBalanceReport, XeroTrailBalanceReportLine
 from ..helpers.trial_balance_parser import parse_trial_balance_dict, parse_trial_balance_report
-from ..helpers.profit_loss_parser import parse_profit_loss_report
+from ..helpers.profit_loss_parser import parse_profit_loss_report, parse_profit_loss_report_multi
 from ..helpers.service_helpers import convert_decimals_to_strings
 
 logger = logging.getLogger(__name__)
@@ -225,17 +225,20 @@ def import_trail_balance_from_xero(tenant_id, report_date=None, user=None):
         raise Exception(f"Failed to import trail balance from Xero: {str(e)}") from e
 
 
-def import_profit_loss_from_xero(tenant_id, from_date, to_date, periods=11, timeframe='MONTH', user=None):
+def import_profit_loss_from_xero(tenant_id, from_date, to_date, periods=11, timeframe='MONTH', user=None, report_from_date=None):
     """
     Import Profit and Loss report from Xero API.
     
     Args:
         tenant_id: Xero tenant ID
-        from_date: Start date (date object or YYYY-MM-DD string)
-        to_date: End date (date object or YYYY-MM-DD string)
-        periods: Number of periods (default 11 for 12 months)
+        from_date: Start date for the Xero API call (date object or YYYY-MM-DD string)
+        to_date: End date for the Xero API call (date object or YYYY-MM-DD string)
+        periods: Number of comparison periods (default 11 → 12 columns with timeframe=MONTH)
         timeframe: MONTH, QUARTER, or YEAR
         user: User object for API authentication
+        report_from_date: Start date for the stored report (for comparison alignment).
+                          Defaults to from_date. Use to store a FY-start date while the
+                          API call targets only the last month of the FY.
     
     Returns:
         dict: Result with status, message, and report instance
@@ -251,6 +254,10 @@ def import_profit_loss_from_xero(tenant_id, from_date, to_date, periods=11, time
         from_date = timezone.datetime.strptime(from_date, '%Y-%m-%d').date()
     if isinstance(to_date, str):
         to_date = timezone.datetime.strptime(to_date, '%Y-%m-%d').date()
+    if isinstance(report_from_date, str):
+        report_from_date = timezone.datetime.strptime(report_from_date, '%Y-%m-%d').date()
+    if report_from_date is None:
+        report_from_date = from_date
     
     # Get user from credentials if not provided
     if not user:
@@ -268,7 +275,7 @@ def import_profit_loss_from_xero(tenant_id, from_date, to_date, periods=11, time
     from_date_str = from_date.strftime("%Y-%m-%d")
     to_date_str = to_date.strftime("%Y-%m-%d")
     
-    logger.info(f"Fetching P&L report from Xero: {from_date_str} to {to_date_str}, {periods} periods")
+    logger.info(f"Fetching P&L report from Xero: API {from_date_str} to {to_date_str}, {periods} periods (report from_date={report_from_date})")
     
     try:
         # Call Xero API to get Profit and Loss report
@@ -299,22 +306,22 @@ def import_profit_loss_from_xero(tenant_id, from_date, to_date, periods=11, time
                                 print(f"[IMPORT]   Cell 2 (period 1?): {cells[2].get('Value', '')}")
                         break
         
-        # Parse and create report
+        # Parse and create report — store with report_from_date (FY start) for comparison alignment
         report = parse_profit_loss_report(
             organisation=organisation,
             data=pnl_data,
-            from_date=from_date,
+            from_date=report_from_date,
             to_date=to_date,
             periods=periods + 1  # periods=11 means 12 months (0-11)
         )
         
         lines_created = report.lines.count()
         
-        logger.info(f"Imported P&L report with {lines_created} lines for {from_date} to {to_date}")
+        logger.info(f"Imported P&L report with {lines_created} lines for {report_from_date} to {to_date}")
         
         return {
             'success': True,
-            'message': f"Successfully imported P&L report for {from_date} to {to_date}",
+            'message': f"Successfully imported P&L report for {report_from_date} to {to_date}",
             'report': report,
             'lines_created': lines_created,
             'is_new': True
@@ -323,6 +330,67 @@ def import_profit_loss_from_xero(tenant_id, from_date, to_date, periods=11, time
     except Exception as e:
         logger.error(f"Error importing P&L report from Xero: {str(e)}", exc_info=True)
         raise Exception(f"Failed to import P&L report from Xero: {str(e)}") from e
+
+
+def import_profit_loss_from_xero_reconciliation(tenant_id, from_date, to_date, api_call_plans, user=None):
+    """
+    Import P&L for reconciliation using pre-built API call plans (31-day anchors).
+    Makes one or more Xero API calls and merges results into a single report.
+
+    Args:
+        tenant_id: Xero tenant ID
+        from_date: Report start date (FY start)
+        to_date: Report end date (capped to current month)
+        api_call_plans: List of (anchor_from_date, anchor_to_date, n_periods, batch_months)
+                        from reconciliation._build_pnl_api_call_plans
+        user: Optional user for API auth
+
+    Returns:
+        dict: { 'report': XeroProfitAndLossReport, 'lines_created': int, 'message': str }
+    """
+    try:
+        organisation = XeroTenant.objects.get(tenant_id=tenant_id)
+    except XeroTenant.DoesNotExist:
+        raise ValueError(f"Tenant {tenant_id} not found")
+
+    if isinstance(from_date, str):
+        from_date = timezone.datetime.strptime(from_date, '%Y-%m-%d').date()
+    if isinstance(to_date, str):
+        to_date = timezone.datetime.strptime(to_date, '%Y-%m-%d').date()
+
+    if not user:
+        from apps.xero.xero_auth.models import XeroClientCredentials
+        creds = XeroClientCredentials.objects.filter(active=True).first()
+        if not creds:
+            raise ValueError("No active Xero credentials found and no user provided")
+        user = creds.user
+
+    api_client = XeroApiClient(user, tenant_id=tenant_id)
+    xero_api = XeroAccountingApi(api_client, tenant_id)
+
+    api_responses = []
+    for anchor_from, anchor_to, n_periods, batch_months in api_call_plans:
+        from_str = anchor_from.strftime("%Y-%m-%d")
+        to_str = anchor_to.strftime("%Y-%m-%d")
+        logger.info(f"Fetching P&L from Xero: {from_str} to {to_str}, periods={n_periods}")
+        pnl_data = xero_api.profit_and_loss().get(
+            from_date=from_str,
+            to_date=to_str,
+            periods=n_periods,
+            timeframe="MONTH",
+        )
+        api_responses.append((pnl_data, batch_months))
+
+    report = parse_profit_loss_report_multi(organisation, api_responses, from_date, to_date)
+    lines_created = report.lines.count()
+    logger.info(f"Imported P&L report with {lines_created} lines for {from_date} to {to_date}")
+    return {
+        "success": True,
+        "message": f"Successfully imported P&L report for {from_date} to {to_date}",
+        "report": report,
+        "lines_created": lines_created,
+        "is_new": True,
+    }
 
 
 def import_and_export_trail_balance(tenant_id, user=None):

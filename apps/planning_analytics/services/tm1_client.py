@@ -3,8 +3,8 @@ TM1 REST API client for executing TI processes and testing connections.
 
 Credentials are resolved in order:
   1. Explicit arguments passed to the function
-  2. Django settings (TM1_BASE_URL / TM1_USER / TM1_PASSWORD)
-  3. Active TM1ServerConfig row in the database
+  2. Active TM1ServerConfig row in the database
+  3. Django settings (TM1_BASE_URL / TM1_USER / TM1_PASSWORD)
 """
 import requests
 from requests.auth import HTTPBasicAuth
@@ -24,21 +24,15 @@ def _get_server_config():
 
 
 def _resolve_credentials(base_url=None, user=None, password=None):
-    """Resolve TM1 credentials from args -> settings -> DB."""
-    if not base_url:
-        base_url = getattr(settings, 'TM1_BASE_URL', None)
-    if user is None:
-        user = getattr(settings, 'TM1_USER', None)
-    if password is None:
-        password = getattr(settings, 'TM1_PASSWORD', None)
+    """Resolve TM1 credentials from args -> DB -> settings."""
+    db_url, db_user, db_pw = _get_server_config()
 
     if not base_url:
-        db_url, db_user, db_pw = _get_server_config()
-        base_url = base_url or db_url
-        if user is None:
-            user = db_user
-        if password is None:
-            password = db_pw
+        base_url = db_url or getattr(settings, 'TM1_BASE_URL', None)
+    if user is None:
+        user = db_user if db_user is not None else getattr(settings, 'TM1_USER', None)
+    if password is None:
+        password = db_pw if db_pw is not None else getattr(settings, 'TM1_PASSWORD', None)
 
     return base_url, user, password
 

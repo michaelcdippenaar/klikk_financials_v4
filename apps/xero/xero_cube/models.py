@@ -124,7 +124,7 @@ class XeroTrailBalance(models.Model):
     tax_amount = models.DecimalField(max_digits=30, decimal_places=2, default=0, blank=True,
                                      help_text="Sum of journal line tax_amount for this account/period/contact/tracking.")
     balance_to_date = models.DecimalField(max_digits=30, decimal_places=2, null=True, blank=True,
-                                          help_text="Balance to date for P&L accounts (REVENUE/EXPENSE) - cumulative sum of all previous months up to and including current month")
+                                          help_text="Balance to date (YTD) for balance sheet accounts (ASSET, LIABILITY, EQUITY) - cumulative sum of all periods up to and including current month")
 
     objects = XeroTrailBalanceManager()
 

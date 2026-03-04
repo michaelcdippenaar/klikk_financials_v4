@@ -277,7 +277,17 @@ def compare_profit_loss(tenant_id, report_id=None, tolerance=Decimal('0.01')):
             xero_value = Decimal(str(line.period_values.get(period_key, '0')))
             
             # Get database value
-            db_value = db_balances.get(line.account.account_id, Decimal('0'))
+            db_raw = db_balances.get(line.account.account_id, Decimal('0'))
+            # Normalise to P&L display convention.
+            # REVENUE: DB is usually credit-negative; invert so income displays as positive.
+            # EXPENSE: keep DB sign as-is so contra/credit expense lines stay negative and
+            # match Xero report presentation.
+            if line.account.type == 'EXPENSE':
+                db_value = db_raw
+            elif line.account.type == 'REVENUE':
+                db_value = -db_raw if db_raw != 0 else db_raw  # display as positive income
+            else:
+                db_value = db_raw
             
             # Calculate difference
             difference = xero_value - db_value
@@ -310,10 +320,16 @@ def compare_profit_loss(tenant_id, report_id=None, tolerance=Decimal('0.01')):
         
         # Find accounts in DB that are missing in Xero report for this period
         xero_account_ids = {line.account.account_id for line in report_lines if line.account}
-        for account_id, db_value in db_balances.items():
-            if account_id not in xero_account_ids and abs(db_value) > tolerance:
+        for account_id, db_raw in db_balances.items():
+            if account_id not in xero_account_ids and abs(db_raw) > tolerance:
                 try:
                     account = XeroAccount.objects.get(account_id=account_id)
+                    if account.type == 'EXPENSE':
+                        db_value = db_raw
+                    elif account.type == 'REVENUE':
+                        db_value = -db_raw if db_raw != 0 else db_raw
+                    else:
+                        db_value = db_raw
                     ProfitAndLossComparison.objects.create(
                         report=report,
                         account=account,
@@ -341,11 +357,28 @@ def compare_profit_loss(tenant_id, report_id=None, tolerance=Decimal('0.01')):
             'match_percentage': (period_matches / total_period_comparisons * 100) if total_period_comparisons > 0 else 0
         }
     
+    # Build per-period list of exceptions (non-match comparisons) for API response
+    period_exceptions = {}
+    for c in comparisons:
+        if c.match_status == 'match':
+            continue
+        pid = str(c.period_index)
+        if pid not in period_exceptions:
+            period_exceptions[pid] = []
+        period_exceptions[pid].append({
+            'account_code': c.account.code or '',
+            'account_name': c.account.name or '',
+            'xero_value': str(c.xero_value),
+            'db_value': str(c.db_value),
+            'difference': str(c.difference),
+            'status': c.match_status,
+        })
+
     # Overall statistics
     total_comparisons = len(comparisons)
     total_matches = sum(stats['matches'] for stats in period_stats.values())
     total_mismatches = sum(stats['mismatches'] for stats in period_stats.values())
-    
+
     return {
         'success': True,
         'message': f"P&L comparison completed for report {report.from_date} to {report.to_date}",
@@ -354,6 +387,7 @@ def compare_profit_loss(tenant_id, report_id=None, tolerance=Decimal('0.01')):
         'to_date': report.to_date,
         'periods': report.periods,
         'period_stats': period_stats,
+        'period_exceptions': period_exceptions,
         'overall_statistics': {
             'total_comparisons': total_comparisons,
             'total_matches': total_matches,

@@ -70,8 +70,8 @@ class TM1ConfigView(APIView):
         })
 
     def post(self, request):
-        base_url = request.data.get('base_url', '')
-        username = request.data.get('username', '')
+        base_url = (request.data.get('base_url', '') or '').strip()
+        username = (request.data.get('username', '') or '').strip()
         password = request.data.get('password', '')
 
         cfg = TM1ServerConfig.get_active()

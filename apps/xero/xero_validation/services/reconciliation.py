@@ -1,13 +1,14 @@
 """
 Reconciliation service: fetch P&L and Balance Sheet (via Xero reports), compare to our trail balance, per financial year.
 """
+import calendar
 import logging
 from datetime import date
 from decimal import Decimal
 
 from apps.xero.xero_core.models import XeroTenant
 
-from .imports import import_profit_loss_from_xero, import_trail_balance_from_xero
+from .imports import import_profit_loss_from_xero_reconciliation, import_trail_balance_from_xero
 from .comparisons import compare_profit_loss
 from .validation import validate_balance_sheet_accounts
 
@@ -32,6 +33,64 @@ def _financial_year_dates(financial_year, fiscal_year_start_month):
         from calendar import monthrange
         to_date = date(end_year_for_month, end_month, monthrange(end_year_for_month, end_month)[1])
     return from_date, to_date
+
+
+def _build_pnl_api_call_plans(from_date, to_date):
+    """
+    Build API call plan for P&L using 31-day month anchors so period boundaries
+    align to calendar month-ends (avoiding 31st-day spillover).
+
+    Returns:
+        list of (anchor_from_date, anchor_to_date, n_periods, batch_months)
+        where batch_months is list of (year, month) in chronological order for that call.
+    """
+    desired_months = []
+    cur = from_date
+    while (cur.year, cur.month) <= (to_date.year, to_date.month):
+        desired_months.append((cur.year, cur.month))
+        if cur.month == 12:
+            cur = date(cur.year + 1, 1, 1)
+        else:
+            cur = date(cur.year, cur.month + 1, 1)
+
+    api_call_plans = []
+    remaining = set(desired_months)
+
+    while remaining:
+        remaining_sorted = sorted(remaining)
+        anchor_ym = None
+        for ym in reversed(remaining_sorted):
+            _, days = calendar.monthrange(ym[0], ym[1])
+            if days == 31:
+                anchor_ym = ym
+                break
+        if not anchor_ym:
+            anchor_ym = remaining_sorted[-1]
+
+        ay, am = anchor_ym
+        _, anchor_days = calendar.monthrange(ay, am)
+        anchor_from = date(ay, am, 1)
+        anchor_to = date(ay, am, anchor_days)
+
+        months_at_or_before = [ym for ym in remaining_sorted if ym <= anchor_ym]
+        n_periods = min(len(months_at_or_before) - 1, 11)
+        n_periods = max(n_periods, 1)
+
+        batch = []
+        y, m = ay, am
+        for _ in range(n_periods + 1):
+            batch.append((y, m))
+            m -= 1
+            if m < 1:
+                m = 12
+                y -= 1
+        batch.reverse()
+
+        api_call_plans.append((anchor_from, anchor_to, n_periods, batch))
+        for ym in batch:
+            remaining.discard(ym)
+
+    return api_call_plans
 
 
 def reconcile_reports_for_financial_year(
@@ -83,8 +142,13 @@ def reconcile_reports_for_financial_year(
         fiscal_year_start_month = organisation.get_fiscal_year_start_month()
 
     from_date, to_date = _financial_year_dates(financial_year, fiscal_year_start_month)
+    today = date.today()
+    last_day_current = calendar.monthrange(today.year, today.month)[1]
+    # Keep all reconciliation steps aligned to the same effective end date.
+    # This avoids comparing P&L to current-month data while importing BS at a future FY-end date.
+    effective_to_date = min(to_date, date(today.year, today.month, last_day_current))
     from_date_str = from_date.isoformat()
-    to_date_str = to_date.isoformat()
+    to_date_str = effective_to_date.isoformat()
 
     report = {
         "financial_year": financial_year,
@@ -96,24 +160,32 @@ def reconcile_reports_for_financial_year(
         "errors": [],
     }
 
-    # —— 1. Import P&L for the financial year (12 months) ——
+    # —— 1. Import P&L for the financial year (up to current month) ——
+    # Cap to_date to current month so we don't request future months with empty data.
+    # Use a 31-day month as API anchor so period boundaries align to calendar month-ends.
     try:
-        periods = 11  # 12 months (0–11)
-        pnl_import = import_profit_loss_from_xero(
-            tenant_id=tenant_id,
-            from_date=from_date,
-            to_date=to_date,
-            periods=periods,
-            timeframe="MONTH",
-            user=user,
-        )
-        report["profit_loss"]["import"] = {
-            "report_id": pnl_import["report"].id,
-            "from_date": from_date_str,
-            "to_date": to_date_str,
-            "lines_created": pnl_import.get("lines_created", 0),
-            "message": pnl_import.get("message", "P&L imported"),
-        }
+        if effective_to_date < from_date:
+            report["success"] = False
+            report["errors"].append("P&L import: FY end is before FY start (no data yet)")
+            report["profit_loss"]["import"] = {"error": "No data for this financial year yet"}
+        else:
+            report["to_date"] = effective_to_date.isoformat()
+            to_date_str = report["to_date"]
+            api_call_plans = _build_pnl_api_call_plans(from_date, effective_to_date)
+            pnl_import = import_profit_loss_from_xero_reconciliation(
+                tenant_id=tenant_id,
+                from_date=from_date,
+                to_date=effective_to_date,
+                api_call_plans=api_call_plans,
+                user=user,
+            )
+            report["profit_loss"]["import"] = {
+                "report_id": pnl_import["report"].id,
+                "from_date": from_date_str,
+                "to_date": to_date_str,
+                "lines_created": pnl_import.get("lines_created", 0),
+                "message": pnl_import.get("message", "P&L imported"),
+            }
     except Exception as e:
         report["success"] = False
         report["errors"].append(f"P&L import: {str(e)}")
@@ -131,6 +203,7 @@ def reconcile_reports_for_financial_year(
             report["profit_loss"]["comparison"] = {
                 "report_id": pnl_compare.get("report_id"),
                 "period_stats": pnl_compare.get("period_stats"),
+                "period_exceptions": pnl_compare.get("period_exceptions", {}),
                 "overall_statistics": pnl_compare.get("overall_statistics"),
                 "message": pnl_compare.get("message", "P&L comparison done"),
             }
@@ -140,11 +213,11 @@ def reconcile_reports_for_financial_year(
             report["profit_loss"]["comparison"] = {"error": str(e)}
             logger.exception("P&L comparison failed for FY %s", financial_year)
 
-    # —— 3. Import Xero Trail Balance as at last day of FY (for balance sheet) ——
+    # —— 3. Import Xero Trail Balance as at effective end date (for balance sheet) ——
     try:
         tb_import = import_trail_balance_from_xero(
             tenant_id=tenant_id,
-            report_date=to_date,
+            report_date=effective_to_date,
             user=user,
         )
         report["balance_sheet"]["import"] = {

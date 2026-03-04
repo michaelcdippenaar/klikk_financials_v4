@@ -145,18 +145,18 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
             print(f"BigQuery export skipped: {e2}")
 
 
-def calculate_profit_loss_balance_to_date(tenant_id):
+def calculate_balance_sheet_balance_to_date(tenant_id):
     """
-    Calculate balance_to_date (YTD) for Profit & Loss accounts using a single
-    SQL UPDATE with a window function instead of per-combination queries.
+    Calculate balance_to_date (YTD) for balance sheet accounts (ASSET, LIABILITY, EQUITY)
+    using a single SQL UPDATE with a window function.
 
     Args:
         tenant_id: Xero tenant ID
     """
     from django.db import connection
 
-    logger.info(f'Start calculating P&L balance_to_date for tenant {tenant_id}')
-    print(f"[P&L YTD] Starting balance_to_date calculation for tenant {tenant_id}")
+    logger.info(f'Start calculating balance sheet balance_to_date for tenant {tenant_id}')
+    print(f"[BS YTD] Starting balance_to_date calculation for tenant {tenant_id}")
 
     try:
         XeroTenant.objects.get(tenant_id=tenant_id)
@@ -177,7 +177,7 @@ def calculate_profit_loss_balance_to_date(tenant_id):
             WHERE tb_inner.organisation_id = %s
               AND tb_inner.account_id IN (
                   SELECT account_id FROM xero_metadata_xeroaccount
-                  WHERE organisation_id = %s AND type IN ('REVENUE', 'EXPENSE')
+                  WHERE organisation_id = %s AND grouping IN ('ASSET', 'LIABILITY', 'EQUITY')
               )
         ) sub
         WHERE tb.id = sub.id
@@ -188,8 +188,12 @@ def calculate_profit_loss_balance_to_date(tenant_id):
         cursor.execute(sql, [tenant_id, tenant_id])
         total_updated = cursor.rowcount
 
-    logger.info(f"Completed balance_to_date calculation: updated {total_updated} P&L records")
-    print(f"[P&L YTD] ✓ Completed: updated {total_updated} P&L records (single SQL window function)")
+    logger.info(f"Completed balance_to_date calculation: updated {total_updated} balance sheet records")
+    print(f"[BS YTD] ✓ Completed: updated {total_updated} balance sheet records (single SQL window function)")
+
+
+# Backward compatibility: old name now runs balance sheet YTD (no longer P&L)
+calculate_profit_loss_balance_to_date = calculate_balance_sheet_balance_to_date
 
 
 def create_balance_sheet(tenant_id):
@@ -231,7 +235,7 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
     Processing order:
     1. Process journals from XeroJournalsSource to XeroJournals
     2. Create trail balance from processed journals
-    3. Calculate balance_to_date for P&L accounts (optional, can be slow)
+    3. Calculate balance_to_date for balance sheet accounts (ASSET, LIABILITY, EQUITY) (optional)
     
     Note: Metadata and Data Source updates must complete before this runs.
     
@@ -239,7 +243,7 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
         tenant_id: Xero tenant ID
         rebuild_trail_balance: If True, force full rebuild of trail balance and ignore existing data
         exclude_manual_journals: If True, only build trail balance from regular journals (exclude manual journals)
-        calculate_pnl_ytd: If True (default), calculate P&L balance_to_date after trail balance. Set False to skip.
+        calculate_pnl_ytd: If True (default), calculate balance_to_date for balance sheet accounts after trail balance. Set False to skip.
         touched_transaction_ids: Optional set of transaction IDs updated in the preceding sync step.
             When provided, only those transactions are reprocessed (incremental).
             When None, all transactions are reprocessed (full rebuild).
@@ -294,16 +298,16 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
         stats['trail_balance_created'] = True
         print(f"[PROCESS] ✓ Trail balance created")
         
-        # Step 3: Calculate balance_to_date for P&L accounts (optional)
+        # Step 3: Calculate balance_to_date for balance sheet accounts (optional)
         if calculate_pnl_ytd:
-            logger.info(f'Start calculating P&L balance_to_date for tenant {tenant_id}')
-            print(f"[PROCESS] Starting P&L balance_to_date calculation for tenant {tenant_id}")
-            calculate_profit_loss_balance_to_date(tenant_id)
+            logger.info(f'Start calculating balance sheet balance_to_date for tenant {tenant_id}')
+            print(f"[PROCESS] Starting balance sheet balance_to_date calculation for tenant {tenant_id}")
+            calculate_balance_sheet_balance_to_date(tenant_id)
             stats['pnl_balance_to_date_calculated'] = True
-            print(f"[PROCESS] ✓ P&L balance_to_date calculated")
+            print(f"[PROCESS] ✓ Balance sheet balance_to_date calculated")
         else:
             stats['pnl_balance_to_date_calculated'] = False
-            print(f"[PROCESS] Skipped P&L balance_to_date calculation (calculate_pnl_ytd=False)")
+            print(f"[PROCESS] Skipped balance sheet balance_to_date calculation (calculate_pnl_ytd=False)")
         
         # Uncomment if needed
         # create_balance_sheet(tenant_id)
