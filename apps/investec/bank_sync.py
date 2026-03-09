@@ -127,6 +127,7 @@ def run_investec_bank_sync(
                     fallback_key = None
                     if use_fallback:
                         parts = (
+                            str(account_id),
                             str(data.get("transaction_date") or ""),
                             str(data.get("value_date") or ""),
                             str(data.get("action_date") or ""),
@@ -143,11 +144,26 @@ def run_investec_bank_sync(
                             defaults={**data, "account": bank_account},
                         )
                     elif fallback_key:
-                        obj, created = InvestecBankTransaction.objects.update_or_create(
+                        existing = InvestecBankTransaction.objects.filter(
                             account=bank_account,
-                            fallback_key=fallback_key,
-                            defaults=data,
-                        )
+                            transaction_date=data.get("transaction_date"),
+                            value_date=data.get("value_date"),
+                            action_date=data.get("action_date"),
+                            amount=data.get("amount"),
+                            description=(data.get("description") or "")[:255],
+                        ).first()
+                        if existing:
+                            for k, v in data.items():
+                                setattr(existing, k, v)
+                            existing.fallback_key = fallback_key
+                            existing.save(update_fields=list(data.keys()) + ["fallback_key"])
+                            created = False
+                        else:
+                            obj, created = InvestecBankTransaction.objects.update_or_create(
+                                account=bank_account,
+                                fallback_key=fallback_key,
+                                defaults=data,
+                            )
                     elif posting_date is not None and posted_order is not None:
                         obj, created = InvestecBankTransaction.objects.update_or_create(
                             account=bank_account,

@@ -1846,37 +1846,7 @@ def bank_transaction_list_view(request):
     - account: account_id or account_number (filter by account)
     - limit, offset: pagination (default limit=100, offset=0)
     """
-    queryset = InvestecBankTransaction.objects.select_related('account').all().order_by('-posting_date', '-posted_order')
-
-    description = (request.query_params.get('description') or '').strip()
-    if description:
-        queryset = queryset.filter(description__icontains=description)
-
-    amount_param = (request.query_params.get('amount') or '').strip()
-    if amount_param:
-        try:
-            amount_val = Decimal(amount_param)
-            queryset = queryset.filter(amount=amount_val)
-        except (InvalidOperation, ValueError):
-            pass
-
-    date_from = request.query_params.get('date_from')
-    if date_from:
-        d = parse_date(date_from)
-        if d:
-            queryset = queryset.filter(posting_date__gte=d)
-
-    date_to = request.query_params.get('date_to')
-    if date_to:
-        d = parse_date(date_to)
-        if d:
-            queryset = queryset.filter(posting_date__lte=d)
-
-    account_param = (request.query_params.get('account') or '').strip()
-    if account_param:
-        queryset = queryset.filter(
-            Q(account__account_id=account_param) | Q(account__account_number=account_param)
-        )
+    queryset = _bank_transactions_queryset(request)
 
     total_count = queryset.count()
     limit = min(int(request.query_params.get('limit', 100)), 500)
@@ -1905,6 +1875,80 @@ def bank_transaction_list_view(request):
         'offset': offset,
         'results': results,
     })
+
+
+def _bank_transactions_queryset(request):
+    """Build the same filtered queryset as bank_transaction_list_view (for list and export)."""
+    qs = InvestecBankTransaction.objects.select_related('account').all().order_by('-posting_date', '-posted_order', 'id')
+    description = (request.query_params.get('description') or '').strip()
+    if description:
+        qs = qs.filter(description__icontains=description)
+    amount_param = (request.query_params.get('amount') or '').strip()
+    if amount_param:
+        try:
+            qs = qs.filter(amount=Decimal(amount_param))
+        except (InvalidOperation, ValueError):
+            pass
+    date_from = request.query_params.get('date_from')
+    if date_from:
+        d = parse_date(date_from)
+        if d:
+            qs = qs.filter(posting_date__gte=d)
+    date_to = request.query_params.get('date_to')
+    if date_to:
+        d = parse_date(date_to)
+        if d:
+            qs = qs.filter(posting_date__lte=d)
+    account_param = (request.query_params.get('account') or '').strip()
+    if account_param:
+        qs = qs.filter(
+            Q(account__account_id=account_param) | Q(account__account_number=account_param)
+        )
+    return qs
+
+
+@api_view(['GET'])
+def bank_transaction_export_view(request):
+    """
+    Export Investec bank transaction search results to Excel.
+    Same query params as bank/transactions/ (description, amount, date_from, date_to, account).
+    Returns Excel file; max 50_000 rows.
+    """
+    try:
+        queryset = _bank_transactions_queryset(request)
+        max_export = 50000
+        page = list(queryset[:max_export])
+        rows = [
+            {
+                'Posting Date': t.posting_date.isoformat() if t.posting_date else '',
+                'Transaction Date': t.transaction_date.isoformat() if t.transaction_date else '',
+                'Account Number': t.account.account_number,
+                'Account Name': (t.account.account_name or t.account.reference_name or ''),
+                'Type': t.type or '',
+                'Amount': float(t.amount),
+                'Description': t.description or '',
+                'Status': t.status or '',
+                'Running Balance': float(t.running_balance) if t.running_balance is not None else None,
+            }
+            for t in page
+        ]
+        df = pd.DataFrame(rows)
+        buf = io.BytesIO()
+        df.to_excel(buf, index=False, engine='openpyxl')
+        buf.seek(0)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f'Investec_Bank_Transactions_{timestamp}.xlsx'
+        response = HttpResponse(
+            buf.getvalue(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+    except Exception as e:
+        return Response(
+            {'error': f'Error exporting: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @api_view(['GET'])
