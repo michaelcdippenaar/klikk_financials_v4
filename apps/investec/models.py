@@ -287,3 +287,14 @@ class InvestecBankTransaction(models.Model):
 
     def __str__(self):
         return f"{self.account.account_number} {self.posting_date} {self.type} {self.amount} – {self.description[:30]}"
+
+
+class InvestecBankSyncLog(models.Model):
+    """Single row storing last Investec bank sync time. Used for incremental updates."""
+
+    key = models.CharField(max_length=32, unique=True, default='default')
+    last_synced_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Investec Bank Sync Log'
+        verbose_name_plural = 'Investec Bank Sync Logs'

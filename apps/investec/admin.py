@@ -6,6 +6,7 @@ from .models import (
     InvestecJseShareMonthlyPerformance,
     InvestecBankAccount,
     InvestecBankTransaction,
+    InvestecBankSyncLog,
 )
 
 
@@ -96,3 +97,9 @@ class InvestecBankTransactionAdmin(admin.ModelAdmin):
     date_hierarchy = 'posting_date'
     readonly_fields = ['created_at', 'updated_at']
     raw_id_fields = ['account']
+
+
+@admin.register(InvestecBankSyncLog)
+class InvestecBankSyncLogAdmin(admin.ModelAdmin):
+    list_display = ['key', 'last_synced_at']
+    readonly_fields = ['key', 'last_synced_at']

@@ -2,7 +2,7 @@ import pandas as pd
 import re
 import os
 import io
-from datetime import datetime
+from datetime import datetime, timedelta
 import traceback
 from rest_framework import status
 from rest_framework.decorators import api_view, parser_classes
@@ -13,10 +13,11 @@ from django.db import transaction
 from django.db.models import Q
 from django.http import HttpResponse
 from django.utils.dateparse import parse_date
+from django.utils import timezone
 from decimal import Decimal, InvalidOperation
-
-from .models import InvestecJseTransaction, InvestecJsePortfolio, InvestecJseShareNameMapping, InvestecJseShareMonthlyPerformance
+from .models import InvestecJseTransaction, InvestecJsePortfolio, InvestecJseShareNameMapping, InvestecJseShareMonthlyPerformance, InvestecBankAccount, InvestecBankTransaction, InvestecBankSyncLog
 from .serializers import InvestecJseTransactionSerializer, InvestecJsePortfolioSerializer, InvestecJseShareNameMappingSerializer
+from .bank_sync import run_investec_bank_sync
 
 
 
@@ -1809,3 +1810,140 @@ def export_transactions_view(request):
             {'error': f'Error exporting transactions: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+
+
+# ------------------------------------------------
+# Investec Private Bank (Bank Account & Transactions)
+# ------------------------------------------------
+
+@api_view(['GET'])
+def bank_account_list_view(request):
+    """
+    List all Investec Private Bank accounts (for dropdown/filter).
+    """
+    accounts = InvestecBankAccount.objects.all().order_by('account_number')
+    data = [
+        {
+            'id': a.id,
+            'account_id': a.account_id,
+            'account_number': a.account_number,
+            'account_name': a.account_name or a.reference_name or '',
+        }
+        for a in accounts
+    ]
+    return Response({'results': data})
+
+
+@api_view(['GET'])
+def bank_transaction_list_view(request):
+    """
+    Search Investec Private Bank transactions across all accounts.
+    Query params:
+    - amount: exact or partial match (e.g. "100" or "100.50")
+    - description: case-insensitive substring match
+    - date_from: YYYY-MM-DD
+    - date_to: YYYY-MM-DD
+    - account: account_id or account_number (filter by account)
+    - limit, offset: pagination (default limit=100, offset=0)
+    """
+    queryset = InvestecBankTransaction.objects.select_related('account').all().order_by('-posting_date', '-posted_order')
+
+    description = (request.query_params.get('description') or '').strip()
+    if description:
+        queryset = queryset.filter(description__icontains=description)
+
+    amount_param = (request.query_params.get('amount') or '').strip()
+    if amount_param:
+        try:
+            amount_val = Decimal(amount_param)
+            queryset = queryset.filter(amount=amount_val)
+        except (InvalidOperation, ValueError):
+            pass
+
+    date_from = request.query_params.get('date_from')
+    if date_from:
+        d = parse_date(date_from)
+        if d:
+            queryset = queryset.filter(posting_date__gte=d)
+
+    date_to = request.query_params.get('date_to')
+    if date_to:
+        d = parse_date(date_to)
+        if d:
+            queryset = queryset.filter(posting_date__lte=d)
+
+    account_param = (request.query_params.get('account') or '').strip()
+    if account_param:
+        queryset = queryset.filter(
+            Q(account__account_id=account_param) | Q(account__account_number=account_param)
+        )
+
+    total_count = queryset.count()
+    limit = min(int(request.query_params.get('limit', 100)), 500)
+    offset = int(request.query_params.get('offset', 0))
+    page = queryset[offset:offset + limit]
+
+    results = [
+        {
+            'id': t.id,
+            'account_id': t.account_id,
+            'account_number': t.account.account_number,
+            'account_name': t.account.account_name or t.account.reference_name or '',
+            'posting_date': t.posting_date.isoformat() if t.posting_date else None,
+            'transaction_date': t.transaction_date.isoformat() if t.transaction_date else None,
+            'type': t.type,
+            'amount': str(t.amount),
+            'description': t.description or '',
+            'status': t.status,
+            'running_balance': str(t.running_balance) if t.running_balance is not None else None,
+        }
+        for t in page
+    ]
+    return Response({
+        'count': total_count,
+        'limit': limit,
+        'offset': offset,
+        'results': results,
+    })
+
+
+@api_view(['GET'])
+def bank_sync_status_view(request):
+    """Return last Investec bank sync time for display in the portal."""
+    log = InvestecBankSyncLog.objects.filter(key='default').first()
+    last_synced_at = log.last_synced_at.isoformat() if log and log.last_synced_at else None
+    return Response({'last_synced_at': last_synced_at})
+
+
+@api_view(['POST'])
+def bank_sync_trigger_view(request):
+    """
+    Trigger sync from Investec API. Only fetches from last_synced_at date to today (incremental).
+    If never synced, uses last 180 days. Returns created/updated counts and new last_synced_at.
+    """
+    log = InvestecBankSyncLog.objects.filter(key='default').first()
+    to_date = timezone.now().date()
+    if log and log.last_synced_at:
+        from_date = log.last_synced_at.date()
+    else:
+        from_date = to_date - timedelta(days=180)
+
+    result = run_investec_bank_sync(
+        from_date=from_date,
+        to_date=to_date,
+        include_pending=False,
+        account_filter=None,
+        dry_run=False,
+        update_sync_log=True,
+    )
+
+    if result.get('error'):
+        return Response({'error': result['error']}, status=status.HTTP_400_BAD_REQUEST)
+
+    return Response({
+        'created': result['created'],
+        'updated': result['updated'],
+        'last_synced_at': result.get('last_synced_at'),
+        'from_date': from_date.isoformat(),
+        'to_date': to_date.isoformat(),
+    })
