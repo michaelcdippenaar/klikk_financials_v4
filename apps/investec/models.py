@@ -194,3 +194,96 @@ class InvestecJseShareMonthlyPerformance(models.Model):
     
     def __str__(self):
         return f"{self.share_name} - {self.date} - TTM: {self.dividend_ttm}"
+
+
+# ------------------------------------------------
+# Investec Private Banking (Bank Account) Models
+# ------------------------------------------------
+# Data from Investec SA PB Account Information API (openapi.investec.com).
+# Separate from JSE securities models above.
+
+
+class InvestecBankAccount(models.Model):
+    """Investec Private Bank account (current/checking). Synced from GET /za/pb/v1/accounts."""
+
+    account_id = models.CharField(max_length=40, unique=True, db_index=True)
+    account_number = models.CharField(max_length=40)
+    account_name = models.CharField(max_length=70, blank=True)
+    reference_name = models.CharField(max_length=70, blank=True)
+    product_name = models.CharField(max_length=70, blank=True)
+    kyc_compliant = models.BooleanField(default=False)
+    profile_id = models.CharField(max_length=70, blank=True)
+    profile_name = models.CharField(max_length=70, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['account_number']
+        verbose_name = 'Investec Bank Account'
+        verbose_name_plural = 'Investec Bank Accounts'
+
+    def __str__(self):
+        return f"{self.account_number} – {self.account_name or self.reference_name or 'Investec'}"
+
+
+class InvestecBankTransaction(models.Model):
+    """Single transaction on an Investec Private Bank account. Synced from GET /za/pb/v1/accounts/{id}/transactions."""
+
+    TYPE_CREDIT = 'CREDIT'
+    TYPE_DEBIT = 'DEBIT'
+    TYPE_CHOICES = [(TYPE_CREDIT, 'Credit'), (TYPE_DEBIT, 'Debit')]
+
+    STATUS_POSTED = 'POSTED'
+    STATUS_PENDING = 'PENDING'
+    STATUS_CHOICES = [(STATUS_POSTED, 'Posted'), (STATUS_PENDING, 'Pending')]
+
+    account = models.ForeignKey(
+        InvestecBankAccount,
+        on_delete=models.CASCADE,
+        related_name='transactions',
+        db_index=True,
+    )
+    type = models.CharField(max_length=10, choices=TYPE_CHOICES)
+    transaction_type = models.CharField(max_length=40, blank=True, db_index=True)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, db_index=True)
+    description = models.CharField(max_length=255, blank=True)
+    card_number = models.CharField(max_length=40, blank=True)
+    posted_order = models.IntegerField(null=True, blank=True)
+    posting_date = models.DateField(null=True, blank=True)
+    value_date = models.DateField(null=True, blank=True)
+    action_date = models.DateField(null=True, blank=True)
+    transaction_date = models.DateField(null=True, blank=True, db_index=True)
+    amount = models.DecimalField(max_digits=15, decimal_places=2)
+    running_balance = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    uuid = models.CharField(max_length=40, blank=True, null=True, unique=True, db_index=True)
+    fallback_key = models.CharField(
+        max_length=64,
+        blank=True,
+        null=True,
+        unique=True,
+        db_index=True,
+        help_text="Stable hash when API returns no uuid/posted_order; (transaction_date, value_date, action_date, amount, description).",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-posting_date', '-posted_order']
+        verbose_name = 'Investec Bank Transaction'
+        verbose_name_plural = 'Investec Bank Transactions'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['account', 'posting_date', 'posted_order'],
+                name='investec_bank_txn_account_posting_order',
+                condition=models.Q(posting_date__isnull=False) & models.Q(posted_order__isnull=False),
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['account', 'posting_date']),
+            models.Index(fields=['status']),
+        ]
+
+    def __str__(self):
+        return f"{self.account.account_number} {self.posting_date} {self.type} {self.amount} – {self.description[:30]}"

@@ -1,5 +1,12 @@
 from django.contrib import admin
-from .models import InvestecJseTransaction, InvestecJsePortfolio, InvestecJseShareNameMapping, InvestecJseShareMonthlyPerformance
+from .models import (
+    InvestecJseTransaction,
+    InvestecJsePortfolio,
+    InvestecJseShareNameMapping,
+    InvestecJseShareMonthlyPerformance,
+    InvestecBankAccount,
+    InvestecBankTransaction,
+)
 
 
 @admin.register(InvestecJseTransaction)
@@ -34,3 +41,58 @@ class InvestecJseShareMonthlyPerformanceAdmin(admin.ModelAdmin):
     search_fields = ['share_name']
     date_hierarchy = 'date'
     readonly_fields = ['created_at', 'updated_at']
+
+
+class InvestecBankTransactionInline(admin.TabularInline):
+    model = InvestecBankTransaction
+    extra = 0
+    can_delete = True
+    show_change_link = True
+    ordering = ['-posting_date', '-posted_order']
+    readonly_fields = [
+        'type', 'transaction_type', 'status', 'description', 'card_number',
+        'posted_order', 'posting_date', 'value_date', 'action_date', 'transaction_date',
+        'amount', 'running_balance', 'uuid', 'created_at', 'updated_at',
+    ]
+    fields = [
+        'posting_date', 'type', 'amount', 'transaction_type', 'status',
+        'description', 'running_balance', 'uuid',
+    ]
+    max_num = 500
+
+
+@admin.register(InvestecBankAccount)
+class InvestecBankAccountAdmin(admin.ModelAdmin):
+    list_display = [
+        'account_number',
+        'account_name',
+        'reference_name',
+        'product_name',
+        'kyc_compliant',
+        'profile_name',
+        'created_at',
+    ]
+    list_filter = ['kyc_compliant']
+    search_fields = ['account_id', 'account_number', 'account_name', 'reference_name']
+    readonly_fields = ['created_at', 'updated_at']
+    inlines = [InvestecBankTransactionInline]
+
+
+@admin.register(InvestecBankTransaction)
+class InvestecBankTransactionAdmin(admin.ModelAdmin):
+    list_display = [
+        'posting_date',
+        'account',
+        'type',
+        'amount',
+        'transaction_type',
+        'status',
+        'description',
+        'running_balance',
+        'uuid',
+    ]
+    list_filter = ['account', 'type', 'status', 'transaction_type', 'posting_date']
+    search_fields = ['description', 'uuid']
+    date_hierarchy = 'posting_date'
+    readonly_fields = ['created_at', 'updated_at']
+    raw_id_fields = ['account']

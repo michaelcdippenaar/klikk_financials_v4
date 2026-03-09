@@ -191,3 +191,11 @@ SIMPLE_JWT = {
 
 # Xero Scheduler Configuration
 XERO_SCHEDULER_ENABLED = False  # Set to False to disable scheduler
+
+# Investec Private Banking API (SA PB Account Information)
+# Credentials: set INVESTEC_CLIENT_ID, INVESTEC_CLIENT_SECRET, INVESTEC_API_KEY (x-api-key) in env or .env
+# Optional: INVESTEC_BASE_URL (default production; use https://openapisandbox.investec.com for sandbox)
+INVESTEC_BASE_URL = os.environ.get('INVESTEC_BASE_URL') or os.environ.get('investec_base_url') or 'https://openapi.investec.com'
+INVESTEC_CLIENT_ID = os.environ.get('INVESTEC_CLIENT_ID') or os.environ.get('investec_client_id') or ''
+INVESTEC_CLIENT_SECRET = os.environ.get('INVESTEC_CLIENT_SECRET') or os.environ.get('investec_client_secret') or ''
+INVESTEC_API_KEY = os.environ.get('INVESTEC_API_KEY') or os.environ.get('investec_key') or ''
