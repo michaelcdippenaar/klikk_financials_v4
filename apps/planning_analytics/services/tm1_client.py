@@ -53,7 +53,7 @@ def execute_process(process_name, parameters=None, base_url=None, user=None, pas
             'message': 'TM1 base URL is not configured (settings, DB, or request).',
         }
 
-    url = f"{base_url.rstrip('/')}/Processes('{process_name}')/tm1.Execute"
+    url = f"{base_url.rstrip('/')}/Processes('{process_name.replace(chr(39), chr(39)+chr(39))}')/tm1.Execute"
     auth = _build_auth(user, password)
     timeout = getattr(settings, 'TM1_REQUEST_TIMEOUT', 300)
     verify = getattr(settings, 'TM1_VERIFY_SSL', False)
@@ -66,13 +66,15 @@ def execute_process(process_name, parameters=None, base_url=None, user=None, pas
 
     try:
         resp = requests.post(url, json=body, auth=auth, timeout=timeout, verify=verify)
-        if resp.status_code in (200, 204):
+        if resp.status_code in (200, 204, 202):
             return {
                 'success': True,
                 'message': f"Process '{process_name}' executed successfully",
                 'detail': {
                     'status_code': resp.status_code,
-                    'note': "TM1 reports 'started'. Check TM1 Process Monitor for actual outcome.",
+                    'note': "TM1 reports 'started'. Check TM1 Process Monitor for actual outcome."
+                    if resp.status_code == 202
+                    else "TM1 accepted the request. Check Process Monitor for outcome.",
                 },
             }
         return {

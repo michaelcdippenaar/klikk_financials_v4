@@ -1,7 +1,7 @@
 """
 Sync Investec Private Bank accounts and transactions from the Investec API into PostgreSQL.
 
-Uses INVESTEC_CLIENT_ID, INVESTEC_CLIENT_SECRET, INVESTEC_API_KEY (and optionally INVESTEC_BASE_URL).
+Supports multiple credential profiles (INVESTEC_PROFILES in settings).
 Default date range: last 180 days (API default). Use --from-date / --to-date to override.
 """
 
@@ -74,12 +74,18 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f"Sync failed: {result['error']}"))
             return
 
+        if result.get("errors"):
+            for err in result["errors"]:
+                self.stdout.write(self.style.WARNING(f"Warning: {err}"))
+
+        profiles_synced = result.get("profiles_synced", 1)
         if options.get("dry_run"):
-            self.stdout.write(self.style.WARNING("DRY RUN – no database writes"))
+            self.stdout.write(self.style.WARNING(f"DRY RUN – no database writes ({profiles_synced} profile(s))"))
         else:
             self.stdout.write(
                 self.style.SUCCESS(
-                    f"Sync complete: {result['created']} created, {result['updated']} updated"
+                    f"Sync complete ({profiles_synced} profile(s)): "
+                    f"{result['created']} created, {result['updated']} updated"
                 )
             )
             if result.get("last_synced_at"):

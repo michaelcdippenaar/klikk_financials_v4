@@ -16,8 +16,8 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# In-memory token cache: (access_token, expires_at_epoch)
-_token_cache: Optional[tuple[str, float]] = None
+# In-memory token cache keyed by client_id: { client_id: (access_token, expires_at_epoch) }
+_token_cache: dict[str, tuple[str, float]] = {}
 
 
 def get_access_token(
@@ -29,12 +29,12 @@ def get_access_token(
 ) -> str:
     """
     Obtain OAuth2 access token. Uses client_credentials flow with Basic Auth + x-api-key.
-    Caches token and refreshes when within buffer_seconds of expiry (default 5 min).
+    Caches per client_id and refreshes when within buffer_seconds of expiry (default 5 min).
     """
-    global _token_cache
     now = time.time()
-    if _token_cache is not None:
-        token, expires = _token_cache
+    cached = _token_cache.get(client_id)
+    if cached is not None:
+        token, expires = cached
         if expires > now + buffer_seconds:
             return token
     token_url = f"{base_url.rstrip('/')}/identity/v2/oauth2/token"
@@ -50,7 +50,7 @@ def get_access_token(
     body = resp.json()
     access_token = body["access_token"]
     expires_in = int(body.get("expires_in", 1799))
-    _token_cache = (access_token, now + expires_in)
+    _token_cache[client_id] = (access_token, now + expires_in)
     return access_token
 
 

@@ -1,5 +1,5 @@
 from django.contrib import admin
-from apps.xero.xero_data.models import XeroTransactionSource, XeroJournalsSource, XeroJournals
+from apps.xero.xero_data.models import XeroTransactionSource, XeroJournalsSource, XeroJournals, XeroDocument
 
 
 @admin.register(XeroTransactionSource)
@@ -25,3 +25,11 @@ class XeroJournalsAdmin(admin.ModelAdmin):
     search_fields = ('journal_id', 'description', 'reference', 'organisation__tenant_name', 'account__name')
     readonly_fields = ('journal_id',)
     date_hierarchy = 'date'
+
+
+@admin.register(XeroDocument)
+class XeroDocumentAdmin(admin.ModelAdmin):
+    list_display = ('organisation', 'transaction_source', 'file_name', 'content_type', 'created_at')
+    list_filter = ('organisation', 'transaction_source__transaction_source')
+    search_fields = ('file_name', 'transaction_source__transactions_id')
+    readonly_fields = ('created_at', 'updated_at', 'xero_attachment_id')

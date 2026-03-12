@@ -12,7 +12,8 @@ from rest_framework.permissions import AllowAny
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_auth.models import XeroClientCredentials
 from apps.xero.xero_data.services import update_financial_data
-from apps.xero.xero_data.models import XeroJournalsSource
+from apps.xero.xero_data.models import XeroJournalsSource, XeroDocument
+from apps.xero.xero_data.document_sync import sync_documents_for_tenant
 from apps.xero.xero_sync.api_call_logging import log_xero_api_calls
 
 logger = logging.getLogger(__name__)
@@ -167,3 +168,68 @@ class XeroProcessJournalsView(APIView):
             return Response({
                 "error": f"Failed to process journals: {str(e)}"
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class XeroSyncDocumentsView(APIView):
+    """
+    Import documents (attachments) from Xero and link them to transactions.
+
+    Requires Xero OAuth scope: accounting.attachments or accounting.attachments.read.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        """
+        Sync documents for a tenant.
+
+        Payload:
+        {
+            "tenant_id": "string",
+            "transaction_ids": ["id1", "id2"],  // optional; if omitted, syncs all supported transactions
+            "types": ["Invoice", "CreditNote", "BankTransaction"]  // optional
+        }
+        """
+        tenant_id = request.data.get('tenant_id')
+        if not tenant_id:
+            return Response({"error": "tenant_id is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            user = request.user if request.user.is_authenticated else None
+            result = sync_documents_for_tenant(
+                tenant_id,
+                user=user,
+                transaction_ids=request.data.get('transaction_ids'),
+                source_types=request.data.get('types'),
+            )
+            status_code = status.HTTP_200_OK if result['success'] else status.HTTP_207_MULTI_STATUS
+            return Response(result, status=status_code)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class XeroDocumentsByTransactionView(APIView):
+    """List documents linked to a Xero transaction (by transaction ID, e.g. InvoiceID)."""
+    permission_classes = [AllowAny]
+
+    def get(self, request, transaction_id):
+        qs = XeroDocument.objects.filter(
+            transaction_source__transactions_id=transaction_id
+        ).select_related('transaction_source', 'organisation').order_by('file_name')
+        tenant_id = request.query_params.get('tenant_id')
+        if tenant_id:
+            qs = qs.filter(organisation__tenant_id=tenant_id)
+        docs = qs
+        data = [
+            {
+                'id': d.id,
+                'file_name': d.file_name,
+                'content_type': d.content_type,
+                'url': request.build_absolute_uri(d.file.url) if d.file else None,
+                'transaction_id': d.transaction_source.transactions_id,
+                'transaction_source': d.transaction_source.transaction_source,
+            }
+            for d in docs
+        ]
+        return Response(data)

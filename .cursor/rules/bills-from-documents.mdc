@@ -1,0 +1,27 @@
+---
+description: Use synced Xero documents as the learning source; apply that knowledge when creating or populating bills.
+globs: apps/xero/**/*.py,**/document*.py,**/xero_data/**/*
+alwaysApply: false
+---
+
+# Bills and document-derived knowledge
+
+## Learning source
+
+- **Synced Xero documents** (invoices, bills, attachments stored via `XeroDocument` and linked to `XeroTransactionSource`) are the source of truth to learn from.
+- When documents are read and turned into structured data (e.g. AI/API extraction to JSON) or into vectors, that **extracted/vectorized knowledge** should be used to inform how bills are created or filled.
+
+## Creating bills going forward
+
+- When implementing or refining **bill creation** (new bills, draft bills, or matching/coding transactions):
+  1. Prefer patterns, fields, and structure derived from **existing synced documents** (and their extractions) rather than inventing new schemas or placeholders.
+  2. Use document-derived knowledge to:
+     - Suggest or pre-fill vendor, line items, amounts, dates, references.
+     - Match or propose coding (accounts, tracking) based on similar past bills.
+     - Keep terminology and structure consistent with what appears in the synced docs.
+  3. If extraction or vectorization is available, use it to find similar past bills and reuse or adapt their structure when creating a new bill.
+
+## Pipeline context
+
+- Documents flow: **Sync from Xero** → **Read/extract (e.g. to JSON)** → optionally **vectorize** for search.
+- Bill-creation features should consume this pipeline output (extracted JSON, vectors, or both) so that “create the bill” is driven by learned knowledge from those documents.

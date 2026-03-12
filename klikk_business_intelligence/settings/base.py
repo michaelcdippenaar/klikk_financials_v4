@@ -65,6 +65,7 @@ INSTALLED_APPS = [
     'apps.xero.xero_sync',
     'apps.xero.xero_validation',
     'apps.investec',
+    'apps.financial_investments',
     'apps.planning_analytics',
     'apps.ai_agent',
 ]
@@ -138,7 +139,15 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+# When the app runs on the document server (e.g. 192.168.1.235), set MEDIA_ROOT to a path on that host.
+# Example: MEDIA_ROOT=/var/data/klikk_financials_v4/media
+MEDIA_ROOT = os.environ.get('MEDIA_ROOT') or str(BASE_DIR / 'media')
+if not os.path.isabs(MEDIA_ROOT):
+    MEDIA_ROOT = str(BASE_DIR / MEDIA_ROOT)
+
+# Optional: dedicated root for Xero-imported documents (e.g. on 192.168.1.235). If set, XeroDocument files are stored here.
+# Example: XERO_DOCUMENTS_ROOT=/var/data/klikk_financials_v4/xero_documents
+XERO_DOCUMENTS_ROOT = os.environ.get('XERO_DOCUMENTS_ROOT') or None
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -195,7 +204,49 @@ XERO_SCHEDULER_ENABLED = False  # Set to False to disable scheduler
 # Investec Private Banking API (SA PB Account Information)
 # Credentials: set INVESTEC_CLIENT_ID, INVESTEC_CLIENT_SECRET, INVESTEC_API_KEY (x-api-key) in env or .env
 # Optional: INVESTEC_BASE_URL (default production; use https://openapisandbox.investec.com for sandbox)
+# Multiple profiles supported: add _2, _3 etc. suffix for additional credential sets (share same API key).
 INVESTEC_BASE_URL = os.environ.get('INVESTEC_BASE_URL') or os.environ.get('investec_base_url') or 'https://openapi.investec.com'
 INVESTEC_CLIENT_ID = os.environ.get('INVESTEC_CLIENT_ID') or os.environ.get('investec_client_id') or ''
 INVESTEC_CLIENT_SECRET = os.environ.get('INVESTEC_CLIENT_SECRET') or os.environ.get('investec_client_secret') or ''
 INVESTEC_API_KEY = os.environ.get('INVESTEC_API_KEY') or os.environ.get('investec_key') or ''
+
+def _build_investec_profiles():
+    """Collect all Investec credential profiles from env. Returns list of dicts with client_id, client_secret, api_key."""
+    profiles = []
+    base_id = INVESTEC_CLIENT_ID
+    base_secret = INVESTEC_CLIENT_SECRET
+    base_key = INVESTEC_API_KEY
+    if base_id and base_secret and base_key:
+        profiles.append({'client_id': base_id, 'client_secret': base_secret, 'api_key': base_key})
+    i = 2
+    while True:
+        cid = os.environ.get(f'INVESTEC_CLIENT_ID_{i}') or os.environ.get(f'investec_client_id_{i}') or ''
+        csec = os.environ.get(f'INVESTEC_CLIENT_SECRET_{i}') or os.environ.get(f'investec_client_secret_{i}') or ''
+        ckey = os.environ.get(f'INVESTEC_API_KEY_{i}') or os.environ.get(f'investec_key_{i}') or ''
+        if not cid and not csec:
+            break
+        profiles.append({
+            'client_id': cid,
+            'client_secret': csec,
+            'api_key': ckey or base_key,
+        })
+        i += 1
+    return profiles
+
+INVESTEC_PROFILES = _build_investec_profiles()
+
+# TM1 / IBM Planning Analytics — default server (used when no TM1ServerConfig in DB).
+# Trail balance: cube Trail_Balance, source gl_src_trail_balance; TI import process cub.gl_src_trial_balance.import
+TM1_CONFIG = {
+    'address': os.environ.get('TM1_ADDRESS', '192.168.1.194'),
+    'port': int(os.environ.get('TM1_PORT', '44414')),
+    'user': os.environ.get('TM1_USER', 'mc'),
+    'password': os.environ.get('TM1_PASSWORD', 'pass'),
+    'ssl': os.environ.get('TM1_SSL', 'false').lower() in ('true', '1', 'yes'),
+}
+_scheme = 'https' if TM1_CONFIG['ssl'] else 'http'
+TM1_BASE_URL = os.environ.get('TM1_BASE_URL') or f"{_scheme}://{TM1_CONFIG['address']}:{TM1_CONFIG['port']}/api/v1"
+TM1_USER = TM1_CONFIG['user']
+TM1_PASSWORD = TM1_CONFIG['password']
+TM1_VERIFY_SSL = os.environ.get('TM1_VERIFY_SSL', 'false').lower() in ('true', '1', 'yes')  # Set True to verify HTTPS certs
+TM1_REQUEST_TIMEOUT = int(os.environ.get('TM1_REQUEST_TIMEOUT', '300'))

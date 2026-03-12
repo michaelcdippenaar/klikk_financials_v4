@@ -1,5 +1,6 @@
 from django.db import models
 from django.conf import settings
+from django.core.files.storage import FileSystemStorage
 import datetime
 from datetime import timezone as dt_timezone
 import logging
@@ -9,6 +10,12 @@ from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_metadata.models import XeroContacts, XeroAccount, XeroTracking
 
 logger = logging.getLogger(__name__)
+
+
+def _xero_documents_storage():
+    """Storage for Xero documents: use XERO_DOCUMENTS_ROOT if set (e.g. on 192.168.1.235), else MEDIA_ROOT."""
+    root = getattr(settings, 'XERO_DOCUMENTS_ROOT', None) or getattr(settings, 'MEDIA_ROOT', '')
+    return FileSystemStorage(location=root)
 
 
 def _resolve_tracking_slot(tracking_obj, organisation, fallback_idx=None):
@@ -138,6 +145,55 @@ class XeroTransactionSource(models.Model):
 
     def __str__(self):
         return f'{self.organisation.tenant_name}: {self.contact} - {self.transaction_source}'
+
+
+def xero_document_upload_to(instance, filename):
+    """Store documents under xero_documents/{org_id}/{transaction_type}/{transaction_id}/."""
+    org_id = instance.organisation_id or 'unknown'
+    if instance.transaction_source_id:
+        txn = instance.transaction_source
+        txn_id = txn.transactions_id
+        txn_type = txn.transaction_source
+    else:
+        txn_id = 'unknown'
+        txn_type = 'unknown'
+    return f"xero_documents/{org_id}/{txn_type}/{txn_id}/{filename}"
+
+
+class XeroDocument(models.Model):
+    """
+    Document/attachment imported from Xero and linked to a transaction (invoice, credit note, bank txn, etc.).
+    Files are stored in XERO_DOCUMENTS_ROOT (if set) or MEDIA_ROOT on the app server (e.g. 192.168.1.235).
+    """
+    organisation = models.ForeignKey(
+        XeroTenant, on_delete=models.CASCADE, related_name='xero_documents'
+    )
+    transaction_source = models.ForeignKey(
+        XeroTransactionSource,
+        on_delete=models.CASCADE,
+        related_name='documents',
+        help_text='The Xero transaction (invoice, credit note, bank transaction, etc.) this document belongs to.',
+    )
+    file_name = models.CharField(max_length=255)
+    file = models.FileField(
+        upload_to=xero_document_upload_to,
+        max_length=500,
+        blank=True,
+        storage=_xero_documents_storage(),
+    )
+    content_type = models.CharField(max_length=128, blank=True)
+    xero_attachment_id = models.CharField(max_length=64, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = [('transaction_source', 'file_name')]
+        ordering = ['transaction_source', 'file_name']
+        verbose_name = 'Xero Document'
+        verbose_name_plural = 'Xero Documents'
+
+    def __str__(self):
+        return f"{self.transaction_source.transactions_id} / {self.file_name}"
 
 
 class XeroJournalsSourceManager(models.Manager):
