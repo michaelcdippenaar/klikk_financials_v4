@@ -1,0 +1,14 @@
+# Caddy 2 – same routing as Nginx, with automatic HTTPS
+# Run: caddy run --config Caddyfile  (or put in /etc/caddy/Caddyfile)
+
+www.klikk.co.za, klikk.co.za {
+    # Django: /backend/* -> strip prefix and proxy to Django
+    handle_path /backend/* {
+        reverse_proxy 127.0.0.1:8001
+    }
+
+    # Portal SPA: everything else
+    handle {
+        reverse_proxy 127.0.0.1:8080
+    }
+}

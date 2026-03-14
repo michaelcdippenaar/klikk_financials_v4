@@ -25,6 +25,8 @@ def run_pipeline(
     exclude_manual_journals=False,
     calculate_pnl_ytd=True,
     tm1_processes=None,
+    tm1_user=None,
+    tm1_password=None,
 ):
     """
     Run the full pipeline and return step-by-step results.
@@ -97,7 +99,7 @@ def run_pipeline(
         params = proc.get('parameters', {})
         step = {'step': f'tm1:{name}', 'success': False}
         t0 = time.time()
-        res = execute_process(name, parameters=params if params else None)
+        res = execute_process(name, parameters=params if params else None, user=tm1_user, password=tm1_password)
         step['success'] = res.get('success', False)
         step['message'] = res.get('message', '')
         step['elapsed_s'] = round(time.time() - t0, 1)

@@ -13,12 +13,14 @@ SECRET_KEY = 'django-insecure-ri#xovh+9i8oys0j=w88o!a&jkiwf@9j_3i69^*+af(-k6d%rp
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0']
+ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', '192.168.1.235']
 
 # CORS - allow frontend dev server (portal may run on 9000, 8080, 5173, etc.)
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:9000',
     'http://127.0.0.1:9000',
+    'http://192.168.1.235:9000',
+    'https://192.168.1.235:9000',
     'http://localhost:8080',
     'http://127.0.0.1:8080',
     'http://localhost:5173',
@@ -51,7 +53,7 @@ DATABASES = {
         'HOST': '127.0.0.1',
         'PORT': '5432',
         'OPTIONS': {'connect_timeout': 10},
-    }
+    },
 }
 
 # Update JWT signing key
@@ -67,8 +69,9 @@ GOOGLE_APPLICATION_CREDENTIALS = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'
 
 # AI Agent Configuration
 AI_AGENT_OPENAI_API_KEY = os.environ.get("AI_AGENT_OPENAI_API_KEY", "")
-# OpenAI chat model: gpt-4o-mini, gpt-4o, gpt-5.2, gpt-5.2-instant, gpt-5.2-thinking, gpt-5.2-pro, gpt-5-mini, etc.
-AI_AGENT_MODEL = os.environ.get("AI_AGENT_MODEL", "gpt-5.2")
+# Chat model (OpenAI-compatible API). Example values:
+# gpt-4o-mini, gpt-4o, gpt-5.2, claude-3-5-sonnet-20241022 (via compatible gateway), etc.
+AI_AGENT_MODEL = os.environ.get("AI_AGENT_MODEL", "claude-3-5-sonnet-20241022")
 # Web search (Serper): get a key at https://serper.dev to enable "current price", "look up", stock quotes, etc.
 SERPER_API_KEY = os.environ.get("SERPER_API_KEY", "")
 

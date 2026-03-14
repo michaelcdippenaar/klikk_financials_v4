@@ -122,7 +122,7 @@ def _version_policy_decision(method, path, body, params):
     return True, detected_versions
 
 
-def tm1_request(method, path, body=None, params=None, headers=None):
+def tm1_request(method, path, body=None, params=None, headers=None, tm1_user=None, tm1_password=None):
     method = (method or '').upper().strip()
     if method not in ALLOWED_METHODS:
         raise ValueError(f'Unsupported TM1 method: {method}')
@@ -152,7 +152,7 @@ def tm1_request(method, path, body=None, params=None, headers=None):
         }
 
     url = urljoin(_base_url(), relative_path)
-    _, user, password = _resolve_credentials()
+    _, user, password = _resolve_credentials(user=tm1_user, password=tm1_password)
     timeout = int(getattr(settings, 'TM1_REQUEST_TIMEOUT', 300))
     verify = bool(getattr(settings, 'TM1_VERIFY_SSL', False))
 
@@ -207,4 +207,71 @@ def tm1_test_connection():
     if result['success']:
         return {'success': True, 'message': 'TM1 connection successful.', 'detail': result}
     return {'success': False, 'message': 'TM1 connection failed.', 'detail': result}
+
+
+def tm1_get_version():
+    """
+    Query TM1 server for version info. Tries root service document and
+    Configuration endpoint; returns parsed version and raw response excerpts.
+    """
+    version_info = {
+        'success': False,
+        'version': None,
+        'product_version': None,
+        'base_url': None,
+        'source': None,
+        'raw_excerpt': None,
+    }
+    try:
+        base_url = _base_url()
+        version_info['base_url'] = base_url.rstrip('/')
+    except Exception as e:
+        version_info['error'] = str(e)
+        return version_info
+
+    # Try GET on root (service document) – some TM1 REST APIs return version here.
+    result = tm1_request(method='GET', path='')
+    if result.get('success') and result.get('response_body'):
+        body = result.get('response_body') or {}
+        if isinstance(body, dict):
+            for key in ('ServerVersion', 'ProductVersion', 'Version', '@odata.context'):
+                if key in body and body[key] is not None:
+                    version_info['success'] = True
+                    if 'version' in key.lower():
+                        version_info['version'] = version_info['version'] or str(body[key])
+                        version_info['product_version'] = version_info['product_version'] or str(body[key])
+                    version_info['raw_excerpt'] = {k: body.get(k) for k in list(body.keys())[:15]}
+                    break
+            if not version_info['version'] and body:
+                version_info['success'] = True
+                version_info['raw_excerpt'] = {k: body.get(k) for k in list(body.keys())[:15]}
+        if version_info['success']:
+            version_info['source'] = 'root'
+
+    # If root didn’t give version, try Configuration (some PA/TM1 versions expose it).
+    if not version_info.get('version'):
+        result2 = tm1_request(method='GET', path='Configuration')
+        if result2.get('success') and result2.get('response_body'):
+            body = result2.get('response_body') or {}
+            if isinstance(body, dict):
+                for key in ('ProductVersion', 'ServerVersion', 'Version', 'BuildNumber'):
+                    if key in body and body[key] is not None:
+                        version_info['success'] = True
+                        version_info['version'] = version_info['version'] or str(body[key])
+                        version_info['product_version'] = version_info['product_version'] or str(body.get('ProductVersion', body.get(key)))
+                        version_info['raw_excerpt'] = {k: body.get(k) for k in list(body.keys())[:20]}
+                        version_info['source'] = 'Configuration'
+                        break
+
+    # Response headers sometimes contain version (e.g. Server, X-TM1-*).
+    if not version_info.get('version') and result.get('response_headers'):
+        headers = result.get('response_headers') or {}
+        for h in ('Server', 'X-TM1-Server-Version', 'X-TM1-Version'):
+            if h in headers and headers[h]:
+                version_info['success'] = True
+                version_info['version'] = version_info['version'] or str(headers[h]).strip()
+                version_info['source'] = version_info.get('source') or 'response_header'
+                break
+
+    return version_info
 

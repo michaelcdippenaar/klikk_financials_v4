@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'channels',
     'corsheaders',
     'rest_framework',
     'rest_framework.authtoken',
@@ -248,5 +249,92 @@ _scheme = 'https' if TM1_CONFIG['ssl'] else 'http'
 TM1_BASE_URL = os.environ.get('TM1_BASE_URL') or f"{_scheme}://{TM1_CONFIG['address']}:{TM1_CONFIG['port']}/api/v1"
 TM1_USER = TM1_CONFIG['user']
 TM1_PASSWORD = TM1_CONFIG['password']
+# EOD Historical Data API (optional) — JSE stock data, fundamentals, bulk exchange tickers
+# Get key at https://eodhd.com/
+EOD_API_KEY = os.environ.get('EOD_API_KEY') or os.environ.get('eod_api_key') or ''
+
 TM1_VERIFY_SSL = os.environ.get('TM1_VERIFY_SSL', 'false').lower() in ('true', '1', 'yes')  # Set True to verify HTTPS certs
 TM1_REQUEST_TIMEOUT = int(os.environ.get('TM1_REQUEST_TIMEOUT', '300'))
+
+# ---------------------------------------------------------------------------
+# AI Agent MCP Skills Engine
+# These settings mirror the FastAPI config.py Settings class so that
+# the migrated skill modules can use the same attribute names.
+# ---------------------------------------------------------------------------
+
+# AI Provider toggle: "anthropic" or "openai"
+AI_AGENT_PROVIDER = os.environ.get('AI_AGENT_PROVIDER') or os.environ.get('AI_PROVIDER', 'anthropic')
+
+# Anthropic (Claude)
+AI_AGENT_ANTHROPIC_API_KEY = os.environ.get('AI_AGENT_ANTHROPIC_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
+AI_AGENT_ANTHROPIC_MODEL = os.environ.get('AI_AGENT_ANTHROPIC_MODEL') or os.environ.get('ANTHROPIC_MODEL', 'claude-sonnet-4-6')
+
+# OpenAI
+AI_AGENT_OPENAI_API_KEY = os.environ.get('AI_AGENT_OPENAI_API_KEY') or os.environ.get('OPENAI_API_KEY', '')
+AI_AGENT_OPENAI_MODEL = os.environ.get('AI_AGENT_OPENAI_MODEL') or os.environ.get('OPENAI_MODEL', 'gpt-4o-mini')
+
+# Shared AI settings
+AI_AGENT_MAX_TOKENS = int(os.environ.get('AI_AGENT_MAX_TOKENS', '2048'))
+AI_AGENT_MAX_TOOL_ROUNDS = int(os.environ.get('AI_AGENT_MAX_TOOL_ROUNDS', '8'))
+
+# Local sentence-transformers embeddings (all-MiniLM-L6-v2, 384-dim)
+AI_AGENT_VOYAGE_API_KEY = os.environ.get('VOYAGE_API_KEY', '')
+AI_AGENT_VOYAGE_MODEL = os.environ.get('VOYAGE_MODEL', 'voyage-3-lite')
+AI_AGENT_EMBEDDING_DIM = int(os.environ.get('EMBEDDING_DIM', '384'))
+
+# RAG settings (vectors stored in default klikk_financials_v4 database)
+AI_AGENT_RAG_TOP_K = int(os.environ.get('RAG_TOP_K', '5'))
+AI_AGENT_RAG_MIN_SCORE = float(os.environ.get('RAG_MIN_SCORE', '0.20'))
+
+# PAW (Planning Analytics Workspace)
+AI_AGENT_PAW_HOST = os.environ.get('PAW_HOST', '192.168.1.194')
+AI_AGENT_PAW_PORT = int(os.environ.get('PAW_PORT', '8080'))
+AI_AGENT_PAW_ENABLED = os.environ.get('PAW_ENABLED', 'true').lower() in ('true', '1', 'yes')
+AI_AGENT_PAW_SERVER_NAME = os.environ.get('PAW_SERVER_NAME', '')
+
+# Web Search
+AI_AGENT_WEB_SEARCH_ENABLED = os.environ.get('WEB_SEARCH_ENABLED', 'true').lower() in ('true', '1', 'yes')
+AI_AGENT_WEB_SEARCH_PROVIDER = os.environ.get('WEB_SEARCH_PROVIDER', 'duckduckgo')
+AI_AGENT_WEB_SEARCH_API_KEY = os.environ.get('WEB_SEARCH_API_KEY', '')
+AI_AGENT_WEB_SEARCH_MAX_RESULTS = int(os.environ.get('WEB_SEARCH_MAX_RESULTS', '5'))
+
+# Google Drive (optional)
+AI_AGENT_GOOGLE_DRIVE_ENABLED = os.environ.get('GOOGLE_DRIVE_ENABLED', 'false').lower() in ('true', '1', 'yes')
+AI_AGENT_GOOGLE_DRIVE_CREDENTIALS_PATH = os.environ.get('GOOGLE_DRIVE_CREDENTIALS_PATH', '')
+AI_AGENT_GOOGLE_DRIVE_FOLDER_IDS = os.environ.get('GOOGLE_DRIVE_FOLDER_IDS', '')
+
+# Klikk Financials API (vectorized RAG, corpora search)
+AI_AGENT_FINANCIALS_API_TOKEN = os.environ.get('FINANCIALS_API_TOKEN', '')
+
+# ---------------------------------------------------------------------------
+#  Logging
+# ---------------------------------------------------------------------------
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'readable': {
+            'format': '%(asctime)s %(levelname)-5s [%(name)s] %(message)s',
+            'datefmt': '%H:%M:%S',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'level': 'INFO',
+            'formatter': 'readable',
+        },
+    },
+    'loggers': {
+        'ai_agent': {
+            'handlers': ['console'],
+            'level': 'DEBUG',
+            'propagate': False,
+        },
+        'mcp_tm1': {
+            'handlers': ['console'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+    },
+}

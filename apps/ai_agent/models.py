@@ -325,3 +325,124 @@ class AgentApprovalRequest(models.Model):
     def __str__(self):
         return f'AgentApprovalRequest<{self.id}> {self.action_name} {self.status}'
 
+
+# ---------------------------------------------------------------------------
+# MCP Skills Engine models (migrated from FastAPI klikk-ai-portal)
+# ---------------------------------------------------------------------------
+
+class SkillRegistry(models.Model):
+    """Registry of available AI agent skill modules.
+
+    Each row represents a Python skill module (e.g. investment_analyst)
+    with its routing keywords, enabled/disabled state, and metadata.
+    """
+    module_name = models.CharField(max_length=120, unique=True, help_text='e.g. "web_search"')
+    import_path = models.CharField(max_length=255, help_text='e.g. "apps.ai_agent.skills.web_search"')
+    display_name = models.CharField(max_length=255, blank=True, default='')
+    description = models.TextField(blank=True, default='')
+    keywords = models.JSONField(default=list, blank=True, help_text='Routing keywords (list of strings)')
+    always_on = models.BooleanField(default=False, help_text='Always include in tool routing')
+    enabled = models.BooleanField(default=True, help_text='Load this skill at startup')
+    sort_order = models.IntegerField(default=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['sort_order', 'module_name']
+        verbose_name = 'Skill Registry Entry'
+        verbose_name_plural = 'Skill Registry'
+
+    def __str__(self):
+        status = 'ON' if self.enabled else 'OFF'
+        return f'{self.display_name or self.module_name} [{status}]'
+
+
+class Credential(models.Model):
+    """DB-backed credential/secret storage.
+
+    API keys and tokens stored here take precedence over .env values.
+    The agent/config.py adapter checks this model first with a 60s cache.
+    """
+    key = models.CharField(max_length=120, unique=True, help_text='e.g. "anthropic_api_key"')
+    value = models.TextField(default='', blank=True)
+    label = models.CharField(max_length=255, blank=True, default='', help_text='Human-readable label')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['key']
+
+    def __str__(self):
+        return f'{self.label or self.key}'
+
+    @property
+    def masked_value(self):
+        v = self.value or ''
+        if len(v) > 16:
+            return v[:8] + '...' + v[-4:]
+        return '***' if v else ''
+
+
+class GlobalContext(models.Model):
+    """Stored facts and context for the AI agent (semantic search via pgvector on bi_etl).
+
+    Non-vector fields live here in Django ORM; the embedding column in
+    klikk_bi_etl.agent_rag.global_context is queried via raw SQL.
+    """
+    content = models.TextField()
+    metadata = models.JSONField(default=dict, blank=True)
+    embedding = models.JSONField(default=list, blank=True, help_text='Embedding vector as list of floats')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'GlobalContext<{self.id}> {self.content[:60]}'
+
+
+class ConversationContext(models.Model):
+    """Stored conversation turns for cross-session semantic search."""
+    session = models.ForeignKey(
+        AgentSession,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='conversation_contexts',
+    )
+    session_external_id = models.CharField(
+        max_length=120, blank=True, default='',
+        help_text='Session ID from external source (e.g. FastAPI chat)',
+    )
+    role = models.CharField(max_length=20, blank=True, default='')
+    content = models.TextField()
+    embedding = models.JSONField(default=list, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'ConversationContext<{self.id}> {self.role} {self.content[:40]}'
+
+
+class AgentViewState(models.Model):
+    """Persisted PAW view query state for the agent (cube/server/MDX context)."""
+    session = models.ForeignKey(
+        AgentSession,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='view_states',
+    )
+    cube_name = models.CharField(max_length=255)
+    server_name = models.CharField(max_length=255, blank=True, default='')
+    query_state = models.TextField(blank=True, default='', help_text='JSON-encoded PAW query state')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = (('session', 'cube_name', 'server_name'),)
+
+    def __str__(self):
+        return f'AgentViewState<{self.id}> {self.cube_name}'
+

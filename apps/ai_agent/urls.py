@@ -24,6 +24,22 @@ from .views import (
     TM1ConfigView,
     TM1ProxyExecuteView,
     TM1ProxyTestConnectionView,
+    TM1VersionView,
+    # MCP Skills Engine views
+    SkillRegistryListView,
+    SkillRegistryDetailView,
+    CredentialListView,
+    CredentialDetailView,
+    MCPAgentChatView,
+    AgentRunningStatusView,
+    WebSocketBroadcastView,
+    # Monitoring
+    AgentMonitorPerformanceView,
+    AgentMonitorSessionsView,
+    AgentMonitorHealthView,
+    AgentMonitorErrorsView,
+    AgentMonitorSlowToolsView,
+    AgentMonitorLiveView,
 )
 
 app_name = 'ai_agent'
@@ -52,5 +68,25 @@ urlpatterns = [
     path('tm1/config/', TM1ConfigView.as_view(), name='tm1-config'),
     path('tm1/proxy/', TM1ProxyExecuteView.as_view(), name='tm1-proxy'),
     path('tm1/test-connection/', TM1ProxyTestConnectionView.as_view(), name='tm1-test-connection'),
+    path('tm1/version/', TM1VersionView.as_view(), name='tm1-version'),
+
+    # MCP Skills Engine
+    path('skills/registry/', SkillRegistryListView.as_view(), name='skill-registry-list'),
+    path('skills/registry/<str:module_name>/', SkillRegistryDetailView.as_view(), name='skill-registry-detail'),
+    path('credentials/', CredentialListView.as_view(), name='credential-list'),
+    path('credentials/<str:key>/', CredentialDetailView.as_view(), name='credential-detail'),
+    path('mcp/chat/', MCPAgentChatView.as_view(), name='mcp-chat'),
+    path('agent-status/', AgentRunningStatusView.as_view(), name='agent-running-status'),
+
+    # WebSocket bridge (called by FastAPI to broadcast to observers)
+    path('ws/broadcast/', WebSocketBroadcastView.as_view(), name='ws-broadcast'),
+
+    # Agent Monitoring Dashboard
+    path('monitor/performance/', AgentMonitorPerformanceView.as_view(), name='monitor-performance'),
+    path('monitor/sessions/', AgentMonitorSessionsView.as_view(), name='monitor-sessions'),
+    path('monitor/health/', AgentMonitorHealthView.as_view(), name='monitor-health'),
+    path('monitor/errors/', AgentMonitorErrorsView.as_view(), name='monitor-errors'),
+    path('monitor/slow-tools/', AgentMonitorSlowToolsView.as_view(), name='monitor-slow-tools'),
+    path('monitor/live/', AgentMonitorLiveView.as_view(), name='monitor-live'),
 ]
 

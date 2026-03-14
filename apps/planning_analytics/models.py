@@ -1,4 +1,25 @@
+from django.conf import settings
 from django.db import models
+
+
+class UserTM1Credentials(models.Model):
+    """Per-user TM1 credentials — links a Django user to their TM1 identity."""
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='tm1_credentials',
+    )
+    tm1_username = models.CharField(max_length=200)
+    tm1_password = models.CharField(max_length=200, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'User TM1 Credentials'
+        verbose_name_plural = 'User TM1 Credentials'
+
+    def __str__(self):
+        return f'{self.user} → {self.tm1_username}'
 
 
 class TM1ServerConfig(models.Model):

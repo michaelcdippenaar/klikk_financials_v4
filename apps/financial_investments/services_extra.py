@@ -131,24 +131,52 @@ def fetch_splits(symbol_str, period='max'):
 
 
 def fetch_company_info(symbol_str):
-    """Fetch ticker.info and store in SymbolInfo.data (JSONB). Returns {updated, error}."""
+    """Fetch ticker.info and store in SymbolInfo.data (JSONB).
+    Tries yfinance first; falls back to EOD Historical Data if yfinance fails
+    and EOD_API_KEY is configured. Returns {updated, error, source}.
+    """
     import yfinance as yf
     sym, err = _get_or_create_symbol(symbol_str)
     if err:
         return {'error': err}
+
+    # Try yfinance first
+    info = None
+    yf_error = None
     try:
         ticker = yf.Ticker(sym.symbol)
         info = ticker.get_info()
+        if info and isinstance(info, dict) and info.get('regularMarketPrice') is not None:
+            data = _json_serializable(info)
+            SymbolInfo.objects.update_or_create(
+                symbol=sym,
+                defaults={'data': data, 'fetched_at': timezone.now()},
+            )
+            return {'updated': True, 'source': 'yfinance'}
+        yf_error = 'No usable data from yfinance'
     except Exception as e:
-        return {'error': str(e)}
-    if not info or not isinstance(info, dict):
-        return {'updated': False}
-    data = _json_serializable(info)
-    SymbolInfo.objects.update_or_create(
-        symbol=sym,
-        defaults={'data': data, 'fetched_at': timezone.now()},
-    )
-    return {'updated': True}
+        yf_error = str(e)
+
+    # Fallback to EOD Historical Data
+    try:
+        from .services_eod import fetch_fundamentals, _get_api_key
+        if _get_api_key():
+            result = fetch_fundamentals(symbol_str)
+            if result.get('updated'):
+                return {'updated': True, 'source': 'eodhd'}
+    except Exception:
+        pass
+
+    # If yfinance returned some data (even partial), store it
+    if info and isinstance(info, dict):
+        data = _json_serializable(info)
+        SymbolInfo.objects.update_or_create(
+            symbol=sym,
+            defaults={'data': data, 'fetched_at': timezone.now()},
+        )
+        return {'updated': True, 'source': 'yfinance (partial)'}
+
+    return {'error': yf_error or 'No data from yfinance or EOD', 'updated': False}
 
 
 def fetch_financial_statements(symbol_str, freq='yearly'):
@@ -378,6 +406,28 @@ def fetch_news(symbol_str, count=10):
     return {'created': created}
 
 
+# ---------------------------------------------------------------------------
+#  EOD Historical Data wrappers (used when EOD_API_KEY is configured)
+# ---------------------------------------------------------------------------
+
+def _fetch_eod_fundamentals(symbol_str):
+    """Fetch fundamentals from EOD Historical Data (requires EOD_API_KEY)."""
+    from .services_eod import fetch_fundamentals
+    return fetch_fundamentals(symbol_str)
+
+
+def _fetch_eod_dividends(symbol_str):
+    """Fetch dividends from EOD Historical Data (requires EOD_API_KEY)."""
+    from .services_eod import fetch_dividends_eod
+    return fetch_dividends_eod(symbol_str)
+
+
+def _fetch_eod_prices(symbol_str):
+    """Fetch EOD prices from EOD Historical Data (requires EOD_API_KEY)."""
+    from .services_eod import fetch_eod_prices
+    return fetch_eod_prices(symbol_str)
+
+
 # Keys for refresh_extra_data(symbol, types=[...])
 EXTRA_DATA_TYPES = [
     'dividends',
@@ -390,6 +440,10 @@ EXTRA_DATA_TYPES = [
     'analyst_price_target',
     'ownership',
     'news',
+    # EOD Historical Data alternatives (require EOD_API_KEY)
+    'eod_fundamentals',
+    'eod_dividends',
+    'eod_prices',
 ]
 
 _FETCHERS = {
@@ -403,6 +457,10 @@ _FETCHERS = {
     'analyst_price_target': fetch_analyst_price_target,
     'ownership': fetch_ownership,
     'news': fetch_news,
+    # EOD alternatives
+    'eod_fundamentals': _fetch_eod_fundamentals,
+    'eod_dividends': _fetch_eod_dividends,
+    'eod_prices': _fetch_eod_prices,
 }
 
 

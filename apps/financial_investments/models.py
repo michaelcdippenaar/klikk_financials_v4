@@ -68,21 +68,32 @@ class PricePoint(models.Model):
 
 class Dividend(models.Model):
     """Dividend payment per symbol per date (from yfinance get_dividends)."""
+    TYPE_DECLARED = 'dividend_declared'
+    TYPE_PAID = 'dividend_paid'
+    TYPE_CHOICES = [
+        (TYPE_DECLARED, 'Dividend declared'),
+        (TYPE_PAID, 'Dividend paid'),
+    ]
+
     symbol = models.ForeignKey(Symbol, on_delete=models.CASCADE, related_name='dividends', db_index=True)
     date = models.DateField(db_index=True)
     amount = models.DecimalField(max_digits=18, decimal_places=6)
     currency = models.CharField(max_length=10, blank=True)
+    dividend_type = models.CharField(
+        max_length=20, choices=TYPE_CHOICES,
+        default=TYPE_PAID, db_index=True,
+    )
 
     class Meta:
         ordering = ['-date']
         verbose_name = 'Dividend'
         verbose_name_plural = 'Dividends'
         constraints = [
-            models.UniqueConstraint(fields=['symbol', 'date'], name='fi_dividend_symbol_date_unique'),
+            models.UniqueConstraint(fields=['symbol', 'date', 'dividend_type'], name='fi_dividend_symbol_date_type_unique'),
         ]
 
     def __str__(self):
-        return f'{self.symbol.symbol} {self.date} {self.amount}'
+        return f'{self.symbol.symbol} {self.date} {self.amount} ({self.get_dividend_type_display()})'
 
 
 class Split(models.Model):
@@ -270,6 +281,45 @@ class NewsItem(models.Model):
 
     def __str__(self):
         return f'{self.symbol.symbol} {self.title[:50]}'
+
+
+class DividendCalendar(models.Model):
+    """Tracks dividend calendar events: declaration, ex-date, record date, payment date."""
+    STATUS_DECLARED = 'declared'
+    STATUS_PAID = 'paid'
+    STATUS_ESTIMATED = 'estimated'
+    STATUS_CHOICES = [
+        (STATUS_DECLARED, 'Declared'),
+        (STATUS_PAID, 'Paid'),
+        (STATUS_ESTIMATED, 'Estimated'),
+    ]
+
+    symbol = models.ForeignKey(Symbol, on_delete=models.CASCADE, related_name='dividend_calendar', db_index=True)
+    declaration_date = models.DateField(null=True, blank=True)
+    ex_dividend_date = models.DateField(null=True, blank=True, db_index=True)
+    record_date = models.DateField(null=True, blank=True)
+    payment_date = models.DateField(null=True, blank=True, db_index=True)
+    amount = models.DecimalField(max_digits=18, decimal_places=6, null=True, blank=True)
+    currency = models.CharField(max_length=10, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DECLARED, db_index=True)
+    source = models.CharField(max_length=50, blank=True, help_text='e.g. yfinance, manual')
+    tm1_adjustment_written = models.BooleanField(default=False, help_text='Whether the TM1 budget adjustment has been applied')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-ex_dividend_date', '-declaration_date']
+        verbose_name = 'Dividend calendar'
+        verbose_name_plural = 'Dividend calendar entries'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['symbol', 'ex_dividend_date'],
+                name='fi_divcal_symbol_exdate_unique',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.symbol.symbol} ex:{self.ex_dividend_date} {self.amount} ({self.status})'
 
 
 class WatchlistTablePreference(models.Model):

@@ -69,7 +69,7 @@ TM1_TOOLS_OPENAI = [
 
 
 DEFAULT_CONTEXT_MESSAGE_LIMIT = 30
-DEFAULT_MODEL = 'gpt-5.2'
+DEFAULT_MODEL = 'claude-3-5-sonnet-20241022'
 DEFAULT_MEMORY_CONTEXT_MAX_CHARS = 4000
 DEFAULT_DOC_CONTEXT_MAX_CHARS = 8000
 DEFAULT_DOC_CONTEXT_MAX_DOCS = 3
@@ -290,11 +290,9 @@ def generate_assistant_reply(session, context_messages):
                 f'Gemini API error ({response.status_code}) for model {gemini_model}: {error_text}'
             )
         data = response.json()
-        parts = (
-            data.get('candidates', [{}])[0]
-            .get('content', {})
-            .get('parts', [])
-        )
+        candidates = data.get('candidates') or []
+        first_candidate = candidates[0] if candidates else {}
+        parts = (first_candidate.get('content') or {}).get('parts') or []
         content = ''.join(p.get('text', '') for p in parts).strip()
         return {
             'content': content or 'No content returned by model.',
@@ -322,9 +320,10 @@ def generate_assistant_reply(session, context_messages):
         error_text = response.text[:2000]
         raise RuntimeError(f'OpenAI API error ({response.status_code}): {error_text}')
     data = response.json()
+    choices = data.get('choices') or []
+    first = choices[0] if choices else {}
     content = (
-        data.get('choices', [{}])[0]
-        .get('message', {})
+        (first.get('message') or {})
         .get('content', '')
         .strip()
     )
@@ -405,7 +404,8 @@ def generate_assistant_reply_with_tool_use(session, context_messages, user_messa
             raise RuntimeError(f'OpenAI API error ({response.status_code}): {error_text}')
 
         data = response.json()
-        choice = data.get('choices', [{}])[0]
+        choices = data.get('choices') or []
+        choice = choices[0] if choices else {}
         message = choice.get('message') or {}
         tool_calls = message.get('tool_calls') or []
 
@@ -458,10 +458,14 @@ def generate_assistant_reply_with_tool_use(session, context_messages, user_messa
                 'content': content_str,
             })
 
-    # Max rounds reached with no final text reply; synthesize one from last assistant turn.
-    last_content = (messages[-1].get('content') if messages else '') or 'Tool loop ended without a final reply.'
+    # Max rounds reached with no final text reply; use last assistant message or fallback.
+    last_assistant_content = ''
+    for m in reversed(messages):
+        if m.get('role') == 'assistant' and (m.get('content') or '').strip():
+            last_assistant_content = (m.get('content') or '').strip()
+            break
     return {
-        'content': last_content,
+        'content': last_assistant_content or 'Tool loop ended without a final reply.',
         'provider': 'openai',
         'model': model,
     }

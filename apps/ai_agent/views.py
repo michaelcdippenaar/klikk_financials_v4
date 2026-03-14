@@ -6,11 +6,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.xero.xero_core.models import XeroTenant
-from apps.planning_analytics.models import TM1ServerConfig
+from apps.planning_analytics.models import TM1ServerConfig, UserTM1Credentials
 
 from django.utils.text import slugify
 
-from .models import AgentMessage, AgentProject, AgentSession, AgentToolExecutionLog, SystemDocument
+from .models import (
+    AgentMessage, AgentProject, AgentSession, AgentToolExecutionLog,
+    SystemDocument, SkillRegistry, Credential,
+)
 from .services.chat_runner import (
     build_context_messages,
     generate_assistant_reply,
@@ -19,7 +22,7 @@ from .services.chat_runner import (
     plan_tool_calls,
     user_wants_vectorized_knowledge,
 )
-from .services.tm1_proxy import tm1_request, tm1_test_connection
+from .services.tm1_proxy import tm1_request, tm1_test_connection, tm1_get_version
 from .services.system_doc_builder import BuildOptions, build_system_document_markdown
 from .services.cursor_chat_import import import_cursor_chat_transcript
 from .services.session_transcript import build_session_transcript_markdown
@@ -36,6 +39,18 @@ def _effective_user(request):
     if user is not None and getattr(user, 'is_authenticated', False):
         return user
     return None
+
+
+def _get_user_tm1_creds(request):
+    """Return (tm1_username, tm1_password) for the authenticated user, or (None, None)."""
+    user = _effective_user(request)
+    if user:
+        try:
+            creds = user.tm1_credentials
+            return creds.tm1_username, creds.tm1_password
+        except UserTM1Credentials.DoesNotExist:
+            pass
+    return None, None
 
 
 def _sessions_qs(request):
@@ -92,7 +107,7 @@ class AgentStatusView(APIView):
     def get(self, request):
         gemini_key = getattr(settings, 'AI_AGENT_GEMINI_API_KEY', None)
         openai_key = getattr(settings, 'AI_AGENT_OPENAI_API_KEY', None)
-        model_name = getattr(settings, 'AI_AGENT_GEMINI_MODEL', 'gemini-1.5-flash') if gemini_key else getattr(settings, 'AI_AGENT_MODEL', 'gpt-5.2')
+        model_name = getattr(settings, 'AI_AGENT_GEMINI_MODEL', 'gemini-1.5-flash') if gemini_key else getattr(settings, 'AI_AGENT_MODEL', 'claude-3-5-sonnet-20241022')
         tm1_cfg = TM1ServerConfig.get_active()
 
         return Response({
@@ -1074,8 +1089,10 @@ class TM1ProxyExecuteView(APIView):
             executed_by=_effective_user(request),
         )
 
+        user_tm1, user_pw = _get_user_tm1_creds(request)
+
         try:
-            result = tm1_request(method=method, path=path, body=body, params=params, headers=headers)
+            result = tm1_request(method=method, path=path, body=body, params=params, headers=headers, tm1_user=user_tm1, tm1_password=user_pw)
             if result.get('blocked'):
                 execution_log.status = AgentToolExecutionLog.STATUS_BLOCKED
             else:
@@ -1396,6 +1413,18 @@ class TM1ProxyTestConnectionView(APIView):
         return Response(result, status=status.HTTP_200_OK if result.get('success') else status.HTTP_502_BAD_GATEWAY)
 
 
+class TM1VersionView(APIView):
+    """Return TM1 server version info from the configured TM1 instance."""
+    permission_classes = AI_AGENT_PERMISSION_CLASSES
+
+    def get(self, request):
+        result = tm1_get_version()
+        return Response(
+            result,
+            status=status.HTTP_200_OK if result.get('success') else status.HTTP_502_BAD_GATEWAY,
+        )
+
+
 class TM1ConfigView(APIView):
     """
     Read/update the shared TM1 server config used by both:
@@ -1440,5 +1469,335 @@ class TM1ConfigView(APIView):
             'base_url': cfg.base_url,
             'username': cfg.username,
             'message': 'Shared TM1 config saved.',
+        })
+
+
+# ---------------------------------------------------------------------------
+# MCP Skills Engine API Views
+# ---------------------------------------------------------------------------
+
+class SkillRegistryListView(APIView):
+    """List all skills in the registry with tool counts."""
+    permission_classes = AI_AGENT_PERMISSION_CLASSES
+
+    def get(self, request):
+        skills = SkillRegistry.objects.all()
+        # Get tool counts from the loaded registry
+        try:
+            from .agent.tool_registry import TOOL_TO_SKILL
+            skill_tool_counts = {}
+            for tool_name, skill_name in TOOL_TO_SKILL.items():
+                skill_tool_counts[skill_name] = skill_tool_counts.get(skill_name, 0) + 1
+        except Exception:
+            skill_tool_counts = {}
+
+        return Response([
+            {
+                'module_name': s.module_name,
+                'import_path': s.import_path,
+                'display_name': s.display_name,
+                'description': s.description,
+                'keywords': s.keywords or [],
+                'always_on': s.always_on,
+                'enabled': s.enabled,
+                'sort_order': s.sort_order,
+                'tool_count': skill_tool_counts.get(s.module_name, 0),
+                'updated_at': s.updated_at,
+            }
+            for s in skills
+        ])
+
+
+class SkillRegistryDetailView(APIView):
+    """Update a skill registry entry (enabled, keywords, etc.)."""
+    permission_classes = AI_AGENT_PERMISSION_CLASSES
+
+    def get(self, request, module_name):
+        skill = SkillRegistry.objects.filter(module_name=module_name).first()
+        if not skill:
+            return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Get tool list from the loaded module
+        tools = []
+        try:
+            from .agent.tool_registry import TOOL_TO_SKILL, ANTHROPIC_SCHEMAS
+            tools = [
+                {'name': s['name'], 'description': s.get('description', '')}
+                for s in ANTHROPIC_SCHEMAS
+                if TOOL_TO_SKILL.get(s['name']) == module_name
+            ]
+        except Exception:
+            pass
+
+        return Response({
+            'module_name': skill.module_name,
+            'import_path': skill.import_path,
+            'display_name': skill.display_name,
+            'description': skill.description,
+            'keywords': skill.keywords or [],
+            'always_on': skill.always_on,
+            'enabled': skill.enabled,
+            'sort_order': skill.sort_order,
+            'tools': tools,
+            'updated_at': skill.updated_at,
+        })
+
+    def put(self, request, module_name):
+        skill = SkillRegistry.objects.filter(module_name=module_name).first()
+        if not skill:
+            return Response({'error': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        data = request.data
+        if 'enabled' in data:
+            skill.enabled = bool(data['enabled'])
+        if 'keywords' in data:
+            skill.keywords = data['keywords'] if isinstance(data['keywords'], list) else []
+        if 'display_name' in data:
+            skill.display_name = (data['display_name'] or '').strip()
+        if 'description' in data:
+            skill.description = (data['description'] or '').strip()
+        if 'always_on' in data:
+            skill.always_on = bool(data['always_on'])
+        if 'sort_order' in data:
+            skill.sort_order = int(data['sort_order'])
+
+        skill.save()
+        return Response({
+            'module_name': skill.module_name,
+            'enabled': skill.enabled,
+            'keywords': skill.keywords,
+            'always_on': skill.always_on,
+            'updated_at': skill.updated_at,
+        })
+
+
+class CredentialListView(APIView):
+    """List all credentials (values masked) or create/update one."""
+    permission_classes = AI_AGENT_PERMISSION_CLASSES
+
+    def get(self, request):
+        creds = Credential.objects.all()
+        return Response([
+            {
+                'key': c.key,
+                'label': c.label or c.key,
+                'hint': c.masked_value,
+                'has_value': bool(c.value),
+                'updated_at': c.updated_at,
+            }
+            for c in creds
+        ])
+
+
+class CredentialDetailView(APIView):
+    """Set or delete a credential."""
+    permission_classes = AI_AGENT_PERMISSION_CLASSES
+
+    def put(self, request, key):
+        value = request.data.get('value', '')
+        label = request.data.get('label', '')
+        cred, created = Credential.objects.update_or_create(
+            key=key,
+            defaults={'value': value, 'label': label} if label else {'value': value},
+        )
+        # Invalidate config cache
+        try:
+            from .agent.config import invalidate_credential_cache
+            invalidate_credential_cache(key)
+        except Exception:
+            pass
+        return Response({
+            'key': cred.key,
+            'label': cred.label,
+            'has_value': bool(cred.value),
+            'updated_at': cred.updated_at,
+        })
+
+    def delete(self, request, key):
+        deleted, _ = Credential.objects.filter(key=key).delete()
+        try:
+            from .agent.config import invalidate_credential_cache
+            invalidate_credential_cache(key)
+        except Exception:
+            pass
+        return Response({'deleted': deleted > 0})
+
+
+class MCPAgentChatView(APIView):
+    """Run a message through the MCP skills agent (synchronous HTTP, not WebSocket)."""
+    permission_classes = AI_AGENT_PERMISSION_CLASSES
+
+    def post(self, request):
+        user_message = (request.data.get('message') or '').strip()
+        if not user_message:
+            return Response({'error': 'message is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        history = request.data.get('history', [])
+        if not isinstance(history, list):
+            history = []
+
+        try:
+            from .agent.core import run_agent
+            result = run_agent(user_message, history)
+            if isinstance(result, tuple):
+                text, tool_calls, skills_routed = result
+                return Response({
+                    'response': text,
+                    'tool_calls': [
+                        {
+                            'name': getattr(tc, 'name', str(tc)),
+                            'skill': getattr(tc, 'skill', ''),
+                            'duration_ms': getattr(tc, 'duration_ms', 0),
+                        }
+                        for tc in tool_calls
+                    ] if tool_calls else [],
+                    'skills_routed': skills_routed,
+                })
+            return Response({'response': str(result), 'tool_calls': [], 'skills_routed': []})
+        except Exception as exc:
+            return Response(
+                {'error': f'{type(exc).__name__}: {exc}'},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+
+class AgentRunningStatusView(APIView):
+    """Polled by the frontend to get real-time agent status (what tool it's running, etc.)."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        key = request.query_params.get('key', 'default')
+        from .consumers import get_agent_status
+        entry = get_agent_status(key)
+        if entry is None:
+            return Response({"active": False})
+        return Response({
+            "active": True,
+            "status": entry.get("status", ""),
+            "tool_calls": entry.get("tool_calls", []),
+            "updated_at": entry.get("updated_at"),
+        })
+
+
+class WebSocketBroadcastView(APIView):
+    """Accept a message payload from FastAPI and broadcast to WebSocket observers.
+
+    POST /api/ai-agent/ws/broadcast/
+    Body: { "session_id": "...", "role": "user"|"assistant", "content": "...", ... }
+    """
+    permission_classes = [AllowAny]  # Internal service call; restrict via network/firewall
+
+    def post(self, request):
+        from .consumers import broadcast_message
+
+        payload = request.data
+        if not isinstance(payload, dict):
+            return Response({'error': 'payload must be a JSON object'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Ensure a type field exists
+        if 'type' not in payload:
+            payload['type'] = 'message'
+
+        broadcast_message(payload)
+        return Response({'status': 'broadcast_sent'})
+
+
+# ---------------------------------------------------------------------------
+#  Agent Monitoring Dashboard Views
+# ---------------------------------------------------------------------------
+
+class AgentMonitorPerformanceView(APIView):
+    """GET /api/ai-agent/monitor/performance/?hours=24&tool_name=..."""
+    permission_classes = [IsAuthenticated] if not _security_disabled() else [AllowAny]
+
+    def get(self, request):
+        from .skills.agent_monitor import agent_tool_performance
+        hours = int(request.query_params.get('hours', 24))
+        tool_name = request.query_params.get('tool_name', '')
+        return Response(agent_tool_performance(hours=hours, tool_name=tool_name))
+
+
+class AgentMonitorSessionsView(APIView):
+    """GET /api/ai-agent/monitor/sessions/?days=7"""
+    permission_classes = [IsAuthenticated] if not _security_disabled() else [AllowAny]
+
+    def get(self, request):
+        from .skills.agent_monitor import agent_session_analytics
+        days = int(request.query_params.get('days', 7))
+        return Response(agent_session_analytics(days=days))
+
+
+class AgentMonitorHealthView(APIView):
+    """GET /api/ai-agent/monitor/health/"""
+    permission_classes = [IsAuthenticated] if not _security_disabled() else [AllowAny]
+
+    def get(self, request):
+        from .skills.agent_monitor import agent_health_check
+        return Response(agent_health_check())
+
+
+class AgentMonitorErrorsView(APIView):
+    """GET /api/ai-agent/monitor/errors/?hours=24&tool_name=...&limit=20"""
+    permission_classes = [IsAuthenticated] if not _security_disabled() else [AllowAny]
+
+    def get(self, request):
+        from .skills.agent_monitor import agent_diagnose_errors
+        hours = int(request.query_params.get('hours', 24))
+        tool_name = request.query_params.get('tool_name', '')
+        limit = int(request.query_params.get('limit', 20))
+        return Response(agent_diagnose_errors(hours=hours, tool_name=tool_name, limit=limit))
+
+
+class AgentMonitorSlowToolsView(APIView):
+    """GET /api/ai-agent/monitor/slow-tools/?hours=24&threshold_ms=2000&limit=20"""
+    permission_classes = [IsAuthenticated] if not _security_disabled() else [AllowAny]
+
+    def get(self, request):
+        from .skills.agent_monitor import agent_slow_tools
+        hours = int(request.query_params.get('hours', 24))
+        threshold_ms = int(request.query_params.get('threshold_ms', 2000))
+        limit = int(request.query_params.get('limit', 20))
+        return Response(agent_slow_tools(hours=hours, threshold_ms=threshold_ms, limit=limit))
+
+
+class AgentMonitorLiveView(APIView):
+    """GET /api/ai-agent/monitor/live/?limit=50&after_id=0
+    Returns recent tool executions for a live activity feed.
+    Supports polling via after_id — only returns entries newer than that ID.
+    """
+    permission_classes = [IsAuthenticated] if not _security_disabled() else [AllowAny]
+
+    def get(self, request):
+        limit = min(int(request.query_params.get('limit', 50)), 200)
+        after_id = int(request.query_params.get('after_id', 0))
+
+        qs = AgentToolExecutionLog.objects.order_by('-id')
+        if after_id:
+            qs = qs.filter(id__gt=after_id)
+        qs = qs[:limit]
+
+        entries = []
+        for e in qs:
+            duration = None
+            if e.finished_at and e.started_at:
+                duration = round((e.finished_at - e.started_at).total_seconds() * 1000)
+            entries.append({
+                'id': e.id,
+                'tool_name': e.tool_name,
+                'status': e.status,
+                'input': e.input_payload,
+                'output_preview': str(e.output_payload)[:300] if e.output_payload else None,
+                'error': e.error_message[:300] if e.error_message else None,
+                'duration_ms': duration,
+                'started_at': e.started_at.isoformat() if e.started_at else None,
+                'finished_at': e.finished_at.isoformat() if e.finished_at else None,
+                'session_id': e.session_id,
+            })
+
+        entries.reverse()
+        return Response({
+            'entries': entries,
+            'count': len(entries),
+            'latest_id': entries[-1]['id'] if entries else after_id,
         })
 

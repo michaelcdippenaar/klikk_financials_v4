@@ -12,6 +12,7 @@ from .models import (
     AnalystPriceTarget,
     OwnershipSnapshot,
     NewsItem,
+    DividendCalendar,
 )
 
 
@@ -32,8 +33,8 @@ class PricePointAdmin(admin.ModelAdmin):
 
 @admin.register(Dividend)
 class DividendAdmin(admin.ModelAdmin):
-    list_display = ('symbol', 'date', 'amount', 'currency')
-    list_filter = ('symbol',)
+    list_display = ('symbol', 'date', 'amount', 'currency', 'dividend_type')
+    list_filter = ('symbol', 'dividend_type')
     date_hierarchy = 'date'
 
 
@@ -87,3 +88,11 @@ class NewsItemAdmin(admin.ModelAdmin):
     list_display = ('symbol', 'title', 'publisher', 'published_at')
     list_filter = ('symbol',)
     search_fields = ('title',)
+
+
+@admin.register(DividendCalendar)
+class DividendCalendarAdmin(admin.ModelAdmin):
+    list_display = ('symbol', 'declaration_date', 'ex_dividend_date', 'payment_date', 'amount', 'status', 'tm1_adjustment_written')
+    list_filter = ('status', 'tm1_adjustment_written', 'symbol')
+    date_hierarchy = 'ex_dividend_date'
+    search_fields = ('symbol__symbol', 'symbol__name')
