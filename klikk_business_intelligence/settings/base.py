@@ -263,7 +263,7 @@ TM1_REQUEST_TIMEOUT = int(os.environ.get('TM1_REQUEST_TIMEOUT', '300'))
 # ---------------------------------------------------------------------------
 
 # AI Provider toggle: "anthropic" or "openai"
-AI_AGENT_PROVIDER = os.environ.get('AI_AGENT_PROVIDER') or os.environ.get('AI_PROVIDER', 'anthropic')
+AI_AGENT_PROVIDER = os.environ.get('AI_AGENT_PROVIDER') or os.environ.get('AI_PROVIDER', 'openai')
 
 # Anthropic (Claude)
 AI_AGENT_ANTHROPIC_API_KEY = os.environ.get('AI_AGENT_ANTHROPIC_API_KEY') or os.environ.get('ANTHROPIC_API_KEY', '')
@@ -271,7 +271,7 @@ AI_AGENT_ANTHROPIC_MODEL = os.environ.get('AI_AGENT_ANTHROPIC_MODEL') or os.envi
 
 # OpenAI
 AI_AGENT_OPENAI_API_KEY = os.environ.get('AI_AGENT_OPENAI_API_KEY') or os.environ.get('OPENAI_API_KEY', '')
-AI_AGENT_OPENAI_MODEL = os.environ.get('AI_AGENT_OPENAI_MODEL') or os.environ.get('OPENAI_MODEL', 'gpt-4o-mini')
+AI_AGENT_OPENAI_MODEL = os.environ.get('AI_AGENT_OPENAI_MODEL') or os.environ.get('OPENAI_MODEL', 'gpt-4o')
 
 # Shared AI settings
 AI_AGENT_MAX_TOKENS = int(os.environ.get('AI_AGENT_MAX_TOKENS', '2048'))

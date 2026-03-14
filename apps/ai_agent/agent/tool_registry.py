@@ -216,7 +216,7 @@ _KEYWORD_ROUTES: list[tuple[list[str], list]] = [
         [report_builder, mcp_bridge],
     ),
     (
-        ["dividend forecast", "dividend adjustment", "declared dividend",
+        ["dividend forecast", "dividend_forecast", "dividend adjustment", "declared dividend",
          "adjust dps", "budget dps", "dividend budget", "dps adjustment",
          "declared dps", "forecast dps", "pln_forecast", "dividend calendar"],
         [dividend_forecast],

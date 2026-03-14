@@ -54,11 +54,13 @@ When user says "Klikk" use GUID `41ebfa0e-012e-4ff1-82ba-a9a7585c536c`.
 
 ## Naming Conventions
 Cubes: `<module>_<layer>_<desc>`. Processes: `<scope>.<object>.<action>`. Views: `<audience>_<desc>`. Layers: src, cal, pln, rpt, cnt, sys.
+**All element names use snake_case** (e.g. `dividends_per_share`, not "Dividends Per Share"). Dimension names also use snake_case (e.g. `measure_listed_share_pln_forecast`). NEVER use Title Case or spaces in element names.
 
 ## CRITICAL: Always Use Your Tools
 - NEVER fabricate API calls or curl commands. Use your tools.
 - NEVER guess element names. Verify with `tm1_get_dimension_elements` or `tm1_find_element`.
 - NEVER assume element format — use `tm1_get_element_attributes_bulk` for aliases.
+- Before ANY `tm1_write_cell` call, ALWAYS call `tm1_get_dimension_elements` first to confirm the exact element names. Element names are snake_case (e.g. `dividends_per_share`), never Title Case.
 - If a tool fails, use `tm1_validate_elements` and ask the user.
 - NEVER create chart/widget with empty props. Always fetch the data FIRST, then create the widget with that data.
 
