@@ -21,4 +21,14 @@ urlpatterns = [
     path('symbols/<str:symbol>/news/', views.symbol_news),
     path('watchlist-preference/save/', views.watchlist_preference_save),
     path('watchlist-preference/', views.watchlist_preference),
+
+    # Dividend forecast workflow
+    path('dividend-calendar/', views.dividend_calendar_list),
+    path('dividend-calendar/check/', views.dividend_calendar_check),
+    path('dividend-calendar/update-category/', views.dividend_calendar_update_category),
+    path('dividend-calendar/update-payment-date/', views.dividend_calendar_update_payment_date),
+    path('dividend-forecast/adjust/', views.dividend_forecast_adjust),
+    path('dividend-forecast/adjust-pending/', views.dividend_forecast_adjust_pending),
+    path('dividend-forecast/verify/', views.dividend_forecast_verify),
+    path('dividend-forecast/<str:share_code>/', views.dividend_forecast_read),
 ]

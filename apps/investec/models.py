@@ -111,8 +111,8 @@ class InvestecJsePortfolio(models.Model):
     price = models.DecimalField(max_digits=15, decimal_places=4)
     total_value = models.DecimalField(max_digits=15, decimal_places=2)
     exchange_rate = models.DecimalField(max_digits=15, decimal_places=6, null=True, blank=True)
-    move_percent = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)  # Move %
-    portfolio_percent = models.DecimalField(max_digits=10, decimal_places=4, null=True, blank=True)  # Portfolio %
+    move_percent = models.DecimalField(max_digits=15, decimal_places=4, null=True, blank=True)  # Move %
+    portfolio_percent = models.DecimalField(max_digits=15, decimal_places=4, null=True, blank=True)  # Portfolio %
     profit_loss = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)  # Profit/Loss
     annual_income_zar = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)  # Annual Income (R)
     

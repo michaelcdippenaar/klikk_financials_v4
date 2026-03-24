@@ -294,6 +294,15 @@ class DividendCalendar(models.Model):
         (STATUS_ESTIMATED, 'Estimated'),
     ]
 
+    CATEGORY_REGULAR = 'regular'
+    CATEGORY_SPECIAL = 'special'
+    CATEGORY_FOREIGN = 'foreign'
+    CATEGORY_CHOICES = [
+        (CATEGORY_REGULAR, 'Regular'),
+        (CATEGORY_SPECIAL, 'Special'),
+        (CATEGORY_FOREIGN, 'Foreign'),
+    ]
+
     symbol = models.ForeignKey(Symbol, on_delete=models.CASCADE, related_name='dividend_calendar', db_index=True)
     declaration_date = models.DateField(null=True, blank=True)
     ex_dividend_date = models.DateField(null=True, blank=True, db_index=True)
@@ -302,8 +311,24 @@ class DividendCalendar(models.Model):
     amount = models.DecimalField(max_digits=18, decimal_places=6, null=True, blank=True)
     currency = models.CharField(max_length=10, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DECLARED, db_index=True)
+    dividend_category = models.CharField(
+        max_length=20, choices=CATEGORY_CHOICES, default=CATEGORY_REGULAR, db_index=True,
+        help_text='regular=budgeted, special=not budgeted (only once declared), foreign=budgeted (international)',
+    )
     source = models.CharField(max_length=50, blank=True, help_text='e.g. yfinance, manual')
     tm1_adjustment_written = models.BooleanField(default=False, help_text='Whether the TM1 budget adjustment has been applied')
+    tm1_adjustment_value = models.DecimalField(
+        max_digits=18, decimal_places=6, null=True, blank=True,
+        help_text='The adjustment value that was written to TM1',
+    )
+    tm1_written_at = models.DateTimeField(null=True, blank=True, help_text='When the TM1 adjustment was written')
+    tm1_target_month = models.CharField(
+        max_length=3, blank=True, default='',
+        help_text='Resolved TM1 month for the adjustment (e.g. Apr). Set by TM1 probe or payment_date.',
+    )
+    tm1_verified = models.BooleanField(default=False, help_text='Whether TM1 value was verified after writing')
+    tm1_verified_at = models.DateTimeField(null=True, blank=True, help_text='When TM1 was last verified')
+    last_checked_at = models.DateTimeField(null=True, blank=True, help_text='When yfinance was last checked for this entry')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -313,8 +338,8 @@ class DividendCalendar(models.Model):
         verbose_name_plural = 'Dividend calendar entries'
         constraints = [
             models.UniqueConstraint(
-                fields=['symbol', 'ex_dividend_date'],
-                name='fi_divcal_symbol_exdate_unique',
+                fields=['symbol', 'ex_dividend_date', 'dividend_category'],
+                name='fi_divcal_symbol_exdate_cat_unique',
             ),
         ]
 

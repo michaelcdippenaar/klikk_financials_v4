@@ -92,7 +92,7 @@ class NewsItemAdmin(admin.ModelAdmin):
 
 @admin.register(DividendCalendar)
 class DividendCalendarAdmin(admin.ModelAdmin):
-    list_display = ('symbol', 'declaration_date', 'ex_dividend_date', 'payment_date', 'amount', 'status', 'tm1_adjustment_written')
-    list_filter = ('status', 'tm1_adjustment_written', 'symbol')
+    list_display = ('symbol', 'declaration_date', 'ex_dividend_date', 'payment_date', 'amount', 'dividend_category', 'status', 'tm1_adjustment_written', 'tm1_adjustment_value', 'tm1_written_at', 'tm1_verified')
+    list_filter = ('status', 'dividend_category', 'tm1_adjustment_written', 'tm1_verified', 'symbol')
     date_hierarchy = 'ex_dividend_date'
     search_fields = ('symbol__symbol', 'symbol__name')

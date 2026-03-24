@@ -6,6 +6,8 @@ from apps.planning_analytics.views import (
     TM1ConfigView,
     TM1ProcessListView,
     UserTM1CredentialsView,
+    TrackingMappingView,
+    TrackingMappingAddView,
 )
 
 urlpatterns = [
@@ -15,4 +17,6 @@ urlpatterns = [
     path('tm1/config/', TM1ConfigView.as_view(), name='planning-analytics-tm1-config'),
     path('tm1/processes/', TM1ProcessListView.as_view(), name='planning-analytics-tm1-processes'),
     path('tm1/credentials/', UserTM1CredentialsView.as_view(), name='planning-analytics-tm1-credentials'),
+    path('tm1/tracking-mapping/', TrackingMappingView.as_view(), name='planning-analytics-tracking-mapping'),
+    path('tm1/tracking-mapping/add/', TrackingMappingAddView.as_view(), name='planning-analytics-tracking-mapping-add'),
 ]

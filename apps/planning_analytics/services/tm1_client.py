@@ -113,3 +113,105 @@ def test_connection(base_url=None, user=None, password=None):
         return {'success': False, 'message': f'Connection failed: {exc}'}
     except Exception as exc:
         return {'success': False, 'message': f'Error: {exc}'}
+
+
+def get_dimension_elements(dimension_name, base_url=None, user=None, password=None):
+    """
+    Return a list of leaf element names from a TM1 dimension.
+    Excludes consolidated elements (Type == 'Consolidated').
+    """
+    base_url, user, password = _resolve_credentials(base_url, user, password)
+    if not base_url:
+        return {'success': False, 'message': 'TM1 base URL is not configured.', 'elements': []}
+
+    dim = dimension_name.replace("'", "''")
+    url = (
+        f"{base_url.rstrip('/')}/Dimensions('{dim}')/Hierarchies('{dim}')/Elements"
+        "?$select=Name,Type&$filter=Type ne 'Consolidated'"
+    )
+    auth = _build_auth(user, password)
+    verify = getattr(settings, 'TM1_VERIFY_SSL', False)
+    timeout = getattr(settings, 'TM1_REQUEST_TIMEOUT', 300)
+
+    try:
+        resp = requests.get(url, auth=auth, timeout=timeout, verify=verify)
+        if resp.status_code == 200:
+            data = resp.json()
+            elements = [e['Name'] for e in data.get('value', [])]
+            return {'success': True, 'elements': elements}
+        return {
+            'success': False,
+            'message': f'TM1 returned status {resp.status_code}',
+            'elements': [],
+        }
+    except requests.exceptions.Timeout:
+        return {'success': False, 'message': 'Request timed out', 'elements': []}
+    except Exception as exc:
+        return {'success': False, 'message': str(exc), 'elements': []}
+
+
+def create_dimension_element(dimension_name, element_name, parent_name=None, base_url=None, user=None, password=None):
+    """
+    Create a Numeric leaf element in a TM1 dimension and optionally parent it.
+
+    Returns a dict with 'success', 'message', and 'status' ('created', 'already_exists', 'error').
+    """
+    base_url, user, password = _resolve_credentials(base_url, user, password)
+    if not base_url:
+        return {'success': False, 'message': 'TM1 base URL is not configured.', 'status': 'error'}
+
+    dim = dimension_name.replace("'", "''")
+    elem = element_name.replace("'", "''")
+    base = base_url.rstrip('/')
+    auth = _build_auth(user, password)
+    verify = getattr(settings, 'TM1_VERIFY_SSL', False)
+    timeout = getattr(settings, 'TM1_REQUEST_TIMEOUT', 300)
+
+    # Check if element already exists
+    check_url = f"{base}/Dimensions('{dim}')/Hierarchies('{dim}')/Elements('{elem}')"
+    try:
+        check = requests.get(check_url, auth=auth, timeout=30, verify=verify)
+        if check.status_code == 200:
+            return {'success': True, 'message': f"'{element_name}' already exists in {dimension_name}", 'status': 'already_exists'}
+    except Exception:
+        pass
+
+    # Create element
+    create_url = f"{base}/Dimensions('{dim}')/Hierarchies('{dim}')/Elements"
+    try:
+        resp = requests.post(
+            create_url,
+            json={'Name': element_name, 'Type': 'Numeric'},
+            auth=auth,
+            timeout=timeout,
+            verify=verify,
+        )
+        if resp.status_code not in (200, 201, 204):
+            return {
+                'success': False,
+                'message': f'Failed to create element (HTTP {resp.status_code}): {resp.text[:300]}',
+                'status': 'error',
+            }
+    except Exception as exc:
+        return {'success': False, 'message': str(exc), 'status': 'error'}
+
+    # Parent the element if parent_name provided
+    if parent_name:
+        parent = parent_name.replace("'", "''")
+        edge_url = f"{base}/Dimensions('{dim}')/Hierarchies('{dim}')/Elements('{parent}')/Elements"
+        try:
+            requests.post(
+                edge_url,
+                json={
+                    '@odata.type': '#ibm.tm1.api.v1.HierarchyElement',
+                    'Name': element_name,
+                    'Weight': 1,
+                },
+                auth=auth,
+                timeout=timeout,
+                verify=verify,
+            )
+        except Exception:
+            pass  # Element was created; parenting failure is non-fatal
+
+    return {'success': True, 'message': f"'{element_name}' created in {dimension_name}", 'status': 'created'}

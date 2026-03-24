@@ -199,3 +199,111 @@ class TM1ProcessListView(APIView):
                 'parameters': obj.parameters,
             })
         return Response({'message': f'{len(created)} process(es) saved.', 'processes': created})
+
+
+class TrackingMappingView(APIView):
+    """
+    GET  ?tenant_id=<id>  — compare Xero tracking_category_1 options vs TM1 dimensions.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        tenant_id = request.query_params.get('tenant_id')
+        if not tenant_id:
+            return Response({'error': 'tenant_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Fetch Xero tracking category 1 options for this tenant
+        try:
+            from apps.xero.xero_metadata.models import XeroTracking
+            from apps.xero.xero_core.models import XeroTenant
+            try:
+                tenant = XeroTenant.objects.get(xero_tenant_id=tenant_id)
+            except XeroTenant.DoesNotExist:
+                return Response({'error': 'Tenant not found'}, status=status.HTTP_404_NOT_FOUND)
+
+            # Try matching by tracking_category_1_id (stable Xero ID) first
+            cat1_id = getattr(tenant, 'tracking_category_1_id', None)
+            if cat1_id:
+                qs = XeroTracking.objects.filter(
+                    organisation=tenant,
+                    tracking_category_id=cat1_id,
+                )
+            else:
+                # Fall back to category_slot
+                qs = XeroTracking.objects.filter(organisation=tenant, category_slot=1)
+
+            xero_options = sorted([t.option for t in qs if t.option])
+        except Exception as exc:
+            return Response({'error': f'Failed to load Xero tracking options: {exc}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Fetch TM1 dimension elements
+        user_tm1, user_pw = _get_user_tm1_creds(request)
+        from apps.planning_analytics.services.tm1_client import get_dimension_elements
+
+        t1_result = get_dimension_elements('tracking_1', user=user_tm1, password=user_pw)
+        co_result = get_dimension_elements('cost_object', user=user_tm1, password=user_pw)
+
+        if not t1_result['success']:
+            return Response({'error': f"TM1 tracking_1 error: {t1_result['message']}"}, status=status.HTTP_502_BAD_GATEWAY)
+        if not co_result['success']:
+            return Response({'error': f"TM1 cost_object error: {co_result['message']}"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        tm1_t1_lower = {e.lower() for e in t1_result['elements']}
+        tm1_co_lower = {e.lower() for e in co_result['elements']}
+
+        rows = [
+            {
+                'xero_name': opt,
+                'in_tracking1': opt.lower() in tm1_t1_lower,
+                'in_cost_object': opt.lower() in tm1_co_lower,
+            }
+            for opt in xero_options
+        ]
+
+        return Response({
+            'xero_options': xero_options,
+            'tm1_tracking1': t1_result['elements'],
+            'tm1_cost_object': co_result['elements'],
+            'rows': rows,
+            'unmapped_count': sum(1 for r in rows if not r['in_tracking1']),
+        })
+
+
+class TrackingMappingAddView(APIView):
+    """
+    POST — add a Xero tracking element to TM1 tracking_1 and/or cost_object dimensions.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        xero_name = (request.data.get('xero_name') or '').strip()
+        if not xero_name:
+            return Response({'error': 'xero_name is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        add_to_tracking1 = request.data.get('add_to_tracking1', True)
+        add_to_cost_object = request.data.get('add_to_cost_object', False)
+        cost_object_name = (request.data.get('cost_object_name') or '').strip() or xero_name
+
+        user_tm1, user_pw = _get_user_tm1_creds(request)
+        from apps.planning_analytics.services.tm1_client import create_dimension_element
+
+        actions = []
+
+        if add_to_tracking1:
+            result = create_dimension_element(
+                'tracking_1', xero_name,
+                parent_name='All_Tracking_1',
+                user=user_tm1, password=user_pw,
+            )
+            actions.append({'dimension': 'tracking_1', 'element': xero_name, **result})
+
+        if add_to_cost_object:
+            result = create_dimension_element(
+                'cost_object', cost_object_name,
+                parent_name='All_Cost_Object',
+                user=user_tm1, password=user_pw,
+            )
+            actions.append({'dimension': 'cost_object', 'element': cost_object_name, **result})
+
+        overall_success = all(a.get('success') for a in actions)
+        return Response({'xero_name': xero_name, 'actions': actions, 'success': overall_success})

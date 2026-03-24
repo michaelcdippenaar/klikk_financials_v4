@@ -1682,8 +1682,12 @@ class AgentRunningStatusView(APIView):
 class WebSocketBroadcastView(APIView):
     """Accept a message payload from FastAPI and broadcast to WebSocket observers.
 
+    Also persists each message to Django AgentSession / AgentMessage so the
+    monitor dashboard and session history stay in sync with FastAPI chats.
+
     POST /api/ai-agent/ws/broadcast/
-    Body: { "session_id": "...", "role": "user"|"assistant", "content": "...", ... }
+    Body: { "session_id": "...", "role": "user"|"assistant", "content": "...",
+            "username": "...", "tool_calls": [...], "skills_routed": [...], ... }
     """
     permission_classes = [AllowAny]  # Internal service call; restrict via network/firewall
 
@@ -1698,8 +1702,69 @@ class WebSocketBroadcastView(APIView):
         if 'type' not in payload:
             payload['type'] = 'message'
 
+        # --- Persist to Django AgentSession / AgentMessage ---
+        session_id = payload.get('session_id', '')
+        role = payload.get('role', '')
+        content = payload.get('content', '')
+
+        if session_id and role in ('user', 'assistant') and content:
+            try:
+                self._persist_message(session_id, role, content, payload)
+            except Exception:
+                import logging
+                logging.getLogger('ai_agent').warning(
+                    "Failed to persist broadcast message to Django",
+                    exc_info=True,
+                )
+
         broadcast_message(payload)
         return Response({'status': 'broadcast_sent'})
+
+    @staticmethod
+    def _persist_message(session_id: str, role: str, content: str, payload: dict):
+        """Get-or-create an AgentSession keyed by FastAPI session_id,
+        then append the message."""
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+
+        # Try to resolve the user from the username sent by FastAPI
+        username = payload.get('username', '')
+        user = None
+        if username:
+            user = User.objects.filter(username=username).first()
+
+        # Use the FastAPI session_id as a lookup key stored in session.memory
+        session = AgentSession.objects.filter(
+            memory__fastapi_session_id=session_id,
+        ).first()
+
+        if not session:
+            # Derive a readable title from first user message
+            title = content[:80] if role == 'user' else f'Chat {session_id[:8]}'
+            session = AgentSession.objects.create(
+                title=title,
+                status=AgentSession.STATUS_OPEN,
+                memory={'fastapi_session_id': session_id},
+                created_by=user,
+            )
+
+        # Build metadata from extra fields
+        metadata = {}
+        if payload.get('tool_calls'):
+            metadata['tool_calls'] = payload['tool_calls']
+        if payload.get('skills_routed'):
+            metadata['skills_routed'] = payload['skills_routed']
+
+        AgentMessage.objects.create(
+            session=session,
+            role=role,
+            content=content,
+            metadata=metadata,
+            created_by=user,
+        )
+
+        # Keep session.updated_at fresh
+        session.save(update_fields=['updated_at'])
 
 
 # ---------------------------------------------------------------------------

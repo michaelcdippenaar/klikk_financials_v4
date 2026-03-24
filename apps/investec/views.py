@@ -1110,12 +1110,6 @@ def process_portfolio_file(uploaded_file):
                 'available_columns': col_names[:30]
             }
         
-        # Clear existing portfolio data for this month/year (not just the specific date)
-        deleted_count = InvestecJsePortfolio.objects.filter(
-            year=portfolio_date.year,
-            month=portfolio_date.month
-        ).delete()[0]
-        
         # Prepare data for bulk creation
         portfolios_to_create = []
         errors = []
@@ -1205,6 +1199,13 @@ def process_portfolio_file(uploaded_file):
                     errors.append(f'Row {index + header_row + 2}: Invalid total value: {total_value_value}')
                     continue
                 
+                # JSE/ZAR prices are quoted in South African cents — convert to rands
+                if currency == 'ZAR':
+                    price = price / 100
+                    unit_cost = unit_cost / 100
+                    total_cost = total_cost / 100
+                    total_value = total_value / 100
+
                 # Optional fields
                 exchange_rate = None
                 if exchange_rate_col in col_names and not pd.isna(row[exchange_rate_col]):
@@ -1267,10 +1268,15 @@ def process_portfolio_file(uploaded_file):
                 errors.append(f'Row {index + header_row + 2}: {str(e)}')
                 continue
         
-        # Bulk create portfolios
+        # Bulk create portfolios (delete existing month data + insert in one atomic block)
         created_count = 0
+        deleted_count = 0
         if portfolios_to_create:
             with transaction.atomic():
+                deleted_count = InvestecJsePortfolio.objects.filter(
+                    year=portfolio_date.year,
+                    month=portfolio_date.month
+                ).delete()[0]
                 created_instances = InvestecJsePortfolio.objects.bulk_create(
                     portfolios_to_create,
                     ignore_conflicts=False

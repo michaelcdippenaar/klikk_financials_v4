@@ -39,6 +39,13 @@ DEFAULT_VERSION = "budget"
 INPUT_TYPE_ADJUSTMENT = "adjustment_declared_dividend"
 MEASURE_DPS = "dividends_per_share"
 
+# TM1 transaction type leaf elements per dividend category
+TXN_TYPE_MAP = {
+    "regular": "Dividend",
+    "special": "Special Dividend",
+    "foreign": "Foreign Dividend",
+}
+
 _FINANCIALS_DSN = dict(
     host=settings.pg_financials_host,
     port=settings.pg_financials_port,
@@ -112,6 +119,51 @@ def _read_dps_values(
     }
 
 
+MONTH_MAP = {
+    1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
+    7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
+}
+MONTH_MAP_REV = {v: k for k, v in MONTH_MAP.items()}
+
+
+def _find_calculated_month(
+    tm1: TM1Service,
+    listed_share: str,
+    ex_date: datetime.date,
+    entity: str,
+    version: str,
+) -> tuple[str, str, float]:
+    """Probe TM1 to find the month with non-zero calculated base DPS.
+
+    Checks the ex-date month and the following month. Returns (year_str, month_str, base_dps).
+    Falls back to ex-date month if neither has a calculated value.
+    """
+    candidates = [(ex_date.year, ex_date.month)]
+    if ex_date.month == 12:
+        candidates.append((ex_date.year + 1, 1))
+    else:
+        candidates.append((ex_date.year, ex_date.month + 1))
+
+    for year, month in candidates:
+        year_str = str(year)
+        month_str = MONTH_MAP[month]
+        values = _read_dps_values(tm1, listed_share, year_str, month_str, entity, version)
+        all_dps = values["all_input_types_dps"] or 0.0
+        current_adj = values["declared_dividend_dps"] or 0.0
+        base_dps = all_dps - current_adj
+        if base_dps != 0.0:
+            log.info("TM1 probe: %s has calculated base %.4f in %s %s",
+                     listed_share, base_dps, month_str, year_str)
+            return year_str, month_str, base_dps
+
+    # No calculated value found — fall back to ex_date month
+    fallback_year = str(ex_date.year)
+    fallback_month = MONTH_MAP[ex_date.month]
+    log.info("TM1 probe: %s has no calculated base in %s or %s — using ex_date month %s",
+             listed_share, MONTH_MAP[candidates[0][1]], MONTH_MAP[candidates[1][1]], fallback_month)
+    return fallback_year, fallback_month, 0.0
+
+
 # ---------------------------------------------------------------------------
 #  Tool A: get_dividend_forecast (read-only)
 # ---------------------------------------------------------------------------
@@ -171,11 +223,17 @@ def adjust_dividend_forecast(
     month: str,
     entity: str = DEFAULT_ENTITY,
     confirm: bool = False,
+    dividend_category: str = "regular",
 ) -> dict[str, Any]:
     """
     Adjust the budget DPS forecast when a company declares its dividend.
     Computes adjustment = declared_dps - base_dps (where base = All_Input_Type - current adjustment).
     Writes to listed_share_pln_forecast at input_type:adjustment_declared_dividend, measure:dividends_per_share.
+
+    Writes to the correct TM1 transaction type leaf element based on dividend_category:
+      - regular  → 'Dividend'
+      - special  → 'Special Dividend'
+      - foreign  → 'Foreign Dividend'
 
     IMPORTANT: set confirm=True to actually write. Default is safe dry-run.
 
@@ -185,7 +243,10 @@ def adjust_dividend_forecast(
     month: Month in which dividend is expected (e.g. 'Mar').
     entity: Entity GUID. Default: Klikk (Pty) Ltd.
     confirm: Set True to write. Default False (dry-run).
+    dividend_category: 'regular', 'special', or 'foreign'. Determines TM1 transaction type.
     """
+    txn_type_write = TXN_TYPE_MAP.get(dividend_category, "Dividend")
+
     try:
         with TM1Service(**TM1_CONFIG) as tm1:
             # Validate listed_share exists
@@ -202,9 +263,15 @@ def adjust_dividend_forecast(
             # Compute the new adjustment value
             new_adjustment = declared_dps - base_dps
 
+            # For recently-purchased shares with no base data, base_dps will be 0
+            # and the full declared_dps becomes the adjustment — this is correct behaviour
+            if base_dps == 0.0 and current_adj == 0.0:
+                log.info("Zero base DPS for %s %s %s — likely recently purchased, "
+                         "using full declared DPS as adjustment", listed_share, year, month)
+
             coordinates = (
                 year, month, DEFAULT_VERSION, entity, listed_share,
-                txn_type_all, INPUT_TYPE_ADJUSTMENT, MEASURE_DPS,
+                txn_type_write, INPUT_TYPE_ADJUSTMENT, MEASURE_DPS,
             )
 
             result = {
@@ -218,7 +285,10 @@ def adjust_dividend_forecast(
                 "current_adjustment": round(current_adj, 6),
                 "new_adjustment": round(new_adjustment, 6),
                 "resulting_total_dps": round(base_dps + new_adjustment, 6),
+                "dividend_category": dividend_category,
+                "txn_type": txn_type_write,
                 "coordinates": list(coordinates),
+                "zero_base": base_dps == 0.0 and current_adj == 0.0,
             }
 
             if not confirm:
@@ -234,7 +304,7 @@ def adjust_dividend_forecast(
             )
 
             result["status"] = "written"
-            result["message"] = f"Adjustment {new_adjustment:.6f} written to TM1."
+            result["message"] = f"Adjustment {new_adjustment:.6f} written to TM1 ({txn_type_write})."
             return result
 
     except Exception as e:
@@ -356,6 +426,11 @@ def check_declared_dividends(
             })
             continue
 
+        # Auto-detect dividend category based on exchange
+        # Non-.JO symbols are foreign; .JO symbols are domestic (regular by default)
+        # Special dividends must be manually classified — yfinance doesn't distinguish
+        dividend_category = "foreign" if not symbol_str.upper().endswith(".JO") else "regular"
+
         saved = False
         if ex_date:
             try:
@@ -370,9 +445,11 @@ def check_declared_dividends(
                         if not existing:
                             cur.execute("""
                                 INSERT INTO financial_investments_dividendcalendar
-                                (symbol_id, ex_dividend_date, payment_date, amount, currency, status, source, tm1_adjustment_written, created_at, updated_at)
-                                VALUES (%s, %s, %s, %s, %s, 'declared', 'yfinance', false, NOW(), NOW())
-                            """, (symbol_id, ex_date, pay_date, amount, info.get("currency", "")))
+                                (symbol_id, ex_dividend_date, payment_date, amount, currency,
+                                 status, dividend_category, source, tm1_adjustment_written, created_at, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, 'declared', %s, 'yfinance', false, NOW(), NOW())
+                            """, (symbol_id, ex_date, pay_date, amount,
+                                  info.get("currency", ""), dividend_category))
                             conn.commit()
                             saved = True
 
@@ -396,6 +473,7 @@ def check_declared_dividends(
             "amount": float(amount) if amount else None,
             "dividend_rate": float(dividend_rate) if dividend_rate else None,
             "currency": info.get("currency", ""),
+            "dividend_category": dividend_category,
             "new_record_saved": saved,
         })
 
@@ -421,12 +499,15 @@ def _run_dividend_calendar_update() -> dict[str, Any]:
         return check_result
 
     # 2. Find calendar entries that need TM1 adjustment
+    # Special dividends are excluded — they are NOT budgeted, only input once declared manually
     adjustments_written = 0
+    skipped_special = 0
     try:
         with psycopg2.connect(**_FINANCIALS_DSN) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 cur.execute("""
-                    SELECT dc.id, dc.amount, dc.ex_dividend_date, dc.currency,
+                    SELECT dc.id, dc.amount, dc.ex_dividend_date, dc.payment_date,
+                           dc.currency, dc.dividend_category,
                            s.symbol, m.share_code
                     FROM financial_investments_dividendcalendar dc
                     JOIN financial_investments_symbol s ON dc.symbol_id = s.id
@@ -446,16 +527,35 @@ def _run_dividend_calendar_update() -> dict[str, Any]:
         share_code = entry["share_code"]
         declared_dps = float(entry["amount"])
         ex_date = entry["ex_dividend_date"]
+        pay_date = entry.get("payment_date")
+        dividend_category = entry.get("dividend_category") or "regular"
 
-        # Determine year and month from ex_dividend_date
-        month_map = {
-            1: "Jan", 2: "Feb", 3: "Mar", 4: "Apr", 5: "May", 6: "Jun",
-            7: "Jul", 8: "Aug", 9: "Sep", 10: "Oct", 11: "Nov", 12: "Dec",
-        }
-        year_str = str(ex_date.year)
-        month_str = month_map.get(ex_date.month, "Jan")
+        # Skip special dividends — they are NOT budgeted for
+        if dividend_category == "special":
+            skipped_special += 1
+            log.info("Dividend calendar: skipping special dividend for %s (%s)",
+                     share_code, ex_date)
+            continue
 
-        # Write adjustment to TM1
+        # Determine the correct TM1 month:
+        # 1. Manual payment_date (highest priority)
+        # 2. TM1 probe — find month with non-zero calculated base
+        # 3. Ex-date month (fallback)
+        if pay_date:
+            year_str = str(pay_date.year)
+            month_str = MONTH_MAP.get(pay_date.month, "Jan")
+            log.info("Dividend calendar: using payment_date %s for %s", pay_date, share_code)
+        else:
+            try:
+                with TM1Service(**TM1_CONFIG) as tm1_probe:
+                    year_str, month_str, probed_base = _find_calculated_month(
+                        tm1_probe, share_code, ex_date, DEFAULT_ENTITY, DEFAULT_VERSION)
+            except Exception as e:
+                log.warning("TM1 probe failed for %s, falling back to ex_date: %s", share_code, e)
+                year_str = str(ex_date.year)
+                month_str = MONTH_MAP.get(ex_date.month, "Jan")
+
+        # Write adjustment to TM1, routing to the correct transaction type element
         result = adjust_dividend_forecast(
             listed_share=share_code,
             declared_dps=declared_dps,
@@ -463,22 +563,28 @@ def _run_dividend_calendar_update() -> dict[str, Any]:
             month=month_str,
             entity=DEFAULT_ENTITY,
             confirm=True,
+            dividend_category=dividend_category,
         )
 
         if result.get("status") == "written":
-            # Mark as written in DB
+            # Mark as written in DB with adjustment value and timestamp
             try:
                 with psycopg2.connect(**_FINANCIALS_DSN) as conn:
                     with conn.cursor() as cur:
                         cur.execute("""
                             UPDATE financial_investments_dividendcalendar
-                            SET tm1_adjustment_written = true, updated_at = NOW()
+                            SET tm1_adjustment_written = true,
+                                tm1_adjustment_value = %s,
+                                tm1_written_at = NOW(),
+                                tm1_target_month = %s,
+                                updated_at = NOW()
                             WHERE id = %s
-                        """, (entry["id"],))
+                        """, (result.get("new_adjustment", 0), month_str, entry["id"]))
                         conn.commit()
                 adjustments_written += 1
-                log.info("Dividend calendar: wrote adjustment for %s (%s %s): %s",
-                         share_code, month_str, year_str, result.get("new_adjustment"))
+                log.info("Dividend calendar: wrote %s adjustment for %s (%s %s): %s",
+                         dividend_category, share_code, month_str, year_str,
+                         result.get("new_adjustment"))
             except Exception as e:
                 log.warning("Failed to update tm1_adjustment_written for calendar %s: %s", entry["id"], e)
         elif "error" in result:
@@ -491,6 +597,7 @@ def _run_dividend_calendar_update() -> dict[str, Any]:
     return {
         "checked": check_result.get("checked", 0),
         "adjustments_written": adjustments_written,
+        "skipped_special": skipped_special,
         "pending_found": len(pending),
         "duration_ms": duration,
     }
