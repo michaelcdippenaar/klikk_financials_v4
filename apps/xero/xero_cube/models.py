@@ -41,6 +41,25 @@ class XeroTrailBalanceManager(DataFrameManager):
         params = [fiscal_start, fiscal_start, fiscal_start, fiscal_start, tenant_id]
         where_extra = ""
 
+        # Regular "journal" rows are the legacy Xero Journals API pipeline and
+        # duplicate the transaction-sourced rows. Trail balance should use the
+        # new transaction pipeline plus manual journals.
+        where_extra += " AND j.journal_type != 'journal'"
+        where_extra += """
+            AND NOT EXISTS (
+                SELECT 1
+                FROM xero_data_xerojournalexclusion ex
+                WHERE ex.active = TRUE
+                    AND ex.organisation_id = j.organisation_id
+                    AND (ex.journal_type = '' OR ex.journal_type = j.journal_type)
+                    AND (ex.journal_number IS NULL OR ex.journal_number = j.journal_number)
+                    AND (ex.journal_id = '' OR ex.journal_id = j.journal_id)
+                    AND (ex.date IS NULL OR ex.date = j.date::date)
+                    AND (ex.description = '' OR ex.description = j.description)
+                    AND (ex.reference = '' OR ex.reference = j.reference)
+            )
+        """
+
         if exclude_manual_journals:
             where_extra += " AND j.journal_type != 'manual_journal'"
 

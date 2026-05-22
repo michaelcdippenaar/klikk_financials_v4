@@ -6,6 +6,7 @@ import time
 import logging
 import pandas as pd
 from decimal import Decimal
+from django.db import models
 
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_data.models import XeroJournals, Month, Year
@@ -770,9 +771,18 @@ def import_pnl_by_tracking(tenant_id, from_date=None, to_date=None, periods=11, 
         'errors': [],
     }
 
-    # Delete old data for this org
+    # Delete only the date range being imported so historical backfills can run
+    # safely in <=365 day chunks without wiping previously imported periods.
     XeroPnlByTracking.objects.filter(
         organisation=organisation,
+        year__gte=from_date.year,
+        year__lte=to_date.year,
+    ).filter(
+        models.Q(year__gt=from_date.year) |
+        models.Q(year=from_date.year, month__gte=from_date.month)
+    ).filter(
+        models.Q(year__lt=to_date.year) |
+        models.Q(year=to_date.year, month__lte=to_date.month)
     ).delete()
 
     # ------------------------------------------------------------------

@@ -744,3 +744,31 @@ class XeroJournals(models.Model):
 
     def __str__(self):
         return f'{self.organisation.tenant_name}: {self.journal_type} {self.date} {self.journal_number} {self.reference} {self.description}'
+
+
+class XeroJournalExclusion(models.Model):
+    """
+    Journal-level audit exclusions used when building the analytical trail
+    balance. Source journal rows are kept intact; this model only documents
+    which rows should be ignored for reporting reconciliation.
+    """
+    organisation = models.ForeignKey(XeroTenant, on_delete=models.CASCADE, related_name='journal_exclusions')
+    journal_type = models.CharField(max_length=20, blank=True, default='')
+    journal_number = models.IntegerField(null=True, blank=True)
+    journal_id = models.CharField(max_length=200, blank=True, default='')
+    date = models.DateField(null=True, blank=True)
+    description = models.TextField(blank=True, default='')
+    reference = models.TextField(blank=True, default='')
+    reason = models.TextField(blank=True, default='')
+    active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['organisation', 'active'], name='jrnl_excl_org_active_idx'),
+            models.Index(fields=['organisation', 'date', 'journal_number'], name='jrnl_excl_org_dt_num_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.organisation_id}: {self.date or "*"} {self.journal_type or "*"} {self.journal_number or self.journal_id or "*"}'
