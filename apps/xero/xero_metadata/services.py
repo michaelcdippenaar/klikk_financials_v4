@@ -54,7 +54,7 @@ def update_metadata(tenant_id, user=None):
         # Define metadata API calls (executed sequentially to respect Xero's 5 concurrent call limit)
         # Organisation first - fetches fiscal year settings from Xero
         metadata_calls = [
-            ('organisation', lambda: xero_api.organisation().get()),
+            ('organisation', lambda: xero_api.organisation_info().get()),
             ('accounts', lambda: xero_api.accounts().get()),
             ('tracking_categories', lambda: xero_api.tracking_categories().get()),
             ('contacts', lambda: xero_api.contacts().get()),
@@ -111,4 +111,3 @@ def update_metadata(tenant_id, user=None):
                 'total_errors': 1
             }
         }
-

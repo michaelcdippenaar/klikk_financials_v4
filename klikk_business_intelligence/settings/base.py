@@ -249,6 +249,8 @@ _scheme = 'https' if TM1_CONFIG['ssl'] else 'http'
 TM1_BASE_URL = os.environ.get('TM1_BASE_URL') or f"{_scheme}://{TM1_CONFIG['address']}:{TM1_CONFIG['port']}/api/v1"
 TM1_USER = TM1_CONFIG['user']
 TM1_PASSWORD = TM1_CONFIG['password']
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:9000')
+XERO_REDIRECT_URI = os.environ.get('XERO_REDIRECT_URI')
 # EOD Historical Data API (optional) — JSE stock data, fundamentals, bulk exchange tickers
 # Get key at https://eodhd.com/
 EOD_API_KEY = os.environ.get('EOD_API_KEY') or os.environ.get('eod_api_key') or ''

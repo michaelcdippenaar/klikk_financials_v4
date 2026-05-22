@@ -118,9 +118,22 @@ class XeroCallbackView(APIView):
             response = requests.post(token_url, headers=headers, data=data)
             response.raise_for_status()
             token_data = response.json()
-            logger.info(f"Token data: {token_data}")
+            logger.info("Token exchange succeeded")
         except requests.RequestException as e:
-            logger.error(f"Token exchange failed: {str(e)}")
+            response = getattr(e, 'response', None)
+            response_text = ''
+            if response is not None:
+                try:
+                    response_text = response.text[:1000]
+                except Exception:
+                    response_text = '<unable to read response body>'
+            logger.error(
+                "Token exchange failed: %s; status=%s; body=%s; redirect_uri=%s",
+                str(e),
+                getattr(response, 'status_code', None),
+                response_text,
+                data.get('redirect_uri'),
+            )
             return self._redirect_error(f"Token exchange failed: {e}")
 
         if 'error' in token_data:

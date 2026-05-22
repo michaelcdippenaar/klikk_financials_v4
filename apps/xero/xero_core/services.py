@@ -318,7 +318,7 @@ class XeroAccountingApi:
         self.organisation = XeroTenant.objects.get(tenant_id=tenant_id)
         self.touched_transaction_ids = touched_transaction_ids  # Mutable set to collect IDs from incremental fetch
 
-    def organisation(self):
+    def organisation_info(self):
         """Fetch Organisation from Xero and update tenant's fiscal_year_start_month."""
         from apps.xero.xero_core.services import serialize_model
         from apps.xero.xero_metadata.utils import financial_year_end_to_start_month
