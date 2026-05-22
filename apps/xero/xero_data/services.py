@@ -113,6 +113,7 @@ def update_xero_transactions(tenant_id, user=None, load_all=False):
         'overpayments_updated': 0,
         'manual_journals_updated': 0,
         'api_calls': 0,
+        'affected_periods': [],
     }
     
     errors = []
@@ -121,7 +122,6 @@ def update_xero_transactions(tenant_id, user=None, load_all=False):
         api_client = XeroApiClient(user, tenant_id=tenant_id)
         touched_transaction_ids = set()
         xero_api = XeroAccountingApi(api_client, tenant_id, touched_transaction_ids=touched_transaction_ids)
-        stats['api_calls'] += 1
         
         # Transaction calls (sequential). Manual Journals only; deprecated Journals API not used.
         transaction_calls = [
@@ -134,17 +134,21 @@ def update_xero_transactions(tenant_id, user=None, load_all=False):
             ('manual_journals', lambda: xero_api.manual_journals(load_all=load_all).get()),
         ]
         
+        affected_periods = set()
+
         for name, call in transaction_calls:
             try:
-                call()
-                stats[f'{name}_updated'] = 1
-                stats['api_calls'] += 1
+                call_result = call() or {}
+                stats[f'{name}_updated'] = call_result.get('records', 0)
+                stats['api_calls'] += call_result.get('api_calls', 1)
+                affected_periods.update(tuple(p) for p in call_result.get('affected_periods', []))
             except Exception as e:
                 error_msg = f"Failed to update {name}: {str(e)}"
                 logger.error("Failed to update %s: %s", name, str(e))
                 errors.append(error_msg)
         
         duration = time.time() - start_time
+        stats['affected_periods'] = sorted(affected_periods)
         stats['duration_seconds'] = duration
         stats['total_errors'] = len(errors)
 
@@ -166,6 +170,7 @@ def update_xero_transactions(tenant_id, user=None, load_all=False):
             'stats': stats
         }
         result['touched_transaction_ids'] = touched_transaction_ids
+        result['affected_periods'] = stats['affected_periods']
         return result
         
     except ValueError as e:

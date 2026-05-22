@@ -41,6 +41,7 @@ def run_pipeline(
     """
     results = []
     touched_transaction_ids = None
+    affected_periods = None
 
     # Step 1 - Update Metadata (accounts, contacts, tracking categories)
     step = {'step': 'update_metadata', 'success': False}
@@ -62,7 +63,11 @@ def run_pipeline(
     try:
         from apps.xero.xero_data.services import update_financial_data
         sync_result = update_financial_data(tenant_id, load_all=load_all)
-        touched_transaction_ids = sync_result.get('touched_transaction_ids') or None
+        if 'touched_transaction_ids' in sync_result:
+            touched_transaction_ids = sync_result.get('touched_transaction_ids')
+        else:
+            touched_transaction_ids = None
+        affected_periods = sync_result.get('affected_periods')
         step['success'] = True
         step['message'] = 'Postgres updated from Xero'
     except Exception as exc:
@@ -81,6 +86,7 @@ def run_pipeline(
             exclude_manual_journals=exclude_manual_journals,
             calculate_pnl_ytd=calculate_pnl_ytd,
             touched_transaction_ids=touched_transaction_ids,
+            affected_periods=affected_periods,
         )
         step['success'] = True
         step['message'] = result.get('message', 'Xero data processed')

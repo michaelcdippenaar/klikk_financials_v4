@@ -33,7 +33,8 @@ def process_journals(tenant_id, force_reprocess=False):
     logger.info(f'Journals processing complete for tenant {tenant_id}')
 
 
-def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_manual_journals=False):
+def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_manual_journals=False,
+                         affected_periods=None):
     """
     Create trail balance from journals via a single SQL INSERT...SELECT.
 
@@ -42,17 +43,26 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
         incremental: If True, only process journals updated since last run
         rebuild: If True, force full rebuild and ignore existing data (overrides incremental)
         exclude_manual_journals: If True, only build trail balance from regular journals (exclude manual journals)
+        affected_periods: Optional list of (year, month) tuples from the Xero fetch step.
+            When provided, this is preferred over timestamp-based inference.
     """
     from apps.xero.xero_sync.models import XeroLastUpdate
 
     organisation = XeroTenant.objects.get(tenant_id=tenant_id)
 
-    affected_periods = None  # None = full rebuild
+    selected_periods = None  # None = full rebuild
 
     if rebuild:
         logger.info("Rebuild mode: forcing full rebuild")
         print(f"[TRAIL BALANCE] REBUILD mode: forcing full rebuild")
         incremental = False
+    elif affected_periods is not None:
+        selected_periods = [tuple(p) for p in affected_periods]
+        if not selected_periods:
+            tb_count = XeroTrailBalance.objects.filter(organisation=organisation).count()
+            print("[TRAIL BALANCE] No affected periods from Xero sync; skipping rebuild")
+            return {'skipped': True, 'records': tb_count, 'affected_periods': []}
+        print(f"[TRAIL BALANCE] Using {len(selected_periods)} affected periods from sync: {selected_periods}")
     elif incremental:
         try:
             last_update = XeroLastUpdate.objects.get(end_point='journals', organisation=organisation)
@@ -70,13 +80,13 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
                     _month=Month('date'), _year=Year('date')
                 ).values('_year', '_month').distinct()
 
-                affected_periods = [(p['_year'], p['_month']) for p in periods_qs]
-                print(f"[TRAIL BALANCE] {len(affected_periods)} affected periods: {affected_periods}")
+                selected_periods = [(p['_year'], p['_month']) for p in periods_qs]
+                print(f"[TRAIL BALANCE] {len(selected_periods)} affected periods: {selected_periods}")
 
-                if not affected_periods:
+                if not selected_periods:
                     logger.warning("No affected periods in incremental mode, falling back to full rebuild")
                     print(f"[TRAIL BALANCE] WARNING: no affected periods, falling back to full rebuild")
-                    affected_periods = None
+                    selected_periods = None
         except XeroLastUpdate.DoesNotExist:
             logger.info("No previous update found, doing full rebuild")
             print(f"[TRAIL BALANCE] No previous update, full rebuild")
@@ -85,7 +95,7 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
         XeroTrailBalance.objects.consolidate_journals(
             organisation,
             exclude_manual_journals=exclude_manual_journals,
-            affected_periods=affected_periods,
+            affected_periods=selected_periods,
         )
 
         tb = XeroTrailBalance.objects.filter(organisation=organisation).select_related(
@@ -148,6 +158,8 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
         except Exception as e2:
             logger.warning(f"BigQuery export skipped (trail balance still created): {e2}")
             print(f"BigQuery export skipped: {e2}")
+
+    return {'skipped': False, 'records': tb_count, 'affected_periods': selected_periods}
 
 
 def fill_balance_sheet_gaps(tenant_id):
@@ -343,7 +355,8 @@ def create_balance_sheet(tenant_id):
 
 
 def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_journals=False,
-                      calculate_pnl_ytd=True, touched_transaction_ids=None):
+                      calculate_pnl_ytd=True, touched_transaction_ids=None,
+                      affected_periods=None):
     """
     Service function to process Xero data (trail balance, etc.).
     Extracted from XeroProcessDataView for use in scheduled tasks.
@@ -364,6 +377,7 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
             When provided, only those transactions are reprocessed (incremental).
             When None, all transactions are reprocessed (full rebuild).
             Ignored when rebuild_trail_balance=True (always full rebuild).
+        affected_periods: Optional list of (year, month) tuples updated in the preceding sync step.
     
     Returns:
         dict: Result with status, message, and stats
@@ -410,17 +424,31 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
             print(f"[PROCESS] REBUILD mode: forcing full rebuild of trail balance")
         if exclude_manual_journals:
             print(f"[PROCESS] Excluding manual journals - only using regular journals for trail balance")
-        create_trail_balance(tenant_id, incremental=not rebuild_trail_balance, rebuild=rebuild_trail_balance, exclude_manual_journals=exclude_manual_journals)
+        tb_result = create_trail_balance(
+            tenant_id,
+            incremental=not rebuild_trail_balance,
+            rebuild=rebuild_trail_balance,
+            exclude_manual_journals=exclude_manual_journals,
+            affected_periods=None if rebuild_trail_balance else affected_periods,
+        )
         stats['trail_balance_created'] = True
-        print(f"[PROCESS] ✓ Trail balance created")
+        trail_balance_skipped = bool(tb_result.get('skipped')) if isinstance(tb_result, dict) else False
+        stats['trail_balance_skipped'] = trail_balance_skipped
+        if trail_balance_skipped:
+            print(f"[PROCESS] Trail balance unchanged; rebuild skipped")
+        else:
+            print(f"[PROCESS] ✓ Trail balance created")
         
         # Step 3: Calculate balance_to_date for balance sheet accounts (optional)
-        if calculate_pnl_ytd:
+        if calculate_pnl_ytd and not stats.get('trail_balance_skipped'):
             logger.info(f'Start calculating balance sheet balance_to_date for tenant {tenant_id}')
             print(f"[PROCESS] Starting balance sheet balance_to_date calculation for tenant {tenant_id}")
             calculate_balance_sheet_balance_to_date(tenant_id)
             stats['pnl_balance_to_date_calculated'] = True
             print(f"[PROCESS] ✓ Balance sheet balance_to_date calculated")
+        elif stats.get('trail_balance_skipped'):
+            stats['pnl_balance_to_date_calculated'] = False
+            print(f"[PROCESS] Skipped balance sheet balance_to_date calculation (no trail-balance changes)")
         else:
             stats['pnl_balance_to_date_calculated'] = False
             print(f"[PROCESS] Skipped balance sheet balance_to_date calculation (calculate_pnl_ytd=False)")

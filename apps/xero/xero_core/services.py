@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Cache for XeroAuthSettings to avoid repeated database queries
 _auth_settings_cache = None
+XERO_PAGE_SIZE = 250
 
 
 class TenantTokenData:
@@ -318,6 +319,39 @@ class XeroAccountingApi:
         self.organisation = XeroTenant.objects.get(tenant_id=tenant_id)
         self.touched_transaction_ids = touched_transaction_ids  # Mutable set to collect IDs from incremental fetch
 
+    def _parse_period(self, value):
+        if not value:
+            return None
+        if isinstance(value, datetime.datetime):
+            return (value.year, value.month)
+        if isinstance(value, datetime.date):
+            return (value.year, value.month)
+        if isinstance(value, str):
+            import re
+            match = re.match(r'/Date\((\d+)([+-]\d+)?\)/', value)
+            if match:
+                try:
+                    parsed = datetime.datetime.fromtimestamp(int(match.group(1)) / 1000.0, tz=datetime.timezone.utc)
+                    return (parsed.year, parsed.month)
+                except (TypeError, ValueError):
+                    return None
+            try:
+                parsed = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+                return (parsed.year, parsed.month)
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    def _affected_periods_for_items(self, items, *date_keys):
+        periods = set()
+        for item in items:
+            for key in date_keys:
+                period = self._parse_period(item.get(key))
+                if period:
+                    periods.add(period)
+                    break
+        return periods
+
     def organisation_info(self):
         """Fetch Organisation from Xero and update tenant's fiscal_year_start_month."""
         from apps.xero.xero_core.services import serialize_model
@@ -413,8 +447,9 @@ class XeroAccountingApi:
                 from apps.xero.xero_sync.models import XeroLastUpdate
                 modified_since = XeroLastUpdate.objects.get_utc_date_time('bank_transactions', self.organisation)
                 page = 1
-                page_size = 100
+                page_size = XERO_PAGE_SIZE
                 total_written = 0
+                affected_periods = set()
                 while True:
                     kwargs = dict(page=page, page_size=page_size)
                     if modified_since:
@@ -435,12 +470,14 @@ class XeroAccountingApi:
                                 if tid:
                                     self.parent.touched_transaction_ids.add(tid)
                         total_written += len(items)
+                        affected_periods.update(self.parent._affected_periods_for_items(items, 'Date'))
                     if not items or len(items) < page_size:
                         break
                     page += 1
                 XeroLastUpdate.objects.update_or_create_timestamp('bank_transactions', self.organisation)
                 if settings.DEBUG and total_written:
                     print(f"[Sync] Bank transactions: {total_written} fetched")
+                return {'records': total_written, 'api_calls': page, 'affected_periods': sorted(affected_periods)}
 
         return BankTransactions(self)
 
@@ -458,8 +495,9 @@ class XeroAccountingApi:
                 from apps.xero.xero_sync.models import XeroLastUpdate
                 modified_since = XeroLastUpdate.objects.get_utc_date_time('invoices', self.organisation)
                 page = 1
-                page_size = 100
+                page_size = XERO_PAGE_SIZE
                 total_written = 0
+                affected_periods = set()
                 while True:
                     kwargs = dict(page=page, page_size=page_size)
                     if modified_since:
@@ -480,12 +518,14 @@ class XeroAccountingApi:
                                 if tid:
                                     self.parent.touched_transaction_ids.add(tid)
                         total_written += len(items)
+                        affected_periods.update(self.parent._affected_periods_for_items(items, 'Date'))
                     if not items or len(items) < page_size:
                         break
                     page += 1
                 XeroLastUpdate.objects.update_or_create_timestamp('invoices', self.organisation)
                 if settings.DEBUG and total_written:
                     print(f"[Sync] Invoices: {total_written} fetched")
+                return {'records': total_written, 'api_calls': page, 'affected_periods': sorted(affected_periods)}
 
         return Invoices(self)
 
@@ -504,8 +544,9 @@ class XeroAccountingApi:
                 from apps.xero.xero_sync.models import XeroLastUpdate
                 modified_since = XeroLastUpdate.objects.get_utc_date_time('payments', self.organisation)
                 page = 1
-                page_size = 100
+                page_size = XERO_PAGE_SIZE
                 total_written = 0
+                affected_periods = set()
                 while True:
                     kwargs = dict(page=page, page_size=page_size)
                     if modified_since:
@@ -526,12 +567,14 @@ class XeroAccountingApi:
                                 if tid:
                                     self.parent.touched_transaction_ids.add(tid)
                         total_written += len(items)
+                        affected_periods.update(self.parent._affected_periods_for_items(items, 'Date'))
                     if not items or len(items) < page_size:
                         break
                     page += 1
                 XeroLastUpdate.objects.update_or_create_timestamp('payments', self.organisation)
                 if settings.DEBUG and total_written:
                     print(f"[Sync] Payments: {total_written} fetched")
+                return {'records': total_written, 'api_calls': page, 'affected_periods': sorted(affected_periods)}
 
         return Payments(self)
 
@@ -550,8 +593,9 @@ class XeroAccountingApi:
                 from apps.xero.xero_sync.models import XeroLastUpdate
                 modified_since = XeroLastUpdate.objects.get_utc_date_time('credit_notes', self.organisation)
                 page = 1
-                page_size = 100
+                page_size = XERO_PAGE_SIZE
                 total_written = 0
+                affected_periods = set()
                 while True:
                     kwargs = dict(page=page, page_size=page_size)
                     if modified_since:
@@ -572,12 +616,14 @@ class XeroAccountingApi:
                                 if tid:
                                     self.parent.touched_transaction_ids.add(tid)
                         total_written += len(items)
+                        affected_periods.update(self.parent._affected_periods_for_items(items, 'Date'))
                     if not items or len(items) < page_size:
                         break
                     page += 1
                 XeroLastUpdate.objects.update_or_create_timestamp('credit_notes', self.organisation)
                 if settings.DEBUG and total_written:
                     print(f"[Sync] Credit notes: {total_written} fetched")
+                return {'records': total_written, 'api_calls': page, 'affected_periods': sorted(affected_periods)}
 
         return CreditNotes(self)
 
@@ -596,8 +642,9 @@ class XeroAccountingApi:
                 from apps.xero.xero_sync.models import XeroLastUpdate
                 modified_since = XeroLastUpdate.objects.get_utc_date_time('prepayments', self.organisation)
                 page = 1
-                page_size = 100
+                page_size = XERO_PAGE_SIZE
                 total_written = 0
+                affected_periods = set()
                 while True:
                     kwargs = dict(page=page, page_size=page_size)
                     if modified_since:
@@ -618,12 +665,14 @@ class XeroAccountingApi:
                                 if tid:
                                     self.parent.touched_transaction_ids.add(tid)
                         total_written += len(items)
+                        affected_periods.update(self.parent._affected_periods_for_items(items, 'Date'))
                     if not items or len(items) < page_size:
                         break
                     page += 1
                 XeroLastUpdate.objects.update_or_create_timestamp('prepayments', self.organisation)
                 if settings.DEBUG and total_written:
                     print(f"[Sync] Prepayments: {total_written} fetched")
+                return {'records': total_written, 'api_calls': page, 'affected_periods': sorted(affected_periods)}
 
         return Prepayments(self)
 
@@ -642,8 +691,9 @@ class XeroAccountingApi:
                 from apps.xero.xero_sync.models import XeroLastUpdate
                 modified_since = XeroLastUpdate.objects.get_utc_date_time('overpayments', self.organisation)
                 page = 1
-                page_size = 100
+                page_size = XERO_PAGE_SIZE
                 total_written = 0
+                affected_periods = set()
                 while True:
                     kwargs = dict(page=page, page_size=page_size)
                     if modified_since:
@@ -664,12 +714,14 @@ class XeroAccountingApi:
                                 if tid:
                                     self.parent.touched_transaction_ids.add(tid)
                         total_written += len(items)
+                        affected_periods.update(self.parent._affected_periods_for_items(items, 'Date'))
                     if not items or len(items) < page_size:
                         break
                     page += 1
                 XeroLastUpdate.objects.update_or_create_timestamp('overpayments', self.organisation)
                 if settings.DEBUG and total_written:
                     print(f"[Sync] Overpayments: {total_written} fetched")
+                return {'records': total_written, 'api_calls': page, 'affected_periods': sorted(affected_periods)}
 
         return Overpayments(self)
 
@@ -774,8 +826,9 @@ class XeroAccountingApi:
                     # Manual journals - use page-based pagination
                     print(f"[MANUAL_JOURNALS] Fetching all manual journals (with pagination)")
                     page = 1
-                    page_size = 100
+                    page_size = XERO_PAGE_SIZE
                     journal_set = []
+                    affected_periods = set()
                     
                     # Loop through all pages
                     while True:
@@ -797,6 +850,7 @@ class XeroAccountingApi:
 
                         page_data = serialize_model(journals_obj)
                         page_journals = page_data.get('ManualJournals') or []
+                        affected_periods.update(self.parent._affected_periods_for_items(page_journals, 'Date'))
                         
                         if not page_journals:
                             break
@@ -878,6 +932,7 @@ class XeroAccountingApi:
                     
                     # Only process the manual journals that were just fetched (incremental update)
                     XeroJournalsSource.objects.create_journals_from_xero(self.organisation, journal_ids=journal_ids_to_fetch if journals_to_process else None)
+                    return {'records': len(journals_to_process), 'api_calls': page, 'affected_periods': sorted(affected_periods)}
                     
                 except Exception as e:
                     # Don't update timestamp on error - preserve last successful date
