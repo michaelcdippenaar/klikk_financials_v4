@@ -210,11 +210,6 @@ class XeroJournalsSourceManager(models.Manager):
         from apps.xero.xero_data.models import XeroTransactionSource, XeroJournals
         from apps.xero.xero_metadata.models import XeroAccount, XeroTracking, XeroContacts
         
-        # Pre-fetch all related data into dictionaries for O(1) lookup
-        source_transactions_dict = {
-            t.transactions_id: t for t in XeroTransactionSource.objects.filter(organisation=organisation)
-        }
-        
         # Filter source journals: force_reprocess processes all; otherwise only unprocessed
         if force_reprocess:
             source = XeroJournalsSource.objects.filter(organisation=organisation)
@@ -224,6 +219,15 @@ class XeroJournalsSourceManager(models.Manager):
             source = XeroJournalsSource.objects.filter(organisation=organisation, processed=False, journal_id__in=journal_ids)
         else:
             source = XeroJournalsSource.objects.filter(organisation=organisation, processed=False)
+
+        if not source.exists():
+            return XeroJournals.objects.none()
+
+        # Pre-fetch all related data into dictionaries for O(1) lookup only
+        # after we know there is actual source work to process.
+        source_transactions_dict = {
+            t.transactions_id: t for t in XeroTransactionSource.objects.filter(organisation=organisation)
+        }
         manual_count = source.filter(journal_type='manual_journal').count()
         regular_count = source.filter(journal_type='journal').count()
         # Create accounts dict by ID for regular journals

@@ -930,8 +930,15 @@ class XeroAccountingApi:
                         if to_update:
                             XeroJournalsSource.objects.bulk_update(to_update, ['journal_number', 'journal_type', 'collection', 'processed'])
                     
-                    # Only process the manual journals that were just fetched (incremental update)
-                    XeroJournalsSource.objects.create_journals_from_xero(self.organisation, journal_ids=journal_ids_to_fetch if journals_to_process else None)
+                    # Only process manual journals that were just fetched. When
+                    # Xero returns no changes, avoid a defensive scan of all
+                    # unprocessed source rows; the main process step handles
+                    # any existing backlog explicitly.
+                    if journals_to_process:
+                        XeroJournalsSource.objects.create_journals_from_xero(
+                            self.organisation,
+                            journal_ids=journal_ids_to_fetch,
+                        )
                     return {'records': len(journals_to_process), 'api_calls': page, 'affected_periods': sorted(affected_periods)}
                     
                 except Exception as e:

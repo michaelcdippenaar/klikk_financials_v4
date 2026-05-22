@@ -28,9 +28,17 @@ def process_journals(tenant_id, force_reprocess=False):
     logger.info(f'Start Processing Journals for tenant {tenant_id}')
     organisation = XeroTenant.objects.get(tenant_id=tenant_id)
     from apps.xero.xero_data.models import XeroJournalsSource
+    if not force_reprocess and not XeroJournalsSource.objects.filter(
+        organisation=organisation,
+        processed=False,
+    ).exists():
+        print('[PROCESS JOURNALS] No unprocessed source journals; skipping')
+        logger.info(f'No unprocessed journals for tenant {tenant_id}; skipping')
+        return {'skipped': True, 'processed': 0}
     result = XeroJournalsSource.objects.create_journals_from_xero(organisation, force_reprocess=force_reprocess)
     print(f'[PROCESS JOURNALS] Journals processing complete')
     logger.info(f'Journals processing complete for tenant {tenant_id}')
+    return {'skipped': False, 'processed': result.count()}
 
 
 def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_manual_journals=False,
