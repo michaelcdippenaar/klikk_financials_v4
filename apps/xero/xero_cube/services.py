@@ -450,7 +450,8 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
         raise Exception(error_msg)
 
 
-def import_pnl_by_tracking(tenant_id, from_date=None, to_date=None, periods=11, user=None):
+def import_pnl_by_tracking(tenant_id, from_date=None, to_date=None, periods=11, user=None,
+                           include_tracking=True):
     """
     Pull Xero Profit & Loss report for each tracking category option and store
     per-account/month values in XeroPnlByTracking.
@@ -465,6 +466,9 @@ def import_pnl_by_tracking(tenant_id, from_date=None, to_date=None, periods=11, 
         to_date: End date (date or 'YYYY-MM-DD' string). Defaults to today.
         periods: Number of comparison periods (default 11 = 12 months)
         user: User for API auth (optional, falls back to active credentials)
+        include_tracking: When False, only import the unfiltered/overall Xero
+            P&L. Use this for faster reconciliation checks where tracking-level
+            detail is not needed.
 
     Returns:
         dict with summary stats
@@ -478,7 +482,9 @@ def import_pnl_by_tracking(tenant_id, from_date=None, to_date=None, periods=11, 
     start_time = time.time()
     organisation = XeroTenant.objects.get(tenant_id=tenant_id)
 
-    # Default date range: last 12 months (must stay within 365 days for Xero API)
+    # Default date range: last 12 months. Longer explicit ranges are supported
+    # below by splitting them into month-anchored API calls, keeping each Xero
+    # request inside the API's 365-day report limit.
     if to_date is None:
         to_date = date_cls.today()
     elif isinstance(to_date, str):
@@ -494,10 +500,8 @@ def import_pnl_by_tracking(tenant_id, from_date=None, to_date=None, periods=11, 
     elif isinstance(from_date, str):
         from_date = datetime.datetime.strptime(from_date, '%Y-%m-%d').date()
 
-    # Validate: Xero requires fromDate and toDate within 365 days
-    if (to_date - from_date).days > 365:
-        raise ValueError(f"Date range {from_date} to {to_date} exceeds 365 days. "
-                         f"Xero P&L API requires dates within 365 days of each other.")
+    if from_date > to_date:
+        raise ValueError(f"from_date {from_date} must be before or equal to to_date {to_date}.")
 
     # Resolve user
     if not user:
@@ -769,11 +773,13 @@ def import_pnl_by_tracking(tenant_id, from_date=None, to_date=None, periods=11, 
         'records_created': 0,
         'api_calls': 0,
         'errors': [],
+        'include_tracking': bool(include_tracking),
     }
 
     # Delete only the date range being imported so historical backfills can run
-    # safely in <=365 day chunks without wiping previously imported periods.
-    XeroPnlByTracking.objects.filter(
+    # safely without wiping previously imported periods. Overall-only imports
+    # must not delete tracking detail that was fetched by a fuller import.
+    delete_qs = XeroPnlByTracking.objects.filter(
         organisation=organisation,
         year__gte=from_date.year,
         year__lte=to_date.year,
@@ -783,31 +789,37 @@ def import_pnl_by_tracking(tenant_id, from_date=None, to_date=None, periods=11, 
     ).filter(
         models.Q(year__lt=to_date.year) |
         models.Q(year=to_date.year, month__lte=to_date.month)
-    ).delete()
+    )
+    if not include_tracking:
+        delete_qs = delete_qs.filter(tracking__isnull=True)
+    delete_qs.delete()
 
     # ------------------------------------------------------------------
     # 3a. Pull P&L for each tracking option
     # ------------------------------------------------------------------
-    for trk in db_trackings:
-        opt_uuid = trk.option_id
-        info = option_map.get(opt_uuid)
-        if not info:
-            print(f"[PNL-TRACKING] SKIP {trk.option} — option UUID {opt_uuid} not found in Xero categories")
-            continue
-        cat_uuid, cat_name, opt_name = info
+    if include_tracking:
+        for trk in db_trackings:
+            opt_uuid = trk.option_id
+            info = option_map.get(opt_uuid)
+            if not info:
+                print(f"[PNL-TRACKING] SKIP {trk.option} — option UUID {opt_uuid} not found in Xero categories")
+                continue
+            cat_uuid, cat_name, opt_name = info
 
-        print(f"[PNL-TRACKING] Pulling P&L for [{cat_name}] {opt_name} ...")
-        n = fetch_pnl_for_plan(
-            label=f"[{cat_name}] {opt_name}",
-            tracking_category_id=cat_uuid,
-            tracking_option_id=opt_uuid,
-            tracking_obj=trk,
-        )
-        if n:
-            print(f"[PNL-TRACKING]   Stored {n} records for {opt_name}")
-        else:
-            print(f"[PNL-TRACKING]   No non-zero P&L data for {opt_name}")
-        stats['tracking_options_processed'] += 1
+            print(f"[PNL-TRACKING] Pulling P&L for [{cat_name}] {opt_name} ...")
+            n = fetch_pnl_for_plan(
+                label=f"[{cat_name}] {opt_name}",
+                tracking_category_id=cat_uuid,
+                tracking_option_id=opt_uuid,
+                tracking_obj=trk,
+            )
+            if n:
+                print(f"[PNL-TRACKING]   Stored {n} records for {opt_name}")
+            else:
+                print(f"[PNL-TRACKING]   No non-zero P&L data for {opt_name}")
+            stats['tracking_options_processed'] += 1
+    else:
+        print("[PNL-TRACKING] Skipping tracking-option P&L; importing OVERALL only")
 
     # ------------------------------------------------------------------
     # 3b. Fetch OVERALL (unfiltered) P&L — tracking=NULL

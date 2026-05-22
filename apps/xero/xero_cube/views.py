@@ -307,6 +307,8 @@ class ImportPnlByTrackingView(APIView):
         tenant_id (required)
         from_date (optional, YYYY-MM-DD, default 12 months ago)
         to_date   (optional, YYYY-MM-DD, default today)
+        include_tracking (optional bool, default true). Set false for faster
+            overall-only reconciliation imports.
     """
     permission_classes = [AllowAny]  # TODO: IsAuthenticated for production
 
@@ -317,6 +319,9 @@ class ImportPnlByTrackingView(APIView):
 
         from_date = request.data.get('from_date')
         to_date = request.data.get('to_date')
+        include_tracking = request.data.get('include_tracking', True)
+        if isinstance(include_tracking, str):
+            include_tracking = include_tracking.strip().lower() not in ('0', 'false', 'no', 'off')
 
         try:
             tenant = XeroTenant.objects.get(tenant_id=tenant_id)
@@ -324,6 +329,7 @@ class ImportPnlByTrackingView(APIView):
                 tenant_id=tenant_id,
                 from_date=from_date,
                 to_date=to_date,
+                include_tracking=include_tracking,
                 user=request.user if request.user.is_authenticated else None,
             )
             api_calls = result.get('stats', {}).get('api_calls', 0)
