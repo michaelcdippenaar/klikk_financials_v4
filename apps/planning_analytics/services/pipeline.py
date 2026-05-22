@@ -34,6 +34,28 @@ def _release_pipeline_lock(tenant_id):
         cursor.execute("SELECT pg_advisory_unlock(hashtext(%s))", [_pipeline_lock_key(tenant_id)])
 
 
+def _tm1_execution_plan(proc, affected_periods):
+    name = proc.get('name') or proc.get('process_name', 'unknown')
+    params = proc.get('parameters', {}) or {}
+    per_period = bool(params.pop('__per_affected_period', False))
+
+    if (
+        per_period
+        and affected_periods
+        and 'pYear' in params
+        and 'pMonth' in params
+    ):
+        executions = []
+        for year, month in affected_periods:
+            period_params = dict(params)
+            period_params['pYear'] = year
+            period_params['pMonth'] = month
+            executions.append((name, period_params, f"{name}:{year}-{int(month):02d}"))
+        return executions
+
+    return [(name, params, name)]
+
+
 def run_pipeline(
     tenant_id,
     load_all=False,
@@ -143,15 +165,14 @@ def run_pipeline(
             tm1_processes = _load_tm1_processes_from_db()
 
         for proc in tm1_processes:
-            name = proc.get('name') or proc.get('process_name', 'unknown')
-            params = proc.get('parameters', {})
-            step = {'step': f'tm1:{name}', 'success': False}
-            t0 = time.time()
-            res = execute_process(name, parameters=params if params else None, user=tm1_user, password=tm1_password)
-            step['success'] = res.get('success', False)
-            step['message'] = res.get('message', '')
-            step['elapsed_s'] = round(time.time() - t0, 1)
-            results.append(step)
+            for name, params, label in _tm1_execution_plan(proc, affected_periods):
+                step = {'step': f'tm1:{label}', 'success': False}
+                t0 = time.time()
+                res = execute_process(name, parameters=params if params else None, user=tm1_user, password=tm1_password)
+                step['success'] = res.get('success', False)
+                step['message'] = res.get('message', '')
+                step['elapsed_s'] = round(time.time() - t0, 1)
+                results.append(step)
 
         return {'steps': results}
     finally:
