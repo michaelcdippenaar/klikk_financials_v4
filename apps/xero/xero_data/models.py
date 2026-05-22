@@ -545,8 +545,9 @@ class XeroJournalsSourceManager(models.Manager):
         # Bulk create and update
         if to_create:
             try:
-                # Batch bulk_create to avoid database locks and timeouts with large datasets
-                batch_size = 5000
+                # Keep batches small enough for the shared data-core VM. Django
+                # bulk_update expands each row/field into a large CASE statement.
+                batch_size = 500
                 total_created = 0
                 for i in range(0, len(to_create), batch_size):
                     batch = to_create[i:i + batch_size]
@@ -558,8 +559,9 @@ class XeroJournalsSourceManager(models.Manager):
         
         if to_update:
             try:
-                # Batch bulk_update to avoid database locks and timeouts with large datasets
-                batch_size = 5000
+                # Keep batches small enough for the shared data-core VM. Django
+                # bulk_update expands each row/field into a large CASE statement.
+                batch_size = 500
                 total_updated = 0
                 for i in range(0, len(to_update), batch_size):
                     batch = to_update[i:i + batch_size]
