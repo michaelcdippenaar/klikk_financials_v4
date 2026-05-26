@@ -1946,7 +1946,10 @@ def bank_transaction_list_view(request):
 
 def _bank_transactions_queryset(request):
     """Build the same filtered queryset as bank_transaction_list_view (for list and export)."""
-    qs = InvestecBankTransaction.objects.select_related('account').all().order_by('-posting_date', '-posted_order', 'id')
+    # Order by transaction_date (the date the operator sees in the UI). posting_date
+    # is unreliable across account types — Investec leaves it blank or sets it to
+    # the statement-run date for credit-card / virtual / sub-accounts.
+    qs = InvestecBankTransaction.objects.select_related('account').all().order_by('-transaction_date', '-posted_order', '-id')
     description = (request.query_params.get('description') or '').strip()
     if description:
         qs = qs.filter(description__icontains=description)
