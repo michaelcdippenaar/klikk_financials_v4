@@ -84,3 +84,6 @@ database_dump.sql
 # Google Cloud credentials
 credentials/
 **/klick-financials01-*.json
+# Claude Code harness — local config + memory
+.claude/
+CLAUDE.md

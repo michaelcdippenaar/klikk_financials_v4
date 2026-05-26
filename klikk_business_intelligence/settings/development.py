@@ -34,11 +34,11 @@ CORS_ALLOW_CREDENTIALS = True
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'klikk_financials_v4',
-        'USER': 'klikk_user',
-        'PASSWORD': 'Number55dip',
-        'HOST': '192.168.1.235',
-        'PORT': '5432',
+        'NAME': os.environ.get('DB_NAME', 'klikk_financials_v4'),
+        'USER': os.environ.get('DB_USER', 'klikk_user'),
+        'PASSWORD': os.environ.get('DB_PASSWORD', '9eab84e6550a7ffad074156848d1129a8e0889cb16e2325d'),
+        'HOST': os.environ.get('DB_HOST', '127.0.0.1'),
+        'PORT': os.environ.get('DB_PORT', '5432'),
         'CONN_MAX_AGE': 600,  # Reuse connections for 10 minutes (connection pooling)
         'OPTIONS': {
             'connect_timeout': 10,
