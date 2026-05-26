@@ -6,6 +6,7 @@ app_name = 'investec'
 urlpatterns = [
     path('upload/', views.excel_upload_view, name='excel_upload'),
     path('transactions/', views.transaction_list_view, name='transaction_list'),
+    path('portfolio/', views.portfolio_list_view, name='portfolio_list'),
     path('portfolio/upload/', views.portfolio_upload_view, name='portfolio_upload'),
     path('mapping/', views.mapping_list_view, name='mapping_list'),
     path('mapping/unmapped-share-names/', views.unmapped_share_names_view, name='unmapped_share_names'),

@@ -964,13 +964,74 @@ def transaction_list_view(request):
     transactions = queryset[offset:offset + limit]
     
     serializer = InvestecJseTransactionSerializer(transactions, many=True)
-    
+
     return Response({
         'count': total_count,
         'limit': limit,
         'offset': offset,
         'results': serializer.data
     })
+
+
+@api_view(['GET'])
+def portfolio_list_view(request):
+    """
+    API endpoint to list Investec JSE portfolio holdings.
+
+    Supports query parameters:
+    - limit:      Number of records to return (default: 100)
+    - offset:     Number of records to skip (default: 0)
+    - year:       Filter by year (integer)
+    - month:      Filter by month (integer)
+    - share_code: Filter by share code (case-insensitive contains)
+
+    Response shape:
+    {
+        "count": <total matching rows>,
+        "limit": <applied limit>,
+        "offset": <applied offset>,
+        "results": [ <InvestecJsePortfolio objects> ]
+    }
+    """
+    queryset = InvestecJsePortfolio.objects.all()
+
+    year = request.query_params.get('year')
+    if year:
+        try:
+            queryset = queryset.filter(year=int(year))
+        except ValueError:
+            pass
+
+    month = request.query_params.get('month')
+    if month:
+        try:
+            queryset = queryset.filter(month=int(month))
+        except ValueError:
+            pass
+
+    share_code = request.query_params.get('share_code')
+    if share_code:
+        queryset = queryset.filter(share_code__icontains=share_code)
+
+    try:
+        limit = int(request.query_params.get('limit', 100))
+        offset = int(request.query_params.get('offset', 0))
+    except ValueError:
+        limit = 100
+        offset = 0
+
+    total_count = queryset.count()
+    portfolios = queryset[offset:offset + limit]
+
+    serializer = InvestecJsePortfolioSerializer(portfolios, many=True)
+
+    return Response({
+        'count': total_count,
+        'limit': limit,
+        'offset': offset,
+        'results': serializer.data,
+    })
+
 
 # ------------------------------------------------
 # Import Portfolio Data
