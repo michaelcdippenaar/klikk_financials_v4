@@ -776,3 +776,96 @@ class XeroJournalExclusion(models.Model):
 
     def __str__(self):
         return f'{self.organisation_id}: {self.date or "*"} {self.journal_type or "*"} {self.journal_number or self.journal_id or "*"}'
+
+
+# ---------------------------------------------------------------------------
+# Aged Reports (by contact) — derived from Xero's AgedPayablesByContact /
+# AgedReceivablesByContact report endpoints.
+# ---------------------------------------------------------------------------
+
+class AgedPayable(models.Model):
+    """
+    Aged payables balance for a single supplier contact on a given report date.
+
+    Buckets match Xero's standard six-column layout:
+      Current | 1 Month | 2 Months | 3 Months | Older | Total
+    """
+    tenant = models.ForeignKey(
+        XeroTenant,
+        on_delete=models.CASCADE,
+        related_name='aged_payables',
+    )
+    contact_id = models.CharField(max_length=100, help_text='Xero ContactID (UUID)')
+    contact_name = models.CharField(max_length=500, blank=True, default='')
+    report_date = models.DateField(help_text='The "as at" date of the report')
+    current = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    one_month = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    two_months = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    three_months = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    older = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    synced_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Aged Payable'
+        verbose_name_plural = 'Aged Payables'
+        ordering = ['tenant', 'report_date', 'contact_name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'contact_id', 'report_date'],
+                name='xero_data_agedpayable_tenant_contact_date_uniq',
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=['tenant', 'report_date'],
+                name='xd_agedpayable_ten_date_idx',
+            )
+        ]
+
+    def __str__(self):
+        return f'{self.tenant_id}: AP {self.contact_name} @ {self.report_date} total={self.total}'
+
+
+class AgedReceivable(models.Model):
+    """
+    Aged receivables balance for a single customer contact on a given report date.
+
+    Buckets match Xero's standard six-column layout:
+      Current | 1 Month | 2 Months | 3 Months | Older | Total
+    """
+    tenant = models.ForeignKey(
+        XeroTenant,
+        on_delete=models.CASCADE,
+        related_name='aged_receivables',
+    )
+    contact_id = models.CharField(max_length=100, help_text='Xero ContactID (UUID)')
+    contact_name = models.CharField(max_length=500, blank=True, default='')
+    report_date = models.DateField(help_text='The "as at" date of the report')
+    current = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    one_month = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    two_months = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    three_months = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    older = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    synced_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Aged Receivable'
+        verbose_name_plural = 'Aged Receivables'
+        ordering = ['tenant', 'report_date', 'contact_name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['tenant', 'contact_id', 'report_date'],
+                name='xero_data_agedreceivable_tenant_contact_date_uniq',
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=['tenant', 'report_date'],
+                name='xd_agedreceivable_ten_date_idx',
+            )
+        ]
+
+    def __str__(self):
+        return f'{self.tenant_id}: AR {self.contact_name} @ {self.report_date} total={self.total}'
