@@ -8,13 +8,15 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
+from rest_framework.pagination import PageNumberPagination
 
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_auth.models import XeroClientCredentials
 from apps.xero.xero_data.services import update_financial_data
-from apps.xero.xero_data.models import XeroJournalsSource, XeroDocument
+from apps.xero.xero_data.models import XeroJournalsSource, XeroDocument, AgedPayable, AgedReceivable
 from apps.xero.xero_data.document_sync import sync_documents_for_tenant
 from apps.xero.xero_sync.api_call_logging import log_xero_api_calls
+from apps.xero.xero_data.aged_reports_service import sync_aged_payables, sync_aged_receivables
 
 logger = logging.getLogger(__name__)
 
@@ -233,3 +235,159 @@ class XeroDocumentsByTransactionView(APIView):
             for d in docs
         ]
         return Response(data)
+
+
+# ---------------------------------------------------------------------------
+# Aged Reports — sync triggers + list views
+# ---------------------------------------------------------------------------
+
+class XeroSyncAgedPayablesView(APIView):
+    """
+    POST /xero/data/aged-payables/sync/
+
+    Trigger a sync of Aged Payables By Contact from Xero into the local DB.
+
+    Payload:  { "tenant_id": "<UUID>" }
+    Response: { "created": N, "updated": N, "skipped": N, "errors": N,
+                "contact_count": N, "completed_at": "<ISO>" }
+    """
+    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+
+    def post(self, request):
+        tenant_id = request.data.get('tenant_id')
+        if not tenant_id:
+            return Response({'error': 'tenant_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            tenant = XeroTenant.objects.get(tenant_id=tenant_id)
+        except XeroTenant.DoesNotExist:
+            return Response({'error': 'Tenant not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            result = sync_aged_payables(tenant)
+            log_xero_api_calls('aged-payables', result.get('contact_count', 0), tenant=tenant)
+            return Response(result, status=status.HTTP_200_OK)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception as exc:
+            logger.exception('Aged payables sync failed for tenant %s', tenant_id)
+            return Response({'error': f'Sync failed: {exc}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class XeroSyncAgedReceivablesView(APIView):
+    """
+    POST /xero/data/aged-receivables/sync/
+
+    Trigger a sync of Aged Receivables By Contact from Xero into the local DB.
+
+    Payload:  { "tenant_id": "<UUID>" }
+    Response: { "created": N, "updated": N, "skipped": N, "errors": N,
+                "contact_count": N, "completed_at": "<ISO>" }
+    """
+    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+
+    def post(self, request):
+        tenant_id = request.data.get('tenant_id')
+        if not tenant_id:
+            return Response({'error': 'tenant_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            tenant = XeroTenant.objects.get(tenant_id=tenant_id)
+        except XeroTenant.DoesNotExist:
+            return Response({'error': 'Tenant not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            result = sync_aged_receivables(tenant)
+            log_xero_api_calls('aged-receivables', result.get('contact_count', 0), tenant=tenant)
+            return Response(result, status=status.HTTP_200_OK)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        except Exception as exc:
+            logger.exception('Aged receivables sync failed for tenant %s', tenant_id)
+            return Response({'error': f'Sync failed: {exc}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class _AgedReportPagination(PageNumberPagination):
+    page_size = 100
+    page_size_query_param = 'page_size'
+    max_page_size = 500
+
+
+class XeroAgedPayablesListView(APIView):
+    """
+    GET /xero/data/aged-payables/?tenant_id=<UUID>&date=<YYYY-MM-DD>
+
+    List AgedPayable rows. date filter is optional (returns all dates if omitted).
+    Response: paginated list of { id, contact_id, contact_name, report_date,
+              current, one_month, two_months, three_months, older, total, synced_at }
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        tenant_id = request.query_params.get('tenant_id')
+        if not tenant_id:
+            return Response({'error': 'tenant_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = AgedPayable.objects.filter(tenant_id=tenant_id).order_by('report_date', 'contact_name')
+        date_filter = request.query_params.get('date')
+        if date_filter:
+            qs = qs.filter(report_date=date_filter)
+
+        paginator = _AgedReportPagination()
+        page = paginator.paginate_queryset(qs, request)
+        data = [
+            {
+                'id': r.id,
+                'contact_id': r.contact_id,
+                'contact_name': r.contact_name,
+                'report_date': r.report_date.isoformat(),
+                'current': str(r.current),
+                'one_month': str(r.one_month),
+                'two_months': str(r.two_months),
+                'three_months': str(r.three_months),
+                'older': str(r.older),
+                'total': str(r.total),
+                'synced_at': r.synced_at.isoformat(),
+            }
+            for r in page
+        ]
+        return paginator.get_paginated_response(data)
+
+
+class XeroAgedReceivablesListView(APIView):
+    """
+    GET /xero/data/aged-receivables/?tenant_id=<UUID>&date=<YYYY-MM-DD>
+
+    List AgedReceivable rows.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        tenant_id = request.query_params.get('tenant_id')
+        if not tenant_id:
+            return Response({'error': 'tenant_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = AgedReceivable.objects.filter(tenant_id=tenant_id).order_by('report_date', 'contact_name')
+        date_filter = request.query_params.get('date')
+        if date_filter:
+            qs = qs.filter(report_date=date_filter)
+
+        paginator = _AgedReportPagination()
+        page = paginator.paginate_queryset(qs, request)
+        data = [
+            {
+                'id': r.id,
+                'contact_id': r.contact_id,
+                'contact_name': r.contact_name,
+                'report_date': r.report_date.isoformat(),
+                'current': str(r.current),
+                'one_month': str(r.one_month),
+                'two_months': str(r.two_months),
+                'three_months': str(r.three_months),
+                'older': str(r.older),
+                'total': str(r.total),
+                'synced_at': r.synced_at.isoformat(),
+            }
+            for r in page
+        ]
+        return paginator.get_paginated_response(data)
