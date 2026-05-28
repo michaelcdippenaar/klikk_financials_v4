@@ -4,9 +4,12 @@ import logging
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
+from django.db.models import Q
+from django.utils.text import slugify
 from django.utils.dateparse import parse_date
 
-from .models import Symbol, DividendCalendar, Dividend
+from .market_events import MAJOR_MARKET_EVENTS
+from .models import Symbol, DividendCalendar, Dividend, NewsItem
 from . import services
 
 log = logging.getLogger(__name__)
@@ -59,6 +62,111 @@ def symbol_history(request, symbol):
         end_date = parse_date(end_date)
     data = services.get_history_from_db(symbol, start_date=start_date, end_date=end_date)
     return Response(data)
+
+
+@api_view(['GET'])
+def symbol_buy_transactions(request, symbol):
+    """Get Investec JSE buy transactions for a symbol. Query params: start_date, end_date, include_sells."""
+    try:
+        s = Symbol.objects.select_related('share_name_mapping').get(symbol=symbol.upper())
+    except Symbol.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    start_date = request.query_params.get('start_date')
+    end_date = request.query_params.get('end_date')
+    include_sells = str(request.query_params.get('include_sells', '')).lower() in {'1', 'true', 'yes', 'y'}
+    start_date = parse_date(start_date) if start_date else None
+    end_date = parse_date(end_date) if end_date else None
+
+    share_names = []
+    share_code = ''
+    if s.share_name_mapping_id:
+        mapping = s.share_name_mapping
+        share_code = mapping.share_code or ''
+        share_names = [
+            value.strip()
+            for value in (mapping.share_name, mapping.share_name2, mapping.share_name3, mapping.share_code)
+            if value and value.strip()
+        ]
+    if not share_names:
+        share_names = [s.symbol.split('.')[0]]
+
+    seen = set()
+    share_names = [
+        name
+        for name in share_names
+        if not (name.upper() in seen or seen.add(name.upper()))
+    ]
+
+    from apps.investec.models import InvestecJsePortfolio, InvestecJseTransaction
+
+    name_filter = Q()
+    for name in share_names:
+        name_filter |= Q(share_name__iexact=name)
+
+    trade_filter = Q(type__iexact='Buy')
+    if include_sells:
+        trade_filter |= Q(type__iexact='Sell') | Q(type__iexact='Sale') | Q(type__iexact='Sold')
+    qs = InvestecJseTransaction.objects.filter(trade_filter).filter(name_filter)
+    if start_date:
+        qs = qs.filter(date__gte=start_date)
+    if end_date:
+        qs = qs.filter(date__lte=end_date)
+    qs = qs.order_by('date', 'id')
+
+    results = []
+    for txn in qs:
+        price = txn.value_per_share
+        if price is None and txn.quantity:
+            try:
+                price = abs(txn.value) / txn.quantity
+            except Exception:
+                price = None
+        results.append({
+            'id': txn.id,
+            'date': txn.date.isoformat() if txn.date else None,
+            'share_name': txn.share_name,
+            'quantity': float(txn.quantity) if txn.quantity is not None else None,
+            'price': float(price) if price is not None else None,
+            'value': float(txn.value) if txn.value is not None else None,
+            'account_number': txn.account_number,
+            'description': txn.description,
+            'type': txn.type,
+            'source': 'transaction',
+        })
+
+    if not results and share_code:
+        first_holding = (
+            InvestecJsePortfolio.objects
+            .filter(share_code__iexact=share_code)
+            .exclude(quantity=0)
+            .order_by('date', 'id')
+            .first()
+        )
+        if first_holding:
+            portfolio_price = first_holding.unit_cost
+            if portfolio_price is not None:
+                # Portfolio imports are stored one scale lower than transaction prices.
+                portfolio_price = portfolio_price * 100
+            results.append({
+                'id': f'portfolio-{first_holding.id}',
+                'date': first_holding.date.isoformat() if first_holding.date else None,
+                'share_name': first_holding.company,
+                'quantity': float(first_holding.quantity) if first_holding.quantity is not None else None,
+                'price': float(portfolio_price) if portfolio_price is not None else None,
+                'value': float(first_holding.total_cost) if first_holding.total_cost is not None else None,
+                'account_number': '',
+                'description': 'Opening holding from Investec portfolio snapshot',
+                'type': 'Buy',
+                'source': 'portfolio',
+            })
+
+    return Response({
+        'symbol': s.symbol,
+        'share_code': share_code,
+        'share_names': share_names,
+        'results': results,
+    })
 
 
 @api_view(['POST'])
@@ -204,6 +312,152 @@ def symbol_news(request, symbol):
         for n in items
     ]
     return Response(data)
+
+
+def _truthy(value, default=True):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {'0', 'false', 'no', 'off'}
+
+
+def _financial_news_doc_content(*, title, symbol, date, publisher, link, summary, event_type):
+    lines = [
+        f'# {title}',
+        '',
+        f'Type: {event_type}',
+        f'Symbol: {symbol}',
+        f'Date: {date or "unknown"}',
+        f'Publisher: {publisher or "unknown"}',
+    ]
+    if link:
+        lines.append(f'Link: {link}')
+    if summary:
+        lines.extend(['', summary])
+    return '\n'.join(lines).strip()
+
+
+@api_view(['POST'])
+def symbol_vectorize_articles(request, symbol):
+    """Create vector-search documents for a symbol's news plus global market events."""
+    try:
+        sym = Symbol.objects.get(symbol=symbol.upper())
+    except Symbol.DoesNotExist:
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+    limit = request.data.get('limit', 30)
+    try:
+        limit = max(1, min(int(limit), 100))
+    except (TypeError, ValueError):
+        limit = 30
+    should_vectorize = _truthy(request.data.get('vectorize'), default=True)
+
+    from apps.ai_agent.models import KnowledgeCorpus, SystemDocument
+    from apps.ai_agent.services.vector_store import vectorize_corpus_documents
+
+    corpus, _ = KnowledgeCorpus.objects.update_or_create(
+        slug='financial-market-intelligence',
+        defaults={
+            'name': 'Financial Market Intelligence',
+            'description': 'Stock-specific news and global market events for financial investment analysis.',
+            'is_active': True,
+        },
+    )
+
+    documents_written = 0
+    stock_news_documents = 0
+    market_event_documents = 0
+
+    news_items = list(NewsItem.objects.filter(symbol=sym).order_by('-published_at', '-id')[:limit])
+    for item in news_items:
+        date_label = item.published_at.date().isoformat() if item.published_at else ''
+        doc_slug = f"fi-news-{slugify(sym.symbol)[:24]}-{item.id}"
+        content = _financial_news_doc_content(
+            title=item.title or 'Untitled',
+            symbol=sym.symbol,
+            date=date_label,
+            publisher=item.publisher,
+            link=item.link,
+            summary=item.summary,
+            event_type='stock news',
+        )
+        SystemDocument.objects.update_or_create(
+            slug=doc_slug[:120],
+            defaults={
+                'corpus': corpus,
+                'title': item.title[:255] or 'Untitled',
+                'content_markdown': content,
+                'metadata': {
+                    'type': 'stock_news',
+                    'symbol': sym.symbol,
+                    'news_item_id': item.id,
+                    'published_at': item.published_at.isoformat() if item.published_at else None,
+                    'publisher': item.publisher,
+                    'link': item.link,
+                },
+                'is_active': True,
+            },
+        )
+        documents_written += 1
+        stock_news_documents += 1
+
+    for event in MAJOR_MARKET_EVENTS:
+        doc_slug = f"fi-market-{slugify(sym.symbol)[:24]}-{event['slug']}"
+        content = _financial_news_doc_content(
+            title=event['title'],
+            symbol=sym.symbol,
+            date=event['date'],
+            publisher=event['publisher'],
+            link=event.get('link', ''),
+            summary=f"{event.get('summary', '')}\n\nScope: {event.get('scope', 'global')}",
+            event_type='major market event',
+        )
+        SystemDocument.objects.update_or_create(
+            slug=doc_slug[:120],
+            defaults={
+                'corpus': corpus,
+                'title': event['title'][:255],
+                'content_markdown': content,
+                'metadata': {
+                    'type': 'market_event',
+                    'symbol': sym.symbol,
+                    'event_slug': event['slug'],
+                    'date': event['date'],
+                    'publisher': event['publisher'],
+                    'link': event.get('link', ''),
+                    'scope': event.get('scope', ''),
+                },
+                'is_active': True,
+            },
+        )
+        documents_written += 1
+        market_event_documents += 1
+
+    result = {
+        'symbol': sym.symbol,
+        'corpus_id': corpus.id,
+        'corpus_slug': corpus.slug,
+        'documents_written': documents_written,
+        'stock_news_documents': stock_news_documents,
+        'market_event_documents': market_event_documents,
+        'vectorized': False,
+    }
+
+    if should_vectorize:
+        try:
+            vec_result = vectorize_corpus_documents(corpus=corpus, force=False)
+            result.update({
+                'vectorized': True,
+                'embedding_model': vec_result.embedding_model,
+                'documents_seen': vec_result.documents_seen,
+                'chunks_written': vec_result.chunks_written,
+                'chunks_deleted': vec_result.chunks_deleted,
+            })
+        except Exception as exc:
+            result['vectorize_error'] = str(exc)
+
+    return Response(result)
 
 
 @api_view(['POST'])

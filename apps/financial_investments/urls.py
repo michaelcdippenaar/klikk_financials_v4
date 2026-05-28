@@ -7,6 +7,7 @@ urlpatterns = [
     path('symbols/', views.symbol_list),
     path('symbols/<str:symbol>/', views.symbol_detail),
     path('symbols/<str:symbol>/history/', views.symbol_history),
+    path('symbols/<str:symbol>/buy-transactions/', views.symbol_buy_transactions),
     path('symbols/<str:symbol>/refresh/', views.symbol_refresh),
     path('symbols/<str:symbol>/refresh-extra/', views.symbol_refresh_extra),
     path('symbols/<str:symbol>/dividends/', views.symbol_dividends),
@@ -19,6 +20,7 @@ urlpatterns = [
     path('symbols/<str:symbol>/analyst-price-target/', views.symbol_analyst_price_target),
     path('symbols/<str:symbol>/ownership/', views.symbol_ownership),
     path('symbols/<str:symbol>/news/', views.symbol_news),
+    path('symbols/<str:symbol>/vectorize-articles/', views.symbol_vectorize_articles),
     path('watchlist-preference/save/', views.watchlist_preference_save),
     path('watchlist-preference/', views.watchlist_preference),
 

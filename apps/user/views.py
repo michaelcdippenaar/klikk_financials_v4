@@ -1,6 +1,8 @@
 """
 User authentication views - Registration and Login with JWT tokens.
 """
+import logging
+
 from rest_framework import status, generics
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -11,9 +13,11 @@ from rest_framework_simplejwt.exceptions import TokenError
 from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
+from django.db import DatabaseError
 from django.http import HttpResponse
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 class RegisterView(generics.CreateAPIView):
@@ -173,6 +177,12 @@ class LoginView(TokenObtainPairView):
             return Response(
                 {"error": "Invalid credentials"},
                 status=status.HTTP_401_UNAUTHORIZED
+            )
+        except DatabaseError:
+            logger.exception("Login failed because the user database is unavailable")
+            return Response(
+                {"error": "Authentication service is unavailable. Check the backend database connection."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
             )
         
         # Check password

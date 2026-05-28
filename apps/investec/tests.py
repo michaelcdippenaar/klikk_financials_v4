@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from .models import InvestecJsePortfolio
+from .models import InvestecBankAccount, InvestecBankTransaction, InvestecJsePortfolio, InvestecJseTransaction
 
 
 def make_portfolio(company='Test Co', share_code='TST', portfolio_date=None):
@@ -48,10 +48,24 @@ class PortfolioListViewTests(TestCase):
         self.assertIn('count', data)
         self.assertIn('limit', data)
         self.assertIn('offset', data)
+        self.assertIn('coverage', data)
         self.assertIn('results', data)
         first = data['results'][0]
         for field in ['id', 'date', 'company', 'share_code', 'quantity', 'price', 'total_value']:
             self.assertIn(field, first)
+
+    def test_response_includes_missing_month_coverage(self):
+        make_portfolio(company='March Company', share_code='MAR', portfolio_date=date(2024, 3, 31))
+        response = self.client.get('/api/investec/portfolio/')
+        data = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data['coverage']['first_month'], '2024-01')
+        self.assertEqual(data['coverage']['last_month'], '2024-03')
+        self.assertEqual(data['coverage']['expected_month_count'], 3)
+        self.assertEqual(data['coverage']['present_month_count'], 2)
+        self.assertEqual(data['coverage']['missing_month_count'], 1)
+        self.assertEqual(data['coverage']['missing_months'][0]['month'], '2024-02')
 
     def test_year_filter(self):
         # Add a row for a different year
@@ -73,3 +87,93 @@ class PortfolioListViewTests(TestCase):
         data = response.json()
         self.assertEqual(data['count'], 1)
         self.assertEqual(data['results'][0]['share_code'], 'CO1')
+
+
+class JseTransactionListViewCoverageTests(TestCase):
+    """Tests for month coverage on GET /api/investec/transactions/"""
+
+    def setUp(self):
+        self.client = APIClient()
+        InvestecJseTransaction.objects.create(
+            date=date(2024, 1, 15),
+            account_number='10011910139',
+            description='Buy test share',
+            share_name='TEST',
+            type='Buy',
+            quantity=Decimal('10.0000'),
+            value=Decimal('-100.00'),
+        )
+        InvestecJseTransaction.objects.create(
+            date=date(2024, 3, 20),
+            account_number='10011910139',
+            description='Dividend test share',
+            share_name='TEST',
+            type='Dividend',
+            quantity=Decimal('0.0000'),
+            value=Decimal('12.00'),
+        )
+
+    def test_response_includes_missing_month_coverage(self):
+        response = self.client.get('/api/investec/transactions/')
+        data = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data['coverage']['first_month'], '2024-01')
+        self.assertEqual(data['coverage']['last_month'], '2024-03')
+        self.assertEqual(data['coverage']['expected_month_count'], 3)
+        self.assertEqual(data['coverage']['present_month_count'], 2)
+        self.assertEqual(data['coverage']['missing_month_count'], 1)
+        self.assertEqual(data['coverage']['missing_months'][0]['label'], 'Feb 2024')
+
+
+class BankTransactionAccountFilterTests(TestCase):
+    """Tests for account filtering on GET /api/investec/bank/transactions/"""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.account_a = InvestecBankAccount.objects.create(
+            account_id='acc-a',
+            account_number='10011910139',
+            account_name='Mr MC Dippenaar',
+        )
+        self.account_b = InvestecBankAccount.objects.create(
+            account_id='acc-b',
+            account_number='10011924075',
+            account_name='Klikk (Pty) Ltd',
+        )
+        self.account_c = InvestecBankAccount.objects.create(
+            account_id='acc-c',
+            account_number='10013017883',
+            account_name='MLD Trust',
+        )
+        for idx, account in enumerate([self.account_a, self.account_b, self.account_c], start=1):
+            InvestecBankTransaction.objects.create(
+                account=account,
+                type=InvestecBankTransaction.TYPE_DEBIT,
+                status=InvestecBankTransaction.STATUS_POSTED,
+                description=f'Test transaction {idx}',
+                transaction_date=date(2026, 5, idx),
+                amount=Decimal('10.00'),
+            )
+
+    def test_single_account_filter_still_works(self):
+        response = self.client.get('/api/investec/bank/transactions/?account=10011910139')
+        data = response.json()
+        self.assertEqual(data['count'], 1)
+        self.assertEqual(data['results'][0]['account_number'], '10011910139')
+
+    def test_comma_separated_account_filter_returns_multiple_accounts(self):
+        response = self.client.get('/api/investec/bank/transactions/?account=10011910139,10011924075')
+        data = response.json()
+        self.assertEqual(data['count'], 2)
+        account_numbers = {row['account_number'] for row in data['results']}
+        self.assertEqual(account_numbers, {'10011910139', '10011924075'})
+
+    def test_repeated_account_filter_returns_multiple_accounts(self):
+        response = self.client.get('/api/investec/bank/transactions/', {
+            'account': ['10011910139', '10011924075'],
+        })
+        data = response.json()
+        self.assertEqual(data['count'], 2)
+        account_numbers = {row['account_number'] for row in data['results']}
+        self.assertEqual(account_numbers, {'10011910139', '10011924075'})

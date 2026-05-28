@@ -21,6 +21,66 @@ from .bank_sync import run_investec_bank_sync
 
 
 
+def _month_key(month_date):
+    return f'{month_date.year:04d}-{month_date.month:02d}'
+
+
+def _month_label(month_key):
+    year, month = [int(part) for part in month_key.split('-')]
+    return datetime(year, month, 1).strftime('%b %Y')
+
+
+def _month_range(start_date, end_date):
+    year = start_date.year
+    month = start_date.month
+    end_key = _month_key(end_date)
+    keys = []
+    while True:
+        key = f'{year:04d}-{month:02d}'
+        keys.append(key)
+        if key == end_key:
+            break
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    return keys
+
+
+def build_month_coverage(queryset, date_field='date'):
+    months = list(queryset.dates(date_field, 'month', order='ASC'))
+    if not months:
+        return {
+            'first_month': None,
+            'first_month_label': None,
+            'last_month': None,
+            'last_month_label': None,
+            'expected_month_count': 0,
+            'present_month_count': 0,
+            'missing_month_count': 0,
+            'missing_months': [],
+        }
+
+    expected_months = _month_range(months[0], months[-1])
+    present_months = {_month_key(month) for month in months}
+    missing_months = [
+        {'month': month, 'label': _month_label(month)}
+        for month in expected_months
+        if month not in present_months
+    ]
+
+    return {
+        'first_month': expected_months[0],
+        'first_month_label': _month_label(expected_months[0]),
+        'last_month': expected_months[-1],
+        'last_month_label': _month_label(expected_months[-1]),
+        'expected_month_count': len(expected_months),
+        'present_month_count': len(present_months),
+        'missing_month_count': len(missing_months),
+        'missing_months': missing_months,
+    }
+
+
 # ------------------------------------------------
 # Import Transaction Data
 # ------------------------------------------------
@@ -960,6 +1020,7 @@ def transaction_list_view(request):
     limit = int(request.query_params.get('limit', 100))
     offset = int(request.query_params.get('offset', 0))
     
+    coverage = build_month_coverage(queryset)
     total_count = queryset.count()
     transactions = queryset[offset:offset + limit]
     
@@ -969,6 +1030,7 @@ def transaction_list_view(request):
         'count': total_count,
         'limit': limit,
         'offset': offset,
+        'coverage': coverage,
         'results': serializer.data
     })
 
@@ -1020,6 +1082,7 @@ def portfolio_list_view(request):
         limit = 100
         offset = 0
 
+    coverage = build_month_coverage(queryset)
     total_count = queryset.count()
     portfolios = queryset[offset:offset + limit]
 
@@ -1029,6 +1092,7 @@ def portfolio_list_view(request):
         'count': total_count,
         'limit': limit,
         'offset': offset,
+        'coverage': coverage,
         'results': serializer.data,
     })
 
@@ -1910,13 +1974,17 @@ def bank_transaction_list_view(request):
     - description: case-insensitive substring match
     - date_from: YYYY-MM-DD
     - date_to: YYYY-MM-DD
-    - account: account_id or account_number (filter by account)
+    - account: account_id or account_number. Use comma-separated values for multiple accounts.
     - limit, offset: pagination (default limit=100, offset=0)
     """
     queryset = _bank_transactions_queryset(request)
 
     total_count = queryset.count()
-    limit = min(int(request.query_params.get('limit', 100)), 500)
+    try:
+        requested_limit = int(request.query_params.get('limit', 100))
+    except (TypeError, ValueError):
+        requested_limit = 100
+    limit = min(max(requested_limit, 1), 1000)
     offset = int(request.query_params.get('offset', 0))
     page = queryset[offset:offset + limit]
 
@@ -1963,16 +2031,23 @@ def _bank_transactions_queryset(request):
     if date_from:
         d = parse_date(date_from)
         if d:
-            qs = qs.filter(posting_date__gte=d)
+            qs = qs.filter(transaction_date__gte=d)
     date_to = request.query_params.get('date_to')
     if date_to:
         d = parse_date(date_to)
         if d:
-            qs = qs.filter(posting_date__lte=d)
-    account_param = (request.query_params.get('account') or '').strip()
-    if account_param:
+            qs = qs.filter(transaction_date__lte=d)
+    account_params = []
+    for raw_value in request.query_params.getlist('account'):
+        account_params.extend(
+            value.strip()
+            for value in str(raw_value).split(',')
+            if value.strip()
+        )
+    account_params = list(dict.fromkeys(account_params))
+    if account_params:
         qs = qs.filter(
-            Q(account__account_id=account_param) | Q(account__account_number=account_param)
+            Q(account__account_id__in=account_params) | Q(account__account_number__in=account_params)
         )
     return qs
 

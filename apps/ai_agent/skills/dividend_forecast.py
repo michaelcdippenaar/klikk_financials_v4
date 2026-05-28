@@ -329,35 +329,60 @@ def check_declared_dividends(
     except ImportError:
         return {"error": "yfinance is not installed. Run: pip install yfinance"}
 
-    # Get share-to-symbol mappings from PostgreSQL
+    mapped_symbols_sql = """
+        SELECT DISTINCT ON (s.id)
+            s.id,
+            s.symbol,
+            COALESCE(linked_m.share_code, code_m.share_code) AS share_code,
+            s.share_name_mapping_id AS linked_mapping_id,
+            COALESCE(linked_m.id, code_m.id) AS mapping_id
+        FROM financial_investments_symbol s
+        LEFT JOIN investec_investecjsesharenamemapping linked_m
+            ON s.share_name_mapping_id = linked_m.id
+        LEFT JOIN investec_investecjsesharenamemapping code_m
+            ON UPPER(split_part(s.symbol, '.', 1)) = UPPER(code_m.share_code)
+        WHERE COALESCE(linked_m.share_code, code_m.share_code) IS NOT NULL
+        ORDER BY s.id, (linked_m.id IS NULL), code_m.id
+    """
+
+    # Get share-to-symbol mappings from PostgreSQL. Some imported symbols can
+    # be unlinked even though the matching Investec mapping exists, so fall
+    # back to ticker prefix matching (ABG.JO -> ABG) and repair the link.
     try:
         with psycopg2.connect(**_FINANCIALS_DSN) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 if listed_share:
-                    cur.execute("""
-                        SELECT s.id, s.symbol, m.share_code
-                        FROM financial_investments_symbol s
-                        LEFT JOIN investec_investecjsesharenamemapping m
-                            ON s.share_name_mapping_id = m.id
-                        WHERE UPPER(m.share_code) = UPPER(%s)
-                           OR UPPER(s.symbol) LIKE UPPER(%s)
+                    cur.execute(f"""
+                        SELECT *
+                        FROM ({mapped_symbols_sql}) mapped
+                        WHERE UPPER(mapped.share_code) = UPPER(%s)
+                           OR UPPER(mapped.symbol) = UPPER(%s)
+                           OR UPPER(mapped.symbol) LIKE UPPER(%s)
+                        ORDER BY mapped.symbol
                         LIMIT 10
-                    """, (listed_share, f"%{listed_share}%"))
+                    """, (listed_share, listed_share, f"%{listed_share}%"))
                 else:
                     # Get all symbols that have a share_code mapping (i.e. held shares)
-                    cur.execute("""
-                        SELECT s.id, s.symbol, m.share_code
-                        FROM financial_investments_symbol s
-                        JOIN investec_investecjsesharenamemapping m
-                            ON s.share_name_mapping_id = m.id
-                        WHERE m.share_code IS NOT NULL
-                    """)
+                    cur.execute(mapped_symbols_sql)
                 symbols = [dict(row) for row in cur.fetchall()]
+
+                inferred_links = [
+                    (row["mapping_id"], row["id"])
+                    for row in symbols
+                    if row.get("mapping_id") and not row.get("linked_mapping_id")
+                ]
+                if inferred_links:
+                    psycopg2.extras.execute_batch(cur, """
+                        UPDATE financial_investments_symbol
+                        SET share_name_mapping_id = %s, updated_at = NOW()
+                        WHERE id = %s AND share_name_mapping_id IS NULL
+                    """, inferred_links)
+                    conn.commit()
     except Exception as e:
         return {"error": f"PostgreSQL query failed: {e}"}
 
     if not symbols:
-        return {"message": "No symbols found to check.", "results": []}
+        return {"message": "No mapped symbols found to check.", "results": [], "checked": 0}
 
     def _fetch_ticker_info(symbol_str: str) -> dict:
         try:
@@ -430,26 +455,34 @@ def check_declared_dividends(
         # Non-.JO symbols are foreign; .JO symbols are domestic (regular by default)
         # Special dividends must be manually classified — yfinance doesn't distinguish
         dividend_category = "foreign" if not symbol_str.upper().endswith(".JO") else "regular"
+        currency = info.get("currency", "")
+        if symbol_str.upper().endswith(".JO") and currency.upper() == "ZAC":
+            # yfinance's lastDividendValue is already Rand-denominated for
+            # JSE shares even when the ticker metadata reports ZAc.
+            currency = "ZAR"
 
         saved = False
+        save_error = None
         if ex_date:
             try:
                 with psycopg2.connect(**_FINANCIALS_DSN) as conn:
                     with conn.cursor() as cur:
                         cur.execute("""
                             SELECT id, tm1_adjustment_written FROM financial_investments_dividendcalendar
-                            WHERE symbol_id = %s AND ex_dividend_date = %s
-                        """, (symbol_id, ex_date))
+                            WHERE symbol_id = %s AND ex_dividend_date = %s AND dividend_category = %s
+                        """, (symbol_id, ex_date, dividend_category))
                         existing = cur.fetchone()
 
                         if not existing:
                             cur.execute("""
                                 INSERT INTO financial_investments_dividendcalendar
                                 (symbol_id, ex_dividend_date, payment_date, amount, currency,
-                                 status, dividend_category, source, tm1_adjustment_written, created_at, updated_at)
-                                VALUES (%s, %s, %s, %s, %s, 'declared', %s, 'yfinance', false, NOW(), NOW())
+                                 status, dividend_category, source, tm1_adjustment_written,
+                                 tm1_target_month, tm1_verified, created_at, updated_at)
+                                VALUES (%s, %s, %s, %s, %s, 'declared', %s, 'yfinance',
+                                        false, '', false, NOW(), NOW())
                             """, (symbol_id, ex_date, pay_date, amount,
-                                  info.get("currency", ""), dividend_category))
+                                  currency, dividend_category))
                             conn.commit()
                             saved = True
 
@@ -458,24 +491,28 @@ def check_declared_dividends(
                                 (symbol_id, date, amount, currency, dividend_type)
                                 VALUES (%s, %s, %s, %s, 'dividend_declared')
                                 ON CONFLICT DO NOTHING
-                            """, (symbol_id, ex_date, amount, info.get("currency", "")))
+                            """, (symbol_id, ex_date, amount, currency))
                             conn.commit()
                         else:
                             saved = False
             except Exception as e:
+                save_error = str(e)
                 log.warning("Failed to save dividend calendar for %s: %s", symbol_str, e)
 
-        results.append({
+        result_row = {
             "symbol": symbol_str,
             "share_code": share_code,
             "ex_dividend_date": _serialize(ex_date),
             "payment_date": _serialize(pay_date),
             "amount": float(amount) if amount else None,
             "dividend_rate": float(dividend_rate) if dividend_rate else None,
-            "currency": info.get("currency", ""),
+            "currency": currency,
             "dividend_category": dividend_category,
             "new_record_saved": saved,
-        })
+        }
+        if save_error:
+            result_row["save_error"] = save_error
+        results.append(result_row)
 
     return {"results": results, "checked": len(symbols)}
 

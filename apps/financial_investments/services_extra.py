@@ -9,6 +9,7 @@ import pandas as pd
 
 from django.db import transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from .models import (
     Symbol,
@@ -368,13 +369,32 @@ def fetch_news(symbol_str, count=10):
         NewsItem.objects.filter(symbol=sym).delete()
         for item in items:
             if isinstance(item, dict):
-                title = (str(item.get('title') or item.get('link') or '') or '')[:500]
-                link = (str(item.get('link') or item.get('url') or '') or '')[:1000]
-                pub = item.get('publishTime') or item.get('published_at') or item.get('providerPublishTime')
-                publisher = (str(item.get('publisher') or item.get('source') or '') or '')[:200]
-                raw_summary = item.get('summary') or item.get('content') or ''
+                content = item.get('content') if isinstance(item.get('content'), dict) else item
+                canonical_url = content.get('canonicalUrl') if isinstance(content.get('canonicalUrl'), dict) else {}
+                click_url = content.get('clickThroughUrl') if isinstance(content.get('clickThroughUrl'), dict) else {}
+                provider = content.get('provider') if isinstance(content.get('provider'), dict) else {}
+                title = (str(content.get('title') or item.get('title') or canonical_url.get('url') or item.get('link') or '') or '')[:500]
+                link = (str(
+                    canonical_url.get('url')
+                    or click_url.get('url')
+                    or content.get('link')
+                    or content.get('url')
+                    or item.get('link')
+                    or item.get('url')
+                    or ''
+                ) or '')[:1000]
+                pub = (
+                    content.get('pubDate')
+                    or content.get('displayTime')
+                    or content.get('publishTime')
+                    or item.get('publishTime')
+                    or item.get('published_at')
+                    or item.get('providerPublishTime')
+                )
+                publisher = (str(provider.get('displayName') or content.get('publisher') or item.get('publisher') or item.get('source') or '') or '')[:200]
+                raw_summary = content.get('summary') or content.get('description') or item.get('summary') or ''
                 summary = (str(raw_summary) if raw_summary is not None else '')[:10000]
-                data = _json_serializable({k: v for k, v in item.items() if k not in ('title', 'link', 'url', 'publishTime', 'publisher', 'source', 'summary', 'content')})
+                data = _json_serializable(item)
             else:
                 title = (str(getattr(item, 'title', None) or getattr(item, 'link', None) or '') or '')[:500]
                 link = (str(getattr(item, 'link', None) or getattr(item, 'url', None) or '') or '')[:1000]
@@ -385,7 +405,11 @@ def fetch_news(symbol_str, count=10):
                 data = {}
             if pub is not None:
                 try:
-                    if hasattr(pub, 'timestamp'):
+                    if isinstance(pub, str):
+                        published_at = parse_datetime(pub)
+                        if published_at and timezone.is_naive(published_at):
+                            published_at = timezone.make_aware(published_at)
+                    elif hasattr(pub, 'timestamp'):
                         published_at = timezone.make_aware(datetime.fromtimestamp(pub))
                     else:
                         published_at = timezone.make_aware(datetime.fromtimestamp(int(pub)))
