@@ -2056,6 +2056,7 @@ def bank_cost_report_view(request):
 
     accounts = {}
     line_totals = {}
+    months = {}
     grand = {
         'transaction_count': 0,
         'debit_total': Decimal('0.00'),
@@ -2078,6 +2079,9 @@ def bank_cost_report_view(request):
         line_name = _bank_cost_line_item(txn.description)
         amount = txn.amount or Decimal('0.00')
         is_credit = txn.type == InvestecBankTransaction.TYPE_CREDIT
+        txn_date = txn.transaction_date or txn.posting_date or txn.value_date or txn.action_date
+        month_key = txn_date.strftime('%Y-%m') if txn_date else 'undated'
+        month_label = txn_date.strftime('%b %Y') if txn_date else 'Undated'
 
         account_row['transaction_count'] += 1
         grand['transaction_count'] += 1
@@ -2126,6 +2130,47 @@ def bank_cost_report_view(request):
         else:
             total_line['debit_total'] += amount
 
+        month = months.setdefault(month_key, {
+            'month': month_key,
+            'label': month_label,
+            'transaction_count': 0,
+            'debit_total': Decimal('0.00'),
+            'credit_total': Decimal('0.00'),
+            'line_items': {},
+            'accounts': {},
+        })
+        month['transaction_count'] += 1
+        if is_credit:
+            month['credit_total'] += amount
+        else:
+            month['debit_total'] += amount
+
+        month_line = month['line_items'].setdefault(line_name, {
+            'line_item': line_name,
+            'transaction_count': 0,
+            'debit_total': Decimal('0.00'),
+            'credit_total': Decimal('0.00'),
+        })
+        month_line['transaction_count'] += 1
+        if is_credit:
+            month_line['credit_total'] += amount
+        else:
+            month_line['debit_total'] += amount
+
+        month_account = month['accounts'].setdefault(account_key, {
+            'account_id': txn.account_id,
+            'account_number': txn.account.account_number,
+            'account_name': txn.account.account_name or txn.account.reference_name or '',
+            'transaction_count': 0,
+            'debit_total': Decimal('0.00'),
+            'credit_total': Decimal('0.00'),
+        })
+        month_account['transaction_count'] += 1
+        if is_credit:
+            month_account['credit_total'] += amount
+        else:
+            month_account['debit_total'] += amount
+
     def serialize_amount_row(row):
         net = row['debit_total'] - row['credit_total']
         return {
@@ -2158,6 +2203,19 @@ def bank_cost_report_view(request):
     line_item_results = [serialize_amount_row(row) for row in line_totals.values()]
     line_item_results.sort(key=lambda item: Decimal(item['net_cost']), reverse=True)
 
+    month_results = []
+    for row in months.values():
+        month_line_items = [serialize_amount_row(line) for line in row['line_items'].values()]
+        month_line_items.sort(key=lambda item: Decimal(item['net_cost']), reverse=True)
+        month_accounts = [serialize_amount_row(account) for account in row['accounts'].values()]
+        month_accounts.sort(key=lambda item: Decimal(item['net_cost']), reverse=True)
+        month_results.append({
+            **serialize_amount_row(row),
+            'line_items': month_line_items,
+            'accounts': month_accounts,
+        })
+    month_results.sort(key=lambda item: item['month'], reverse=True)
+
     return Response({
         'filters': {
             'date_from': request.query_params.get('date_from') or None,
@@ -2173,6 +2231,7 @@ def bank_cost_report_view(request):
             'net_cost': _money(grand['debit_total'] - grand['credit_total']),
         },
         'line_items': line_item_results,
+        'months': month_results,
         'accounts': account_results,
     })
 

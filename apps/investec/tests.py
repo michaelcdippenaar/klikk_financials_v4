@@ -246,6 +246,9 @@ class BankCostReportTests(TestCase):
         self.assertEqual(line_items['Monthly service charges']['net_cost'], '450.00')
         self.assertEqual(line_items['Credit interest']['net_cost'], '-50.00')
         self.assertEqual(line_items['Cross-border card fees']['net_cost'], '12.34')
+        self.assertEqual(data['months'][0]['month'], '2026-05')
+        self.assertEqual(data['months'][0]['net_cost'], '412.34')
+        self.assertEqual(data['months'][0]['line_items'][0]['line_item'], 'Monthly service charges')
 
     def test_cost_report_respects_account_and_date_filters(self):
         response = self.client.get('/api/investec/bank/reports/costs/', {
