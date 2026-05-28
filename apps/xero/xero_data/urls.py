@@ -4,6 +4,7 @@ from apps.xero.xero_data import views
 app_name = 'xero_data'
 
 urlpatterns = [
+    path('journals/search/', views.XeroJournalSearchView.as_view(), name='journal_search'),
     path('update/journals/', views.XeroUpdateDataView.as_view(), name='update_data'),
     # Support both with and without trailing slash
     path('process/journals/', views.XeroProcessJournalsView.as_view(), name='process_journals'),
@@ -19,4 +20,3 @@ urlpatterns = [
     path('aged-payables/', views.XeroAgedPayablesListView.as_view(), name='aged_payables_list'),
     path('aged-receivables/', views.XeroAgedReceivablesListView.as_view(), name='aged_receivables_list'),
 ]
-

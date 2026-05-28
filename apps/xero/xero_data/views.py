@@ -2,8 +2,11 @@
 Xero data views - transaction and journal data update endpoints.
 """
 import logging
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
+from django.db.models import Q
+from django.utils.dateparse import parse_date
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -13,12 +16,148 @@ from rest_framework.pagination import PageNumberPagination
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_auth.models import XeroClientCredentials
 from apps.xero.xero_data.services import update_financial_data
-from apps.xero.xero_data.models import XeroJournalsSource, XeroDocument, AgedPayable, AgedReceivable
+from apps.xero.xero_data.models import XeroJournals, XeroJournalsSource, XeroDocument, AgedPayable, AgedReceivable
 from apps.xero.xero_data.document_sync import sync_documents_for_tenant
 from apps.xero.xero_sync.api_call_logging import log_xero_api_calls
 from apps.xero.xero_data.aged_reports_service import sync_aged_payables, sync_aged_receivables
 
 logger = logging.getLogger(__name__)
+
+
+class XeroJournalSearchView(APIView):
+    """
+    Read-only journal search for agent and reporting workflows.
+
+    Query params:
+    - q: text search across description, reference, contact, account code/name, tenant
+    - amount: exact amount; matches debit/credit and signed amount
+    - date_from/date_to: YYYY-MM-DD
+    - tenant: tenant id or tenant name fragment
+    - account: account code or account name fragment
+    - contact: contact name fragment
+    - reference: reference fragment
+    - description: description fragment
+    - limit/offset: pagination, max limit 1000
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        qs = XeroJournals.objects.select_related(
+            'organisation',
+            'account',
+            'contact',
+            'tracking1',
+            'tracking2',
+            'transaction_source',
+        ).order_by('-date', '-journal_number', '-id')
+
+        q = (request.query_params.get('q') or '').strip()
+        if q:
+            qs = qs.filter(
+                Q(description__icontains=q)
+                | Q(reference__icontains=q)
+                | Q(contact__name__icontains=q)
+                | Q(account__code__icontains=q)
+                | Q(account__name__icontains=q)
+                | Q(organisation__tenant_name__icontains=q)
+            )
+
+        tenant = (request.query_params.get('tenant') or '').strip()
+        if tenant:
+            qs = qs.filter(
+                Q(organisation__tenant_id__icontains=tenant)
+                | Q(organisation__tenant_name__icontains=tenant)
+            )
+
+        account = (request.query_params.get('account') or '').strip()
+        if account:
+            qs = qs.filter(Q(account__code__icontains=account) | Q(account__name__icontains=account))
+
+        contact = (request.query_params.get('contact') or '').strip()
+        if contact:
+            qs = qs.filter(contact__name__icontains=contact)
+
+        reference = (request.query_params.get('reference') or '').strip()
+        if reference:
+            qs = qs.filter(reference__icontains=reference)
+
+        description = (request.query_params.get('description') or '').strip()
+        if description:
+            qs = qs.filter(description__icontains=description)
+
+        amount_param = (request.query_params.get('amount') or '').strip()
+        if amount_param:
+            try:
+                amount = Decimal(amount_param)
+                qs = qs.filter(
+                    Q(amount=amount)
+                    | Q(amount=-amount)
+                    | Q(debit=amount)
+                    | Q(credit=amount)
+                    | Q(credit=-amount)
+                )
+            except (InvalidOperation, ValueError):
+                return Response({'error': 'amount must be a decimal number'}, status=status.HTTP_400_BAD_REQUEST)
+
+        date_from = parse_date(request.query_params.get('date_from') or '')
+        if date_from:
+            qs = qs.filter(date__date__gte=date_from)
+
+        date_to = parse_date(request.query_params.get('date_to') or '')
+        if date_to:
+            qs = qs.filter(date__date__lte=date_to)
+
+        try:
+            requested_limit = int(request.query_params.get('limit', 100))
+        except (TypeError, ValueError):
+            requested_limit = 100
+        limit = min(max(requested_limit, 1), 1000)
+
+        try:
+            offset = int(request.query_params.get('offset', 0))
+        except (TypeError, ValueError):
+            offset = 0
+        offset = max(offset, 0)
+
+        total_count = qs.count()
+        page = qs[offset:offset + limit]
+
+        results = []
+        for journal in page:
+            account_obj = journal.account
+            contact_obj = journal.contact
+            tracking1 = journal.tracking1
+            tracking2 = journal.tracking2
+            transaction_source = journal.transaction_source
+            results.append({
+                'id': journal.id,
+                'tenant_id': journal.organisation.tenant_id if journal.organisation else '',
+                'tenant_name': journal.organisation.tenant_name if journal.organisation else '',
+                'date': journal.date.date().isoformat() if journal.date else None,
+                'journal_number': journal.journal_number,
+                'journal_type': journal.journal_type,
+                'account_code': account_obj.code if account_obj else '',
+                'account_name': account_obj.name if account_obj else '',
+                'account_type': account_obj.type if account_obj else '',
+                'amount': str(journal.amount),
+                'debit': str(journal.debit),
+                'credit': str(journal.credit),
+                'tax_amount': str(journal.tax_amount),
+                'contact_name': contact_obj.name if contact_obj else '',
+                'description': journal.description or '',
+                'reference': journal.reference or '',
+                'tracking1': tracking1.option if tracking1 else '',
+                'tracking2': tracking2.option if tracking2 else '',
+                'transaction_source_type': transaction_source.transaction_source if transaction_source else '',
+                'transaction_source_id': transaction_source.transactions_id if transaction_source else '',
+            })
+
+        return Response({
+            'count': total_count,
+            'limit': limit,
+            'offset': offset,
+            'results': results,
+        })
 
 
 class XeroUpdateDataView(APIView):
