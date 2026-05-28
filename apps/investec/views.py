@@ -2012,6 +2012,171 @@ def bank_transaction_list_view(request):
     })
 
 
+def _bank_cost_line_item(description):
+    desc = (description or '').strip().upper()
+    if desc.startswith('CROSS-BORDER CARD FEE'):
+        return 'Cross-border card fees'
+    if 'MONTHLY SERVICE CHARGE' in desc:
+        return 'Monthly service charges'
+    if 'ELECTRONIC DEBIT FEE' in desc or 'ELEC DEBIT FEE' in desc:
+        return 'Electronic debit fees'
+    if 'DEBIT INTEREST' in desc or 'CR INTEREST ADJUSTMENT' in desc:
+        return 'Debit interest and adjustments'
+    if 'CREDIT INTEREST' in desc or desc == 'INTEREST ADJUSTMENT':
+        return 'Credit interest'
+    if 'ATM CASH' in desc:
+        return 'ATM cash withdrawal fees'
+    if 'CARD REPLAC' in desc:
+        return 'Card replacement fees'
+    if 'PAY SHAP FEE' in desc:
+        return 'PayShap fees'
+    if 'SEND CASH FEE' in desc:
+        return 'Send Cash fees'
+    if 'PAYMENT RECALL FEE' in desc:
+        return 'Payment recall fees'
+    if 'OTC CASH WITHDRAWAL FEE' in desc:
+        return 'OTC cash withdrawal fees'
+    if 'REVERSAL' in desc:
+        return 'Fee reversals'
+    return 'Other fees and interest'
+
+
+def _money(value):
+    return str(value.quantize(Decimal('0.01')))
+
+
+@api_view(['GET'])
+def bank_cost_report_view(request):
+    """
+    Summarise Investec bank costs by account and fee line item.
+    Query params: date_from, date_to, account (account_id or account_number, comma-separated allowed).
+    Uses Investec's transaction_type=FeesAndInterest classification to avoid matching ordinary vendors.
+    """
+    queryset = _bank_transactions_queryset(request).filter(transaction_type='FeesAndInterest')
+
+    accounts = {}
+    line_totals = {}
+    grand = {
+        'transaction_count': 0,
+        'debit_total': Decimal('0.00'),
+        'credit_total': Decimal('0.00'),
+    }
+
+    for txn in queryset:
+        account_key = str(txn.account_id)
+        account_row = accounts.setdefault(account_key, {
+            'account_id': txn.account_id,
+            'account_number': txn.account.account_number,
+            'account_name': txn.account.account_name or txn.account.reference_name or '',
+            'product_name': txn.account.product_name or '',
+            'transaction_count': 0,
+            'debit_total': Decimal('0.00'),
+            'credit_total': Decimal('0.00'),
+            'line_items': {},
+        })
+
+        line_name = _bank_cost_line_item(txn.description)
+        amount = txn.amount or Decimal('0.00')
+        is_credit = txn.type == InvestecBankTransaction.TYPE_CREDIT
+
+        account_row['transaction_count'] += 1
+        grand['transaction_count'] += 1
+        if is_credit:
+            account_row['credit_total'] += amount
+            grand['credit_total'] += amount
+        else:
+            account_row['debit_total'] += amount
+            grand['debit_total'] += amount
+
+        line = account_row['line_items'].setdefault(line_name, {
+            'line_item': line_name,
+            'transaction_count': 0,
+            'debit_total': Decimal('0.00'),
+            'credit_total': Decimal('0.00'),
+            'descriptions': {},
+        })
+        line['transaction_count'] += 1
+        if is_credit:
+            line['credit_total'] += amount
+        else:
+            line['debit_total'] += amount
+
+        description = txn.description or ''
+        desc_row = line['descriptions'].setdefault(description, {
+            'description': description,
+            'transaction_count': 0,
+            'debit_total': Decimal('0.00'),
+            'credit_total': Decimal('0.00'),
+        })
+        desc_row['transaction_count'] += 1
+        if is_credit:
+            desc_row['credit_total'] += amount
+        else:
+            desc_row['debit_total'] += amount
+
+        total_line = line_totals.setdefault(line_name, {
+            'line_item': line_name,
+            'transaction_count': 0,
+            'debit_total': Decimal('0.00'),
+            'credit_total': Decimal('0.00'),
+        })
+        total_line['transaction_count'] += 1
+        if is_credit:
+            total_line['credit_total'] += amount
+        else:
+            total_line['debit_total'] += amount
+
+    def serialize_amount_row(row):
+        net = row['debit_total'] - row['credit_total']
+        return {
+            **{k: v for k, v in row.items() if k not in ('debit_total', 'credit_total', 'descriptions', 'line_items')},
+            'debit_total': _money(row['debit_total']),
+            'credit_total': _money(row['credit_total']),
+            'net_cost': _money(net),
+        }
+
+    account_results = []
+    for row in accounts.values():
+        line_items = []
+        for line in row['line_items'].values():
+            descriptions = [
+                serialize_amount_row(desc)
+                for desc in line['descriptions'].values()
+            ]
+            descriptions.sort(key=lambda item: Decimal(item['net_cost']), reverse=True)
+            line_items.append({
+                **serialize_amount_row(line),
+                'descriptions': descriptions,
+            })
+        line_items.sort(key=lambda item: Decimal(item['net_cost']), reverse=True)
+        account_results.append({
+            **serialize_amount_row(row),
+            'line_items': line_items,
+        })
+    account_results.sort(key=lambda item: Decimal(item['net_cost']), reverse=True)
+
+    line_item_results = [serialize_amount_row(row) for row in line_totals.values()]
+    line_item_results.sort(key=lambda item: Decimal(item['net_cost']), reverse=True)
+
+    return Response({
+        'filters': {
+            'date_from': request.query_params.get('date_from') or None,
+            'date_to': request.query_params.get('date_to') or None,
+            'account': request.query_params.getlist('account') or None,
+            'basis': 'InvestecBankTransaction.transaction_type = FeesAndInterest',
+        },
+        'summary': {
+            'account_count': len(account_results),
+            'transaction_count': grand['transaction_count'],
+            'debit_total': _money(grand['debit_total']),
+            'credit_total': _money(grand['credit_total']),
+            'net_cost': _money(grand['debit_total'] - grand['credit_total']),
+        },
+        'line_items': line_item_results,
+        'accounts': account_results,
+    })
+
+
 def _bank_transactions_queryset(request):
     """Build the same filtered queryset as bank_transaction_list_view (for list and export)."""
     # Order by transaction_date (the date the operator sees in the UI). posting_date

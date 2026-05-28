@@ -177,3 +177,84 @@ class BankTransactionAccountFilterTests(TestCase):
         self.assertEqual(data['count'], 2)
         account_numbers = {row['account_number'] for row in data['results']}
         self.assertEqual(account_numbers, {'10011910139', '10011924075'})
+
+
+class BankCostReportTests(TestCase):
+    """Tests for bank cost report aggregation."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.account_a = InvestecBankAccount.objects.create(
+            account_id='cost-a',
+            account_number='10011910139',
+            account_name='Mr MC Dippenaar',
+        )
+        self.account_b = InvestecBankAccount.objects.create(
+            account_id='cost-b',
+            account_number='10011924075',
+            account_name='Klikk (Pty) Ltd',
+        )
+        InvestecBankTransaction.objects.create(
+            account=self.account_a,
+            type=InvestecBankTransaction.TYPE_DEBIT,
+            transaction_type='FeesAndInterest',
+            status=InvestecBankTransaction.STATUS_POSTED,
+            description='MONTHLY SERVICE CHARGE',
+            transaction_date=date(2026, 5, 1),
+            amount=Decimal('450.00'),
+        )
+        InvestecBankTransaction.objects.create(
+            account=self.account_a,
+            type=InvestecBankTransaction.TYPE_CREDIT,
+            transaction_type='FeesAndInterest',
+            status=InvestecBankTransaction.STATUS_POSTED,
+            description='CREDIT INTEREST',
+            transaction_date=date(2026, 5, 2),
+            amount=Decimal('50.00'),
+        )
+        InvestecBankTransaction.objects.create(
+            account=self.account_b,
+            type=InvestecBankTransaction.TYPE_DEBIT,
+            transaction_type='FeesAndInterest',
+            status=InvestecBankTransaction.STATUS_POSTED,
+            description='CROSS-BORDER CARD FEE - XERO',
+            transaction_date=date(2026, 5, 3),
+            amount=Decimal('12.34'),
+        )
+        InvestecBankTransaction.objects.create(
+            account=self.account_b,
+            type=InvestecBankTransaction.TYPE_DEBIT,
+            transaction_type='CardPurchases',
+            status=InvestecBankTransaction.STATUS_POSTED,
+            description='A vendor with SERVICE in the name',
+            transaction_date=date(2026, 5, 4),
+            amount=Decimal('999.00'),
+        )
+
+    def test_cost_report_groups_fees_by_account_and_line_item(self):
+        response = self.client.get('/api/investec/bank/reports/costs/')
+        data = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data['summary']['transaction_count'], 3)
+        self.assertEqual(data['summary']['debit_total'], '462.34')
+        self.assertEqual(data['summary']['credit_total'], '50.00')
+        self.assertEqual(data['summary']['net_cost'], '412.34')
+        self.assertEqual(data['summary']['account_count'], 2)
+
+        line_items = {row['line_item']: row for row in data['line_items']}
+        self.assertEqual(line_items['Monthly service charges']['net_cost'], '450.00')
+        self.assertEqual(line_items['Credit interest']['net_cost'], '-50.00')
+        self.assertEqual(line_items['Cross-border card fees']['net_cost'], '12.34')
+
+    def test_cost_report_respects_account_and_date_filters(self):
+        response = self.client.get('/api/investec/bank/reports/costs/', {
+            'account': '10011910139',
+            'date_from': '2026-05-02',
+        })
+        data = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(data['summary']['transaction_count'], 1)
+        self.assertEqual(data['summary']['net_cost'], '-50.00')
+        self.assertEqual(data['accounts'][0]['account_number'], '10011910139')
