@@ -129,3 +129,49 @@ class KPITarget(models.Model):
             if a >= t * (1 - band):
                 return "amber"
             return "red"
+
+
+class CostBehaviour(models.Model):
+    """Cost-behaviour classification (fixed/variable/semi-variable/non-controllable)
+    per expense account, for the Cost & Sustainability Cockpit.
+
+    Per the CFO's design: the *default* is seeded once from the management-accounting
+    classification (source='cfo_seed'); MC can re-tag any account from the cockpit
+    (source='user_override') without a redeploy. Resolved value = this row (override
+    wins over seed because an override write flips source + stamps updated_by).
+
+    NOTE (deferred half of the CFO data-model rec): the same tag should ALSO be seeded
+    as a TM1 `cost_behaviour` account attribute when forecast-flexing-by-behaviour is
+    built (so TM1 planning rules can reflood a flexed budget by behaviour). For now the
+    Postgres row is the single authoritative classification consumed by the report.
+    """
+    FIXED = "fixed"
+    VARIABLE = "variable"
+    SEMI = "semi_variable"
+    NON_CONTROLLABLE = "non_controllable"
+    BEHAVIOUR_CHOICES = [
+        (FIXED, "Fixed"), (VARIABLE, "Variable"),
+        (SEMI, "Semi-variable"), (NON_CONTROLLABLE, "Non-controllable"),
+    ]
+    SEED = "cfo_seed"
+    OVERRIDE = "user_override"
+
+    account_key = models.CharField(max_length=120, unique=True)  # e.g. "kl_HH--EM01/1"
+    behaviour = models.CharField(max_length=20, choices=BEHAVIOUR_CHOICES)
+    driver = models.CharField(max_length=200, blank=True, default="")
+    source = models.CharField(max_length=20, default=SEED)
+    note = models.TextField(blank=True, default="")
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="cost_behaviours",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Cost Behaviour"
+        verbose_name_plural = "Cost Behaviours"
+        ordering = ["account_key"]
+
+    def __str__(self):
+        return f"{self.account_key} -> {self.behaviour} ({self.source})"

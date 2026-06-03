@@ -473,3 +473,52 @@ class KPITargetView(APIView):
             return Response(status=status.HTTP_204_NO_CONTENT)
         return Response({"error": "provide id, or metric_key+year(+entity)"},
                         status=status.HTTP_400_BAD_REQUEST)
+
+
+from apps.planning_analytics.models import CostBehaviour  # noqa: E402
+
+
+def _serialize_behaviour(cb):
+    return {
+        "id": cb.id, "account_key": cb.account_key, "behaviour": cb.behaviour,
+        "driver": cb.driver, "source": cb.source, "note": cb.note,
+        "updated_at": cb.updated_at.isoformat(),
+    }
+
+
+class CostBehaviourView(APIView):
+    """Cost-behaviour classification (CFO seed + user overrides).
+
+    GET  [?behaviour=fixed]                 -> list classifications
+    POST {account_key, behaviour[, driver, note]} -> re-tag (user_override); upsert by account_key
+    """
+    permission_classes = [IsAuthenticated]
+    _VALID = {c[0] for c in CostBehaviour.BEHAVIOUR_CHOICES}
+
+    def get(self, request):
+        qs = CostBehaviour.objects.all()
+        beh = request.query_params.get("behaviour")
+        if beh:
+            qs = qs.filter(behaviour=beh)
+        return Response({"classifications": [_serialize_behaviour(c) for c in qs]})
+
+    def post(self, request):
+        d = request.data
+        key = (d.get("account_key") or "").strip()
+        beh = (d.get("behaviour") or "").strip()
+        if not key or beh not in self._VALID:
+            return Response(
+                {"error": "account_key and a valid behaviour (%s) are required" % ", ".join(sorted(self._VALID))},
+                status=status.HTTP_400_BAD_REQUEST)
+        defaults = {
+            "behaviour": beh,
+            "source": CostBehaviour.OVERRIDE,
+            "updated_by": request.user if request.user.is_authenticated else None,
+        }
+        if "driver" in d:
+            defaults["driver"] = d.get("driver") or ""
+        if "note" in d:
+            defaults["note"] = d.get("note") or ""
+        obj, created = CostBehaviour.objects.update_or_create(account_key=key, defaults=defaults)
+        return Response(_serialize_behaviour(obj),
+                        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)

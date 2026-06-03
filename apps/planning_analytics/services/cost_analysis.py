@@ -30,6 +30,26 @@ def _leaves(dim, parent, group, group_of, order, seen):
             order.append(nm)
 
 
+def _account_key(name):
+    """Extract the stable account code (e.g. 'kl_HH--EM01/1') from the friendly
+    TM1 name attribute 'kl_HH--EM01/1_Employee Expenses...'. Code = first two
+    underscore tokens ('kl' + body); the rest is the description."""
+    if not name:
+        return name
+    parts = str(name).split("_")
+    if len(parts) >= 2 and parts[0] == "kl":
+        return "kl_" + parts[1]
+    return name
+
+
+def _behaviour_map():
+    """{account_key: (behaviour, driver)} from the CostBehaviour table (CFO seed +
+    any user overrides). Resolved value is whatever the row currently holds."""
+    from apps.planning_analytics.models import CostBehaviour
+    return {cb.account_key: (cb.behaviour, cb.driver)
+            for cb in CostBehaviour.objects.all()}
+
+
 def _pull(entity, year, version, accounts):
     res = mq.run_pivot(
         cube=CUBE,
@@ -64,6 +84,7 @@ def cost_cut_report(entity, year, groups=None):
 
     cur = _pull(entity, year, "actual", accounts)
     pri = _pull(entity, prior, "actual", accounts)
+    behaviour = _behaviour_map()
 
     rows = []
     total_cur = 0.0
@@ -73,10 +94,15 @@ def cost_cut_report(entity, year, groups=None):
         if abs(a) < 0.005 and abs(p) < 0.005:
             continue
         total_cur += a
+        nm = names.get(acct, acct)
+        beh, drv = behaviour.get(_account_key(nm), ("unclassified", ""))
         rows.append({
             "account_id": acct,
-            "name": names.get(acct, acct),
+            "account_key": _account_key(nm),
+            "name": nm,
             "group": group_of.get(acct, ""),
+            "behaviour": beh,
+            "driver": drv,
             "recurring_actual": round(a, 2),
             "recurring_prior": round(p, 2),
             "yoy_delta": round(a - p, 2),
@@ -98,6 +124,16 @@ def cost_cut_report(entity, year, groups=None):
     for r in rows:
         rag_counts[r.get("rag", "none")] += 1
 
+    # Cost-behaviour split (CFO classification) — fixed/variable/semi/non-controllable.
+    behaviour_totals = {"fixed": 0.0, "variable": 0.0, "semi_variable": 0.0,
+                        "non_controllable": 0.0, "unclassified": 0.0}
+    for r in rows:
+        behaviour_totals[r.get("behaviour", "unclassified")] = round(
+            behaviour_totals.get(r.get("behaviour", "unclassified"), 0.0) + r["recurring_actual"], 2)
+    fixed_v = behaviour_totals["fixed"]
+    var_v = behaviour_totals["variable"]
+    addressable = round(fixed_v + var_v + behaviour_totals["semi_variable"], 2)
+
     return {
         "entity": entity, "year": year, "prior_year": prior,
         "basis": "Recurring cash expense (excludes non-cash & one-offs)",
@@ -105,6 +141,9 @@ def cost_cut_report(entity, year, groups=None):
         "total_target": total_target,
         "total_rag": total_rag,
         "rag_counts": rag_counts,
+        "behaviour_totals": behaviour_totals,
+        "addressable_base": addressable,
+        "fixed_variable_ratio": round(fixed_v / var_v, 2) if abs(var_v) > 0.005 else None,
         "accounts": by_size,
         "top_opportunities": by_growth[:10],
         "source": "TM1 gl_src_trial_balance (live)",

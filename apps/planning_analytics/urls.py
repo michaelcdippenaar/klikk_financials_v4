@@ -14,6 +14,7 @@ from apps.planning_analytics.views import (
     TrackingMappingAddView,
     CostCutReportView,
     KPITargetView,
+    CostBehaviourView,
 )
 
 urlpatterns = [
@@ -28,6 +29,7 @@ urlpatterns = [
     path('tm1/query/', TM1PivotQueryView.as_view(), name='pa-tm1-query'),
     path('cost-cut/', CostCutReportView.as_view(), name='pa-cost-cut'),
     path('kpi-targets/', KPITargetView.as_view(), name='pa-kpi-targets'),
+    path('cost-behaviour/', CostBehaviourView.as_view(), name='pa-cost-behaviour'),
     path('tm1/credentials/', UserTM1CredentialsView.as_view(), name='planning-analytics-tm1-credentials'),
     path('tm1/tracking-mapping/', TrackingMappingView.as_view(), name='planning-analytics-tracking-mapping'),
     path('tm1/tracking-mapping/add/', TrackingMappingAddView.as_view(), name='planning-analytics-tracking-mapping-add'),
