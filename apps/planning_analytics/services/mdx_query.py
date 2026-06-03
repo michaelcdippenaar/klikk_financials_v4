@@ -1,7 +1,9 @@
 """
 TM1 slice-and-dice query service — generates MDX, executes against the TM1 REST
-API (/api/v1/ExecuteMDX), and returns a structured cellset for the console pivot.
+API (/api/v1/ExecuteMDX), returns a structured cellset for the console pivot.
 PAW is never exposed; the browser talks to Django, Django talks to TM1.
+PA 2.1 / v11, /api/v1. Raw requests (codebase convention); cellsets are deleted
+after read (TM1 reflex: no cellset leak).
 """
 import requests
 import urllib3
@@ -39,12 +41,35 @@ def cube_dimensions(cube):
     return [d["Name"] for d in r.json().get("Dimensions", [])]
 
 
-def dimension_elements(dim, top=5000):
+def dimension_elements(dim, top=20000):
     base, s = _session()
     r = s.get(base + "/Dimensions('%s')/Hierarchies('%s')/Elements?$select=Name,Type&$top=%d" % (dim, dim, top),
               timeout=60, verify=False)
     r.raise_for_status()
     return [{"name": e["Name"], "type": e.get("Type")} for e in r.json().get("value", [])]
+
+
+def dimension_children(dim, parent):
+    """Direct children (components) of a consolidated element."""
+    base, s = _session()
+    r = s.get(base + "/Dimensions('%s')/Hierarchies('%s')/Elements('%s')?$expand=Components($select=Name,Type)"
+              % (dim, dim, str(parent).replace("'", "''")), timeout=60, verify=False)
+    r.raise_for_status()
+    return [{"name": c["Name"], "type": c.get("Type")} for c in r.json().get("Components", [])]
+
+
+def element_names(dim, attribute="name", top=50000):
+    """Map element name -> friendly attribute value (e.g. account UUID -> name).
+    Falls back to the element's own name if the attribute is blank."""
+    base, s = _session()
+    r = s.get(base + "/Dimensions('%s')/Hierarchies('%s')/Elements?$expand=Attributes&$top=%d"
+              % (dim, dim, top), timeout=90, verify=False)
+    r.raise_for_status()
+    out = {}
+    for e in r.json().get("value", []):
+        attrs = e.get("Attributes") or {}
+        out[e["Name"]] = attrs.get(attribute) or attrs.get("Caption") or e["Name"]
+    return out
 
 
 def _member(dim, el):
@@ -53,7 +78,6 @@ def _member(dim, el):
 
 
 def _axis_set(spec):
-    """spec: list of {dimension, members:[...]}. Crossjoin across dims."""
     parts = []
     for d in spec or []:
         dim = d["dimension"]
@@ -89,6 +113,13 @@ def execute_mdx(mdx):
     if r.status_code >= 400:
         raise ValueError("TM1 MDX error %d: %s" % (r.status_code, r.text[:400]))
     data = r.json()
+    # Reflex #3: delete the transient cellset so it does not leak on the server.
+    cs_id = data.get("ID")
+    if cs_id:
+        try:
+            s.delete(base + "/Cellsets('%s')" % cs_id, timeout=30, verify=False)
+        except Exception:
+            pass
     axes = data.get("Axes", [])
     col_tuples = [[m["Name"] for m in t["Members"]] for t in axes[0]["Tuples"]] if len(axes) > 0 else []
     row_tuples = [[m["Name"] for m in t["Members"]] for t in axes[1]["Tuples"]] if len(axes) > 1 else []
