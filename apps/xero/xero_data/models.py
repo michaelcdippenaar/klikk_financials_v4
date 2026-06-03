@@ -1016,3 +1016,141 @@ class XeroQuoteLineItem(models.Model):
 
     def __str__(self):
         return f'Line {self.position}: {self.description[:60]} ({self.line_amount})'
+
+
+# ============================================================================
+# Xero Invoices (parallel to XeroTransactionSource — JSON path UNCHANGED)
+# ----------------------------------------------------------------------------
+# These tables denormalise Xero invoice headers + line items for fast querying
+# and MCP exposure. The existing XeroTransactionSource.collection JSON store
+# remains the source of truth for the trial-balance / journal sync chain.
+# Trial balance computes from XeroJournals (xero_cube/services.py) — these
+# new tables do not feed into that path.
+# ============================================================================
+
+
+class XeroInvoiceStatus(models.TextChoices):
+    DRAFT = 'DRAFT', 'Draft'
+    SUBMITTED = 'SUBMITTED', 'Submitted'
+    AUTHORISED = 'AUTHORISED', 'Authorised'
+    PAID = 'PAID', 'Paid'
+    VOIDED = 'VOIDED', 'Voided'
+    DELETED = 'DELETED', 'Deleted'
+
+
+class XeroInvoiceType(models.TextChoices):
+    ACCREC = 'ACCREC', 'Accounts Receivable (Sales Invoice)'
+    ACCPAY = 'ACCPAY', 'Accounts Payable (Bill)'
+
+
+class XeroInvoice(models.Model):
+    """Xero invoice header — sales (ACCREC) or bill (ACCPAY)."""
+    organisation = models.ForeignKey(
+        XeroTenant, on_delete=models.CASCADE, related_name='xero_invoices',
+    )
+    invoice_id = models.CharField(max_length=64, help_text='Xero InvoiceID (UUID)')
+    invoice_number = models.CharField(max_length=100, blank=True, default='', db_index=True)
+    reference = models.CharField(max_length=200, blank=True, default='')
+    type = models.CharField(max_length=10, choices=XeroInvoiceType.choices, db_index=True)
+    status = models.CharField(max_length=20, choices=XeroInvoiceStatus.choices,
+                              default=XeroInvoiceStatus.DRAFT, db_index=True)
+    contact = models.ForeignKey(
+        XeroContacts, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='xero_invoices',
+    )
+    xero_contact_id = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    contact_name = models.CharField(max_length=500, blank=True, default='')
+    date = models.DateField(null=True, blank=True, db_index=True)
+    due_date = models.DateField(null=True, blank=True, db_index=True)
+    fully_paid_on_date = models.DateField(null=True, blank=True)
+    expected_payment_date = models.DateField(null=True, blank=True)
+    planned_payment_date = models.DateField(null=True, blank=True)
+    currency_code = models.CharField(max_length=3, blank=True, default='')
+    currency_rate = models.DecimalField(max_digits=18, decimal_places=6, default=1)
+    sub_total = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    total_tax = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    total = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    total_discount = models.DecimalField(max_digits=18, decimal_places=4, null=True, blank=True)
+    amount_due = models.DecimalField(max_digits=18, decimal_places=4, default=0, db_index=True,
+                                     help_text='Outstanding balance — drives aged-AR/AP queries')
+    amount_paid = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    amount_credited = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    line_amount_types = models.CharField(max_length=20, blank=True, default='',
+                                         help_text='Exclusive | Inclusive | NoTax')
+    branding_theme_id = models.CharField(max_length=64, blank=True, default='')
+    url = models.TextField(blank=True, default='', help_text='Xero deep-link URL')
+    sent_to_contact = models.BooleanField(default=False)
+    is_discounted = models.BooleanField(default=False)
+    has_attachments = models.BooleanField(default=False)
+    has_errors = models.BooleanField(default=False)
+    updated_date_utc = models.DateTimeField(null=True, blank=True, db_index=True)
+    collection = models.JSONField(null=True, blank=True,
+                                  help_text='Raw Xero response — includes Payments[], CreditNotes[], '
+                                            'Prepayments[], Overpayments[] arrays not yet denormalised.')
+    synced_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Xero Invoice'
+        verbose_name_plural = 'Xero Invoices'
+        ordering = ['-date', '-updated_date_utc']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['organisation', 'invoice_id'],
+                name='xero_data_invoice_org_invoiceid_uniq',
+            )
+        ]
+        indexes = [
+            models.Index(fields=['organisation', 'type', 'status', 'date'],
+                         name='xd_inv_org_type_stat_date_idx'),
+            models.Index(fields=['organisation', 'type', 'status', 'amount_due'],
+                         name='xd_inv_org_type_stat_due_idx'),
+            models.Index(fields=['organisation', 'xero_contact_id'],
+                         name='xd_inv_org_xcontact_idx'),
+            models.Index(fields=['organisation', 'updated_date_utc'],
+                         name='xd_inv_org_updated_idx'),
+            models.Index(fields=['organisation', 'due_date'],
+                         name='xd_inv_org_duedate_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.invoice_number or self.invoice_id} ({self.type}/{self.status}) {self.total}'
+
+
+class XeroInvoiceLineItem(models.Model):
+    """One line on a Xero invoice."""
+    invoice = models.ForeignKey(
+        XeroInvoice, on_delete=models.CASCADE, related_name='line_items',
+    )
+    line_item_id = models.CharField(max_length=64, blank=True, default='')
+    description = models.TextField(blank=True, default='')
+    quantity = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    unit_amount = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    item_code = models.CharField(max_length=100, blank=True, default='')
+    account_code = models.CharField(max_length=20, blank=True, default='', db_index=True)
+    account = models.ForeignKey(
+        XeroAccount, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    tax_type = models.CharField(max_length=50, blank=True, default='')
+    tax_amount = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    line_amount = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    discount_rate = models.DecimalField(max_digits=9, decimal_places=4, null=True, blank=True)
+    discount_amount = models.DecimalField(max_digits=18, decimal_places=4, null=True, blank=True)
+    tracking1 = models.ForeignKey(
+        XeroTracking, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    tracking2 = models.ForeignKey(
+        XeroTracking, on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    position = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        verbose_name = 'Xero Invoice Line Item'
+        verbose_name_plural = 'Xero Invoice Line Items'
+        ordering = ['invoice', 'position']
+        indexes = [
+            models.Index(fields=['invoice', 'position'], name='xd_inv_li_ipos_idx'),
+            models.Index(fields=['account_code'], name='xd_inv_li_acctcode_idx'),
+        ]
+
+    def __str__(self):
+        return f'Line {self.position}: {self.description[:60]} ({self.line_amount})'
