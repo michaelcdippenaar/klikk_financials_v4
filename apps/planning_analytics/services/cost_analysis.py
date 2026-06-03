@@ -52,23 +52,73 @@ def _behaviour_map():
             for cb in CostBehaviour.objects.all()}
 
 
-def _pull(entity, year, version, accounts):
+def _pull(entity, year, version, accounts, months=None):
+    """Recurring-cash by account. months=None -> full year (All_Month). A list of
+    month members (e.g. ['Jan','Feb',...]) -> sum just those months (YTD), so an
+    in-progress year compares like-for-like against the same prior-year months."""
+    if not months and months is not None:
+        # explicit empty list (e.g. future year): no closed months
+        return {a: 0.0 for a in accounts}
+    if months is None:
+        res = mq.run_pivot(
+            cube=CUBE,
+            rows=[{"dimension": "account", "members": accounts}],
+            cols=[{"dimension": MEAS_DIM, "members": [RECURRING]}],
+            filters={
+                "year": str(year), "month": "All_Month", "version": version, "entity": entity,
+                "contact": "All_Contact", "tracking_1": "All_Tracking_1", "tracking_2": "All_Tracking_2",
+            },
+            suppress=False,
+        )
+        out = {}
+        for row in res["rows"]:
+            acct = row["members"][-1]
+            v = row["cells"][0]["value"] if row["cells"] else None
+            out[acct] = float(v) if isinstance(v, (int, float)) else 0.0
+        return out
+    # YTD: account x month grid, measure pinned in WHERE; sum the month cells.
     res = mq.run_pivot(
         cube=CUBE,
         rows=[{"dimension": "account", "members": accounts}],
-        cols=[{"dimension": MEAS_DIM, "members": [RECURRING]}],
+        cols=[{"dimension": "month", "members": months}],
         filters={
-            "year": str(year), "month": "All_Month", "version": version, "entity": entity,
+            "year": str(year), "version": version, "entity": entity,
             "contact": "All_Contact", "tracking_1": "All_Tracking_1", "tracking_2": "All_Tracking_2",
+            MEAS_DIM: RECURRING,
         },
         suppress=False,
     )
     out = {}
     for row in res["rows"]:
         acct = row["members"][-1]
-        v = row["cells"][0]["value"] if row["cells"] else None
-        out[acct] = float(v) if isinstance(v, (int, float)) else 0.0
+        s = 0.0
+        for c in row["cells"]:
+            v = c.get("value")
+            if isinstance(v, (int, float)):
+                s += float(v)
+        out[acct] = s
     return out
+
+
+# Calendar month order (the cube is calendar-keyed: year=2026 carries Jan..Jun).
+_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _period(year):
+    """(months, year_in_progress, months_elapsed, label) for the requested year.
+    Past year -> full 12 (None => All_Month). Current year -> CLOSED calendar
+    months only (before the in-progress current month)."""
+    import datetime
+    today = datetime.date.today()
+    y = int(year)
+    if y < today.year:
+        return None, False, 12, "Full year"
+    if y > today.year:
+        return [], True, 0, "Not started"
+    n = max(0, today.month - 1)  # closed months this calendar year
+    closed = _MONTHS[:n]
+    label = "YTD Jan–%s (%d mo)" % (_MONTHS[n - 1], n) if n else "YTD (0 closed mo)"
+    return closed, True, n, label
 
 
 def cost_cut_report(entity, year, groups=None):
@@ -84,8 +134,12 @@ def cost_cut_report(entity, year, groups=None):
 
     names = mq.element_names("account", accounts)  # {uuid: friendly name}
 
-    cur = _pull(entity, year, "actual", accounts)
-    pri = _pull(entity, prior, "actual", accounts)
+    # Like-for-like period: a complete past year is full-vs-full; an in-progress
+    # year is YTD (closed months) vs the SAME closed months of the prior year —
+    # never partial-vs-full (which produced the bogus -60.7%).
+    period_months, year_in_progress, months_elapsed, period_label = _period(year)
+    cur = _pull(entity, year, "actual", accounts, months=period_months)
+    pri = _pull(entity, prior, "actual", accounts, months=period_months)
     behaviour = _behaviour_map()
 
     rows = []
@@ -155,9 +209,29 @@ def cost_cut_report(entity, year, groups=None):
         tier_totals[t] = round(tier_totals.get(t, 0.0) + r["recurring_actual"], 2)
     below_the_line = sorted(below_rows, key=lambda r: abs(r["recurring_actual"]), reverse=True)
 
+    # Seasonal run-rate (estimate) for an in-progress year: scale the YTD addressable
+    # cost by how the PRIOR year's full year related to its same-period YTD — respects
+    # seasonality instead of a naive x12/N. One extra total-level pull on the prior full year.
+    annualised_estimate = None
+    if year_in_progress and 0 < months_elapsed < 12:
+        prior_full = _pull(entity, prior, "actual", accounts, months=None)
+        prior_full_addr = round(sum(
+            v for acct, v in prior_full.items()
+            if behaviour.get(_account_key(names.get(acct, acct)), {}).get("is_addressable", True)), 2)
+        prior_ytd_addr = round(sum(r["recurring_prior"] for r in addressable_rows), 2)
+        if abs(prior_ytd_addr) > 0.005:
+            annualised_estimate = round(addressable_operating_cost * (prior_full_addr / prior_ytd_addr), 2)
+
+    comparison_basis = ("YTD vs prior-year YTD (same %d months)" % months_elapsed
+                        if year_in_progress else "Full year vs prior year")
     return {
         "entity": entity, "year": year, "prior_year": prior,
         "basis": "Recurring cash expense (excludes non-cash & one-offs)",
+        "year_in_progress": year_in_progress,
+        "months_elapsed": months_elapsed,
+        "period_label": period_label,
+        "comparison_basis": comparison_basis,
+        "annualised_estimate": annualised_estimate,
         "total_recurring_cost": round(total_cur, 2),
         "total_target": total_target,
         "total_rag": total_rag,
