@@ -530,3 +530,187 @@ class XeroAgedReceivablesListView(APIView):
             for r in page
         ]
         return paginator.get_paginated_response(data)
+
+
+# ============================================================================
+# Xero Quotes — sync + list + detail
+# ============================================================================
+
+from apps.xero.xero_data.models import XeroQuote, XeroQuoteLineItem  # noqa: E402
+from apps.xero.xero_data.quotes_service import sync_xero_quotes  # noqa: E402
+
+
+class XeroSyncQuotesView(APIView):
+    """
+    POST /xero/data/quotes/sync/
+
+    Payload: { "tenant_id": "<UUID>", "modified_since": "YYYY-MM-DD"?, "full": bool? }
+    Response: { stats dict from sync_xero_quotes }
+    """
+    permission_classes = [AllowAny]  # TODO: IsAuthenticated for production
+
+    def post(self, request):
+        tenant_id = request.data.get('tenant_id')
+        if not tenant_id:
+            return Response({'error': 'tenant_id is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            tenant = XeroTenant.objects.get(tenant_id=tenant_id)
+        except XeroTenant.DoesNotExist:
+            return Response({'error': 'Tenant not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+
+        modified_since = None
+        ms = request.data.get('modified_since')
+        if ms:
+            from datetime import datetime as _dt
+            try:
+                modified_since = _dt.strptime(ms, '%Y-%m-%d')
+            except ValueError:
+                return Response({'error': 'modified_since must be YYYY-MM-DD'},
+                                status=status.HTTP_400_BAD_REQUEST)
+
+        full = bool(request.data.get('full', False))
+
+        try:
+            result = sync_xero_quotes(tenant, modified_since=modified_since, full=full)
+            log_xero_api_calls('quotes', result.get('api_calls', 0), tenant=tenant)
+            return Response(result, status=status.HTTP_200_OK)
+        except Exception as exc:
+            logger.exception('Quotes sync failed for tenant %s', tenant_id)
+            return Response({'error': f'Sync failed: {exc}'},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+def _serialize_quote(q: XeroQuote, include_lines=False):
+    payload = {
+        'id': q.id,
+        'tenant_id': q.organisation_id,
+        'quote_id': q.quote_id,
+        'quote_number': q.quote_number,
+        'reference': q.reference,
+        'contact': {
+            'contact_id': q.xero_contact_id,
+            'name': q.contact_name,
+        } if q.xero_contact_id or q.contact_name else None,
+        'status': q.status,
+        'date': q.date.isoformat() if q.date else None,
+        'expiry_date': q.expiry_date.isoformat() if q.expiry_date else None,
+        'currency_code': q.currency_code,
+        'currency_rate': str(q.currency_rate),
+        'sub_total': str(q.sub_total),
+        'total_tax': str(q.total_tax),
+        'total': str(q.total),
+        'total_discount': str(q.total_discount) if q.total_discount is not None else None,
+        'title': q.title,
+        'summary': q.summary,
+        'terms': q.terms,
+        'line_amount_types': q.line_amount_types,
+        'branding_theme_id': q.branding_theme_id,
+        'updated_date_utc': q.updated_date_utc.isoformat() if q.updated_date_utc else None,
+        'synced_at': q.synced_at.isoformat(),
+    }
+    if include_lines:
+        payload['line_items'] = [{
+            'id': li.id,
+            'line_item_id': li.line_item_id,
+            'description': li.description,
+            'quantity': str(li.quantity),
+            'unit_amount': str(li.unit_amount),
+            'item_code': li.item_code,
+            'account_code': li.account_code,
+            'tax_type': li.tax_type,
+            'tax_amount': str(li.tax_amount),
+            'line_amount': str(li.line_amount),
+            'discount_rate': str(li.discount_rate) if li.discount_rate is not None else None,
+            'discount_amount': str(li.discount_amount) if li.discount_amount is not None else None,
+            'tracking1': li.tracking1.option_name if li.tracking1_id else None,
+            'tracking2': li.tracking2.option_name if li.tracking2_id else None,
+            'position': li.position,
+        } for li in q.line_items.all().order_by('position')]
+    return payload
+
+
+class XeroQuoteListView(APIView):
+    """
+    GET /xero/data/quotes/?tenant_id=&status=&contact_id=&date_from=&date_to=&q=&limit=&offset=
+
+    Returns: { count, results: [...] }
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        tenant_id = request.query_params.get('tenant_id')
+        if not tenant_id:
+            return Response({'error': 'tenant_id is required'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        qs = XeroQuote.objects.filter(organisation_id=tenant_id)
+
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            qs = qs.filter(status=status_filter.upper())
+
+        contact_id = request.query_params.get('contact_id')
+        if contact_id:
+            qs = qs.filter(xero_contact_id=contact_id)
+
+        date_from = request.query_params.get('date_from')
+        if date_from:
+            d = parse_date(date_from)
+            if d:
+                qs = qs.filter(date__gte=d)
+        date_to = request.query_params.get('date_to')
+        if date_to:
+            d = parse_date(date_to)
+            if d:
+                qs = qs.filter(date__lte=d)
+
+        q_term = request.query_params.get('q')
+        if q_term:
+            qs = qs.filter(
+                Q(quote_number__icontains=q_term) |
+                Q(reference__icontains=q_term) |
+                Q(title__icontains=q_term) |
+                Q(contact_name__icontains=q_term)
+            )
+
+        total = qs.count()
+        try:
+            limit = min(int(request.query_params.get('limit', 100)), 1000)
+        except ValueError:
+            limit = 100
+        try:
+            offset = max(int(request.query_params.get('offset', 0)), 0)
+        except ValueError:
+            offset = 0
+
+        rows = qs.order_by('-date', '-updated_date_utc')[offset:offset + limit]
+        return Response({
+            'count': total,
+            'limit': limit,
+            'offset': offset,
+            'results': [_serialize_quote(q, include_lines=False) for q in rows],
+        }, status=status.HTTP_200_OK)
+
+
+class XeroQuoteDetailView(APIView):
+    """
+    GET /xero/data/quotes/<quote_id>/
+
+    quote_id matches the Xero QuoteID (UUID).
+    Returns: full quote + line_items[].
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request, quote_id):
+        tenant_id = request.query_params.get('tenant_id')
+        qs = XeroQuote.objects.filter(quote_id=quote_id)
+        if tenant_id:
+            qs = qs.filter(organisation_id=tenant_id)
+        quote = qs.first()
+        if not quote:
+            return Response({'error': 'Quote not found'},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response(_serialize_quote(quote, include_lines=True),
+                        status=status.HTTP_200_OK)

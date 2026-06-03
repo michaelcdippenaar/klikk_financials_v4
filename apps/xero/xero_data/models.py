@@ -869,3 +869,150 @@ class AgedReceivable(models.Model):
 
     def __str__(self):
         return f'{self.tenant_id}: AR {self.contact_name} @ {self.report_date} total={self.total}'
+
+
+# ============================================================================
+# Xero Quotes (sales-pipeline visibility)
+# ----------------------------------------------------------------------------
+# Mirrors the Xero "Quotes" resource. One quote header + N line items.
+# Line items are stored as a related model (not JSONField) so callers can
+# aggregate by account / tracking — Claude needs to answer questions like
+# "largest open quote by tracking category".
+# ============================================================================
+
+
+class XeroQuoteStatus(models.TextChoices):
+    DRAFT = 'DRAFT', 'Draft'
+    SENT = 'SENT', 'Sent'
+    DECLINED = 'DECLINED', 'Declined'
+    ACCEPTED = 'ACCEPTED', 'Accepted'
+    INVOICED = 'INVOICED', 'Invoiced'
+    DELETED = 'DELETED', 'Deleted'
+
+
+class XeroQuote(models.Model):
+    """
+    Xero quote header. Line items in XeroQuoteLineItem (FK back-ref `line_items`).
+    """
+    organisation = models.ForeignKey(
+        XeroTenant,
+        on_delete=models.CASCADE,
+        related_name='xero_quotes',
+    )
+    quote_id = models.CharField(max_length=64, help_text='Xero QuoteID (UUID)')
+    quote_number = models.CharField(max_length=100, blank=True, default='')
+    reference = models.CharField(max_length=200, blank=True, default='')
+    contact = models.ForeignKey(
+        XeroContacts,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='xero_quotes',
+    )
+    xero_contact_id = models.CharField(max_length=64, blank=True, default='',
+                                  help_text='Denormalised contact UUID for fast lookup even if XeroContacts row is missing')
+    contact_name = models.CharField(max_length=500, blank=True, default='')
+    status = models.CharField(max_length=20, choices=XeroQuoteStatus.choices,
+                              default=XeroQuoteStatus.DRAFT, db_index=True)
+    date = models.DateField(null=True, blank=True, db_index=True,
+                            help_text='Quote date')
+    expiry_date = models.DateField(null=True, blank=True)
+    currency_code = models.CharField(max_length=3, blank=True, default='')
+    currency_rate = models.DecimalField(max_digits=18, decimal_places=6, default=1)
+    sub_total = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    total_tax = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    total = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    total_discount = models.DecimalField(max_digits=18, decimal_places=4, null=True, blank=True)
+    title = models.CharField(max_length=200, blank=True, default='')
+    summary = models.TextField(blank=True, default='')
+    terms = models.TextField(blank=True, default='')
+    line_amount_types = models.CharField(max_length=20, blank=True, default='',
+                                         help_text='Exclusive | Inclusive | NoTax')
+    branding_theme_id = models.CharField(max_length=64, blank=True, default='')
+    updated_date_utc = models.DateTimeField(null=True, blank=True, db_index=True,
+                                            help_text='Xero UpdatedDateUTC — drives incremental sync')
+    collection = models.JSONField(null=True, blank=True,
+                                  help_text='Raw Xero response — forward-compat for fields we did not denormalise')
+    synced_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Xero Quote'
+        verbose_name_plural = 'Xero Quotes'
+        ordering = ['-date', '-updated_date_utc']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['organisation', 'quote_id'],
+                name='xero_data_quote_org_quoteid_uniq',
+            )
+        ]
+        indexes = [
+            models.Index(fields=['organisation', 'status', 'date'],
+                         name='xd_quote_org_status_date_idx'),
+            models.Index(fields=['organisation', 'updated_date_utc'],
+                         name='xd_quote_org_updated_idx'),
+            models.Index(fields=['organisation', 'xero_contact_id'],
+                         name='xd_quote_org_xcontact_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.quote_number or self.quote_id} ({self.status}) {self.total}'
+
+
+class XeroQuoteLineItem(models.Model):
+    """
+    One line on a Xero quote. Ordered by `position`.
+    """
+    quote = models.ForeignKey(
+        XeroQuote,
+        on_delete=models.CASCADE,
+        related_name='line_items',
+    )
+    line_item_id = models.CharField(max_length=64, blank=True, default='',
+                                    help_text='Xero LineItemID — optional')
+    description = models.TextField(blank=True, default='')
+    quantity = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    unit_amount = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    item_code = models.CharField(max_length=100, blank=True, default='',
+                                 help_text='Links to future XeroItem table when imported')
+    account_code = models.CharField(max_length=20, blank=True, default='',
+                                    help_text='Denormalised Xero account code')
+    account = models.ForeignKey(
+        XeroAccount,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+    tax_type = models.CharField(max_length=50, blank=True, default='')
+    tax_amount = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    line_amount = models.DecimalField(max_digits=18, decimal_places=4, default=0)
+    discount_rate = models.DecimalField(max_digits=9, decimal_places=4, null=True, blank=True)
+    discount_amount = models.DecimalField(max_digits=18, decimal_places=4, null=True, blank=True)
+    tracking1 = models.ForeignKey(
+        XeroTracking,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+    tracking2 = models.ForeignKey(
+        XeroTracking,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+    position = models.PositiveSmallIntegerField(default=0,
+                                                help_text='Preserve Xero line order')
+
+    class Meta:
+        verbose_name = 'Xero Quote Line Item'
+        verbose_name_plural = 'Xero Quote Line Items'
+        ordering = ['quote', 'position']
+        indexes = [
+            models.Index(fields=['quote', 'position'], name='xd_quote_li_qpos_idx'),
+            models.Index(fields=['account_code'], name='xd_quote_li_acctcode_idx'),
+        ]
+
+    def __str__(self):
+        return f'Line {self.position}: {self.description[:60]} ({self.line_amount})'
