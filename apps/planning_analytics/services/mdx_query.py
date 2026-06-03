@@ -58,19 +58,27 @@ def dimension_children(dim, parent):
     return [{"name": c["Name"], "type": c.get("Type")} for c in r.json().get("Components", [])]
 
 
-def element_names(dim, attribute="name", top=50000):
-    """Map element name -> friendly attribute value (e.g. account UUID -> name).
-    Falls back to the element's own name if the attribute is blank."""
-    base, s = _session()
-    r = s.get(base + "/Dimensions('%s')/Hierarchies('%s')/Elements?$expand=Attributes&$top=%d"
-              % (dim, dim, top), timeout=90, verify=False)
-    r.raise_for_status()
+def element_names(dim, elements, attribute="name"):
+    """Map element -> friendly attribute value (e.g. account UUID -> name) for a
+    specific list of elements, read from the }ElementAttributes_<dim> control cube.
+    (PA 2.1 /api/v1 rejects $expand=Attributes on Elements; control-cube MDX is the idiom.)
+    Falls back to the element's own key if the attribute is blank."""
+    if not elements:
+        return {}
+    attr_cube = "}ElementAttributes_%s" % dim
+    res = run_pivot(
+        cube=attr_cube,
+        rows=[{"dimension": dim, "members": list(elements)}],
+        cols=[{"dimension": attr_cube, "members": [attribute]}],
+        filters=None,
+        suppress=False,
+    )
     out = {}
-    for e in r.json().get("value", []):
-        attrs = e.get("Attributes") or {}
-        out[e["Name"]] = attrs.get(attribute) or attrs.get("Caption") or e["Name"]
+    for row in res["rows"]:
+        el = row["members"][-1]
+        v = row["cells"][0]["value"] if row["cells"] else None
+        out[el] = v or el
     return out
-
 
 def _member(dim, el):
     el = str(el).replace("]", "]]")

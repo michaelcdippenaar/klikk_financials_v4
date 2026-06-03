@@ -366,3 +366,27 @@ class TM1PivotQueryView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+from apps.planning_analytics.services import cost_analysis as _costcut  # noqa: E402
+
+
+class CostCutReportView(APIView):
+    """GET /api/planning-analytics/cost-cut/?entity=<uuid>&year=<YYYY>[&groups=A,B]
+    Recurring-Cash Cost-Cut Finder — leaf expense accounts, this year vs prior,
+    ranked by size and YoY growth. Reads live from TM1 (gl_src_trial_balance)."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        entity = request.query_params.get("entity")
+        year = request.query_params.get("year")
+        if not entity or not year:
+            return Response({"error": "entity and year are required"}, status=status.HTTP_400_BAD_REQUEST)
+        groups_q = request.query_params.get("groups")
+        groups = [g.strip() for g in groups_q.split(",") if g.strip()] if groups_q else None
+        try:
+            return Response(_costcut.cost_cut_report(entity, year, groups=groups))
+        except ValueError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
