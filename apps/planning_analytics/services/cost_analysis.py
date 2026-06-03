@@ -48,7 +48,8 @@ def _behaviour_map():
     from apps.planning_analytics.models import CostBehaviour
     return {cb.account_key: {
                 "behaviour": cb.behaviour, "driver": cb.driver,
-                "cuttability": cb.cuttability, "is_addressable": cb.is_addressable}
+                "cuttability": cb.cuttability, "is_addressable": cb.is_addressable,
+                "is_manageable": cb.is_manageable}
             for cb in CostBehaviour.objects.all()}
 
 
@@ -154,8 +155,9 @@ def cost_cut_report(entity, year, groups=None):
         b = behaviour.get(_account_key(nm))
         if b:
             beh, drv, cut, addr = b["behaviour"], b["driver"], b["cuttability"], b["is_addressable"]
+            mgmt = b.get("is_manageable", False)
         else:
-            beh, drv, cut, addr = "unclassified", "", "T2", True
+            beh, drv, cut, addr, mgmt = "unclassified", "", "T2", True, False
         rows.append({
             "account_id": acct,
             "account_key": _account_key(nm),
@@ -165,6 +167,7 @@ def cost_cut_report(entity, year, groups=None):
             "driver": drv,
             "cuttability": cut,
             "is_addressable": addr,
+            "is_manageable": mgmt,
             "recurring_actual": round(a, 2),
             "recurring_prior": round(p, 2),
             "yoy_delta": round(a - p, 2),
@@ -209,6 +212,9 @@ def cost_cut_report(entity, year, groups=None):
         tier_totals[t] = round(tier_totals.get(t, 0.0) + r["recurring_actual"], 2)
     below_the_line = sorted(below_rows, key=lambda r: abs(r["recurring_actual"]), reverse=True)
 
+    # Manageable cost — MC's top cost-cutting opportunities (editable hit-list).
+    manageable_total = round(sum(r["recurring_actual"] for r in rows if r.get("is_manageable")), 2)
+
     # Seasonal run-rate (estimate) for an in-progress year: scale the YTD addressable
     # cost by how the PRIOR year's full year related to its same-period YTD — respects
     # seasonality instead of a naive x12/N. One extra total-level pull on the prior full year.
@@ -243,6 +249,7 @@ def cost_cut_report(entity, year, groups=None):
         "below_the_line": below_the_line,
         "below_the_line_total": below_the_line_total,
         "tier_totals": tier_totals,
+        "manageable_total": manageable_total,
         "accounts": by_size,
         "top_opportunities": by_growth[:10],
         "source": "TM1 gl_src_trial_balance (live)",

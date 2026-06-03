@@ -483,6 +483,7 @@ def _serialize_behaviour(cb):
         "id": cb.id, "account_key": cb.account_key, "behaviour": cb.behaviour,
         "driver": cb.driver, "source": cb.source, "note": cb.note,
         "cuttability": cb.cuttability, "is_addressable": cb.is_addressable,
+        "is_manageable": cb.is_manageable,
         "updated_at": cb.updated_at.isoformat(),
     }
 
@@ -512,8 +513,8 @@ class CostBehaviourView(APIView):
         tier = (d.get("cuttability") or "").strip()
         if not key:
             return Response({"error": "account_key is required"}, status=status.HTTP_400_BAD_REQUEST)
-        if not beh and not tier:
-            return Response({"error": "provide behaviour and/or cuttability"}, status=status.HTTP_400_BAD_REQUEST)
+        if not beh and not tier and "is_manageable" not in d:
+            return Response({"error": "provide behaviour, cuttability and/or is_manageable"}, status=status.HTTP_400_BAD_REQUEST)
         if beh and beh not in self._VALID:
             return Response({"error": "invalid behaviour (%s)" % ", ".join(sorted(self._VALID))},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -534,6 +535,8 @@ class CostBehaviourView(APIView):
             defaults["driver"] = d.get("driver") or ""
         if "note" in d:
             defaults["note"] = d.get("note") or ""
+        if "is_manageable" in d:
+            defaults["is_manageable"] = bool(d.get("is_manageable"))
         # update_or_create needs a behaviour for brand-new rows; fall back to a
         # neutral default if only a tier was supplied for an unseen account.
         obj, created = CostBehaviour.objects.update_or_create(

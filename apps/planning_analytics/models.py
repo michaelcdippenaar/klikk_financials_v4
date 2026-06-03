@@ -168,6 +168,10 @@ class CostBehaviour(models.Model):
     # False = below-the-line (tax / finance / statutory-derivative / contra);
     # excluded from the addressable cost-cut total.
     is_addressable = models.BooleanField(default=True)
+    # Manageable cost = the user's top cost-cutting opportunities: addressable AND
+    # reducible THIS period (tier T1/T2/T3 by default — quick-win/behavioural/
+    # discretionary). Editable so MC can curate his hit-list independent of tier.
+    is_manageable = models.BooleanField(default=False)
     source = models.CharField(max_length=20, default=SEED)
     note = models.TextField(blank=True, default="")
     updated_by = models.ForeignKey(
