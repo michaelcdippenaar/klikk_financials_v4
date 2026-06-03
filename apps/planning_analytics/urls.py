@@ -1,5 +1,9 @@
 from django.urls import path
 from apps.planning_analytics.views import (
+    TM1CubesView,
+    TM1CubeDimensionsView,
+    TM1DimensionElementsView,
+    TM1PivotQueryView,
     PipelineRunView,
     TM1ExecuteView,
     TM1TestConnectionView,
@@ -16,6 +20,10 @@ urlpatterns = [
     path('tm1/test-connection/', TM1TestConnectionView.as_view(), name='planning-analytics-tm1-test'),
     path('tm1/config/', TM1ConfigView.as_view(), name='planning-analytics-tm1-config'),
     path('tm1/processes/', TM1ProcessListView.as_view(), name='planning-analytics-tm1-processes'),
+    path('tm1/cubes/', TM1CubesView.as_view(), name='pa-tm1-cubes'),
+    path('tm1/cube-dimensions/', TM1CubeDimensionsView.as_view(), name='pa-tm1-cube-dimensions'),
+    path('tm1/dimension-elements/', TM1DimensionElementsView.as_view(), name='pa-tm1-dimension-elements'),
+    path('tm1/query/', TM1PivotQueryView.as_view(), name='pa-tm1-query'),
     path('tm1/credentials/', UserTM1CredentialsView.as_view(), name='planning-analytics-tm1-credentials'),
     path('tm1/tracking-mapping/', TrackingMappingView.as_view(), name='planning-analytics-tracking-mapping'),
     path('tm1/tracking-mapping/add/', TrackingMappingAddView.as_view(), name='planning-analytics-tracking-mapping-add'),
