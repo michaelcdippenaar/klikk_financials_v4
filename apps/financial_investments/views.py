@@ -732,6 +732,49 @@ def dividend_calendar_update_payment_date(request):
 
 
 @api_view(['POST'])
+def dividend_calendar_update_amount(request):
+    """Update amount (and optionally currency / dividend_category) for a calendar entry.
+    Body: id (required), amount (number, required), currency (optional, default keep),
+    dividend_category (optional). Used by the daily dividend-paydates routine to write
+    SENS-declared ZAR amounts for dual-listed foreign shares."""
+    from decimal import Decimal, InvalidOperation
+    entry_id = request.data.get('id')
+    amount_raw = request.data.get('amount')
+    if not entry_id:
+        return Response({'error': 'id required'}, status=status.HTTP_400_BAD_REQUEST)
+    if amount_raw is None:
+        return Response({'error': 'amount required'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        amt = Decimal(str(amount_raw))
+    except (InvalidOperation, ValueError):
+        return Response({'error': 'amount must be numeric'}, status=status.HTTP_400_BAD_REQUEST)
+    if amt < 0:
+        return Response({'error': 'amount must be >= 0'}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        dc = DividendCalendar.objects.get(id=entry_id)
+        fields = ['amount', 'updated_at']
+        dc.amount = amt
+        currency = request.data.get('currency')
+        if currency:
+            dc.currency = currency
+            fields.append('currency')
+        cat = request.data.get('dividend_category')
+        if cat:
+            dc.dividend_category = cat
+            fields.append('dividend_category')
+        dc.save(update_fields=fields)
+        return Response({
+            'id': dc.id,
+            'amount': float(dc.amount),
+            'currency': dc.currency,
+            'dividend_category': dc.dividend_category,
+            'status': 'updated',
+        })
+    except DividendCalendar.DoesNotExist:
+        return Response({'error': 'Entry not found'}, status=status.HTTP_404_NOT_FOUND)
+
+
+@api_view(['POST'])
 def dividend_forecast_verify(request):
     """Verify TM1 adjustments: read TM1 for all written entries and confirm values match."""
     from django.utils import timezone
