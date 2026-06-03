@@ -390,3 +390,86 @@ class CostCutReportView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+from apps.planning_analytics.models import KPITarget  # noqa: E402
+from django.db import IntegrityError  # noqa: E402
+
+
+def _serialize_target(t):
+    return {
+        "id": t.id,
+        "metric_key": t.metric_key,
+        "entity_id": t.entity_id,
+        "period_year": t.period_year,
+        "label": t.label,
+        "target_value": float(t.target_value),
+        "direction": t.direction,
+        "amber_band_pct": float(t.amber_band_pct),
+        "note": t.note,
+        "updated_at": t.updated_at.isoformat(),
+    }
+
+
+class KPITargetView(APIView):
+    """Editable performance targets driving the cockpit RAG flags.
+
+    GET    ?entity=<uuid|''>&year=<YYYY>[&metric_key=]  -> list targets
+    POST   {metric_key, period_year, target_value, entity_id?, label?,
+            direction?, amber_band_pct?, note?}          -> upsert (by metric_key+entity+year)
+    DELETE ?id=<id>   OR  ?metric_key=&entity=&year=     -> remove a target
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        year = request.query_params.get("year")
+        entity = request.query_params.get("entity")
+        qs = KPITarget.objects.all()
+        if year:
+            qs = qs.filter(period_year=year)
+        if entity is not None:
+            qs = qs.filter(entity_id__in=[entity, ""])
+        mk = request.query_params.get("metric_key")
+        if mk:
+            qs = qs.filter(metric_key=mk)
+        return Response({"targets": [_serialize_target(t) for t in qs]})
+
+    def post(self, request):
+        d = request.data
+        mk = (d.get("metric_key") or "").strip()
+        year = d.get("period_year")
+        val = d.get("target_value")
+        if not mk or year in (None, "") or val in (None, ""):
+            return Response({"error": "metric_key, period_year and target_value are required"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        defaults = {
+            "label": d.get("label", ""),
+            "target_value": val,
+            "direction": d.get("direction", KPITarget.LOWER),
+            "amber_band_pct": d.get("amber_band_pct", 5),
+            "note": d.get("note", ""),
+            "created_by": request.user if request.user.is_authenticated else None,
+        }
+        try:
+            obj, created = KPITarget.objects.update_or_create(
+                metric_key=mk, entity_id=(d.get("entity_id") or ""), period_year=int(year),
+                defaults=defaults,
+            )
+        except (ValueError, IntegrityError) as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(_serialize_target(obj),
+                        status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
+
+    def delete(self, request):
+        tid = request.query_params.get("id")
+        if tid:
+            KPITarget.objects.filter(id=tid).delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        mk = request.query_params.get("metric_key")
+        year = request.query_params.get("year")
+        entity = request.query_params.get("entity") or ""
+        if mk and year:
+            KPITarget.objects.filter(metric_key=mk, entity_id=entity, period_year=year).delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response({"error": "provide id, or metric_key+year(+entity)"},
+                        status=status.HTTP_400_BAD_REQUEST)

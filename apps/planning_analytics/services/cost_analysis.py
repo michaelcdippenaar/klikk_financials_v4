@@ -86,16 +86,51 @@ def cost_cut_report(entity, year, groups=None):
     for r in rows:
         r["pct_of_cost"] = round(r["recurring_actual"] / total_cur * 100, 1) if abs(total_cur) > 0.005 else 0.0
 
+    # Overlay user-set targets (Postgres) → RAG. Targets are goals, not plan/actuals.
+    total_target, total_rag = _apply_targets(entity, year, total_cur, rows)
+
     # rank for cut: biggest recurring cost, then fastest YoY growth
     by_size = sorted(rows, key=lambda r: abs(r["recurring_actual"]), reverse=True)
     by_growth = [r for r in rows if r["yoy_delta"] > 0]
     by_growth.sort(key=lambda r: r["yoy_delta"], reverse=True)
 
+    rag_counts = {"green": 0, "amber": 0, "red": 0, "none": 0}
+    for r in rows:
+        rag_counts[r.get("rag", "none")] += 1
+
     return {
         "entity": entity, "year": year, "prior_year": prior,
         "basis": "Recurring cash expense (excludes non-cash & one-offs)",
         "total_recurring_cost": round(total_cur, 2),
+        "total_target": total_target,
+        "total_rag": total_rag,
+        "rag_counts": rag_counts,
         "accounts": by_size,
         "top_opportunities": by_growth[:10],
         "source": "TM1 gl_src_trial_balance (live)",
     }
+
+
+def _apply_targets(entity, year, total_actual, rows):
+    """Attach 'target' + 'rag' to each account row and return the total target.
+    Targets live in Postgres (apps.planning_analytics.models.KPITarget)."""
+    from apps.planning_analytics.models import KPITarget
+    qs = KPITarget.objects.filter(period_year=year, entity_id__in=[entity, ""])
+    # entity-specific wins over org-wide ("") for the same metric_key
+    by_metric = {}
+    for t in qs:
+        cur = by_metric.get(t.metric_key)
+        if cur is None or (cur.entity_id == "" and t.entity_id == entity):
+            by_metric[t.metric_key] = t
+    for r in rows:
+        t = by_metric.get("cost_cut.account.%s" % r["account_id"])
+        if t:
+            r["target"] = float(t.target_value)
+            r["rag"] = t.rag(r["recurring_actual"])
+        else:
+            r["target"] = None
+            r["rag"] = "none"
+    total_t = by_metric.get("cost_cut.total")
+    if not total_t:
+        return None, "none"
+    return float(total_t.target_value), total_t.rag(total_actual)

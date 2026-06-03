@@ -62,3 +62,70 @@ class TM1ProcessConfig(models.Model):
 
     def __str__(self):
         return f'{self.process_name} ({"enabled" if self.enabled else "disabled"})'
+
+
+class KPITarget(models.Model):
+    """User-set performance targets for the Cost & Sustainability Cockpit.
+
+    Targets are GOALS the user sets to challenge themselves — they are NOT TM1
+    plan data (which lives in TM1) and NOT actuals (Postgres XeroTrailBalance /
+    TM1 gl_src). They are a third, distinct datum: the bar to beat. Single home
+    = Postgres. The cost-cut report overlays target vs actual and emits RAG.
+
+    metric_key examples:
+      "cost_cut.total"               — total recurring-cash cost for the entity/year
+      "cost_cut.account.<account_id>" — a single leaf expense account
+    (extensible to cashflow.*, debt.*, tax.*, sustainability.* as pillars land)
+    """
+    LOWER = "lower_is_better"
+    HIGHER = "higher_is_better"
+    DIRECTION_CHOICES = [(LOWER, "Lower is better"), (HIGHER, "Higher is better")]
+
+    metric_key = models.CharField(max_length=200)
+    entity_id = models.CharField(max_length=64, blank=True, default="")  # Xero tenant uuid; "" = org-wide
+    period_year = models.PositiveSmallIntegerField()
+    label = models.CharField(max_length=300, blank=True, default="")
+    target_value = models.DecimalField(max_digits=18, decimal_places=2)
+    direction = models.CharField(max_length=20, choices=DIRECTION_CHOICES, default=LOWER)
+    amber_band_pct = models.DecimalField(max_digits=6, decimal_places=2, default=5)  # % tolerance for amber RAG
+    note = models.TextField(blank=True, default="")
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name="kpi_targets",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "KPI Target"
+        verbose_name_plural = "KPI Targets"
+        ordering = ["entity_id", "period_year", "metric_key"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["metric_key", "entity_id", "period_year"],
+                name="uniq_kpi_target_metric_entity_year",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.metric_key} {self.entity_id or 'org'} {self.period_year} -> {self.target_value}"
+
+    def rag(self, actual):
+        """Red/Amber/Green vs actual. Returns one of 'green'|'amber'|'red'|'none'."""
+        if actual is None:
+            return "none"
+        t = float(self.target_value)
+        band = float(self.amber_band_pct) / 100.0
+        a = float(actual)
+        if self.direction == self.LOWER:
+            if a <= t:
+                return "green"
+            if a <= t * (1 + band):
+                return "amber"
+            return "red"
+        else:
+            if a >= t:
+                return "green"
+            if a >= t * (1 - band):
+                return "amber"
+            return "red"
