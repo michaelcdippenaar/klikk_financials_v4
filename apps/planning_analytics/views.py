@@ -437,7 +437,7 @@ class KPITargetView(APIView):
     def post(self, request):
         d = request.data
         mk = (d.get("metric_key") or "").strip()
-        year = d.get("period_year")
+        year = d.get("period_year", d.get("year"))
         val = d.get("target_value")
         if not mk or year in (None, "") or val in (None, ""):
             return Response({"error": "metric_key, period_year and target_value are required"},
@@ -452,7 +452,7 @@ class KPITargetView(APIView):
         }
         try:
             obj, created = KPITarget.objects.update_or_create(
-                metric_key=mk, entity_id=(d.get("entity_id") or ""), period_year=int(year),
+                metric_key=mk, entity_id=(d.get("entity_id") or d.get("entity") or ""), period_year=int(year),
                 defaults=defaults,
             )
         except (ValueError, IntegrityError) as e:
