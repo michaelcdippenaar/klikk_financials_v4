@@ -348,6 +348,22 @@ class TM1DimensionElementsView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
 
 
+class TM1DimensionChildrenView(APIView):
+    """GET ?dimension=X&parent=Y -> direct children (components) of a consolidated
+    element, so the pivot can default to / drill into a rollup's children rather
+    than the whole flat element list."""
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        dim = request.query_params.get("dimension")
+        parent = request.query_params.get("parent")
+        if not dim or not parent:
+            return Response({"error": "dimension and parent are required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            return Response({"children": _mdx.dimension_children(dim, parent)})
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+
 class TM1PivotQueryView(APIView):
     """POST { cube, rows:[{dimension,members[]}], cols:[...], filters:{dim:member}, suppress }"""
     permission_classes = [IsAuthenticated]
