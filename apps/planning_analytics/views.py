@@ -482,6 +482,7 @@ def _serialize_behaviour(cb):
     return {
         "id": cb.id, "account_key": cb.account_key, "behaviour": cb.behaviour,
         "driver": cb.driver, "source": cb.source, "note": cb.note,
+        "cuttability": cb.cuttability, "is_addressable": cb.is_addressable,
         "updated_at": cb.updated_at.isoformat(),
     }
 
@@ -502,23 +503,43 @@ class CostBehaviourView(APIView):
             qs = qs.filter(behaviour=beh)
         return Response({"classifications": [_serialize_behaviour(c) for c in qs]})
 
+    _VALID_TIERS = {c[0] for c in CostBehaviour.TIERS}
+
     def post(self, request):
         d = request.data
         key = (d.get("account_key") or "").strip()
         beh = (d.get("behaviour") or "").strip()
-        if not key or beh not in self._VALID:
-            return Response(
-                {"error": "account_key and a valid behaviour (%s) are required" % ", ".join(sorted(self._VALID))},
-                status=status.HTTP_400_BAD_REQUEST)
+        tier = (d.get("cuttability") or "").strip()
+        if not key:
+            return Response({"error": "account_key is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if not beh and not tier:
+            return Response({"error": "provide behaviour and/or cuttability"}, status=status.HTTP_400_BAD_REQUEST)
+        if beh and beh not in self._VALID:
+            return Response({"error": "invalid behaviour (%s)" % ", ".join(sorted(self._VALID))},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if tier and tier not in self._VALID_TIERS:
+            return Response({"error": "invalid cuttability (%s)" % ", ".join(sorted(self._VALID_TIERS))},
+                            status=status.HTTP_400_BAD_REQUEST)
         defaults = {
-            "behaviour": beh,
             "source": CostBehaviour.OVERRIDE,
             "updated_by": request.user if request.user.is_authenticated else None,
         }
+        if beh:
+            defaults["behaviour"] = beh
+        if tier:
+            defaults["cuttability"] = tier
+            # T0 is the below-the-line tier; keep is_addressable consistent with it.
+            defaults["is_addressable"] = (tier != "T0")
         if "driver" in d:
             defaults["driver"] = d.get("driver") or ""
         if "note" in d:
             defaults["note"] = d.get("note") or ""
-        obj, created = CostBehaviour.objects.update_or_create(account_key=key, defaults=defaults)
+        # update_or_create needs a behaviour for brand-new rows; fall back to a
+        # neutral default if only a tier was supplied for an unseen account.
+        obj, created = CostBehaviour.objects.update_or_create(
+            account_key=key,
+            defaults=defaults,
+            create_defaults={**defaults, "behaviour": defaults.get("behaviour", CostBehaviour.VARIABLE)},
+        )
         return Response(_serialize_behaviour(obj),
                         status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)

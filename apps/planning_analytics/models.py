@@ -159,6 +159,15 @@ class CostBehaviour(models.Model):
     account_key = models.CharField(max_length=120, unique=True)  # e.g. "kl_HH--EM01/1"
     behaviour = models.CharField(max_length=20, choices=BEHAVIOUR_CHOICES)
     driver = models.CharField(max_length=200, blank=True, default="")
+    # Cuttability tier (CFO axis, distinct from behaviour): T0 not-a-target /
+    # below-the-line, T1 quick-win, T2 behavioural, T3 discretionary,
+    # T4 renegotiable, T5 structural.
+    TIERS = [("T0", "Not a target"), ("T1", "Quick win"), ("T2", "Behavioural"),
+             ("T3", "Discretionary"), ("T4", "Renegotiable"), ("T5", "Structural")]
+    cuttability = models.CharField(max_length=2, choices=TIERS, default="T2")
+    # False = below-the-line (tax / finance / statutory-derivative / contra);
+    # excluded from the addressable cost-cut total.
+    is_addressable = models.BooleanField(default=True)
     source = models.CharField(max_length=20, default=SEED)
     note = models.TextField(blank=True, default="")
     updated_by = models.ForeignKey(

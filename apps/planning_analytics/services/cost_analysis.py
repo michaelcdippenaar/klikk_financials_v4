@@ -43,10 +43,12 @@ def _account_key(name):
 
 
 def _behaviour_map():
-    """{account_key: (behaviour, driver)} from the CostBehaviour table (CFO seed +
-    any user overrides). Resolved value is whatever the row currently holds."""
+    """{account_key: {behaviour, driver, cuttability, is_addressable}} from the
+    CostBehaviour table (CFO seed + any user overrides)."""
     from apps.planning_analytics.models import CostBehaviour
-    return {cb.account_key: (cb.behaviour, cb.driver)
+    return {cb.account_key: {
+                "behaviour": cb.behaviour, "driver": cb.driver,
+                "cuttability": cb.cuttability, "is_addressable": cb.is_addressable}
             for cb in CostBehaviour.objects.all()}
 
 
@@ -95,7 +97,11 @@ def cost_cut_report(entity, year, groups=None):
             continue
         total_cur += a
         nm = names.get(acct, acct)
-        beh, drv = behaviour.get(_account_key(nm), ("unclassified", ""))
+        b = behaviour.get(_account_key(nm))
+        if b:
+            beh, drv, cut, addr = b["behaviour"], b["driver"], b["cuttability"], b["is_addressable"]
+        else:
+            beh, drv, cut, addr = "unclassified", "", "T2", True
         rows.append({
             "account_id": acct,
             "account_key": _account_key(nm),
@@ -103,6 +109,8 @@ def cost_cut_report(entity, year, groups=None):
             "group": group_of.get(acct, ""),
             "behaviour": beh,
             "driver": drv,
+            "cuttability": cut,
+            "is_addressable": addr,
             "recurring_actual": round(a, 2),
             "recurring_prior": round(p, 2),
             "yoy_delta": round(a - p, 2),
@@ -134,6 +142,19 @@ def cost_cut_report(entity, year, groups=None):
     var_v = behaviour_totals["variable"]
     addressable = round(fixed_v + var_v + behaviour_totals["semi_variable"], 2)
 
+    # Cuttability (CFO addressable lens). Headline = addressable operating cost;
+    # T0 / non-addressable (income tax, finance costs, statutory payroll
+    # derivatives, contra/recovery) sits BELOW THE LINE — visible, not counted.
+    addressable_rows = [r for r in rows if r.get("is_addressable", True)]
+    below_rows = [r for r in rows if not r.get("is_addressable", True)]
+    addressable_operating_cost = round(sum(r["recurring_actual"] for r in addressable_rows), 2)
+    below_the_line_total = round(sum(r["recurring_actual"] for r in below_rows), 2)
+    tier_totals = {}
+    for r in addressable_rows:
+        t = r.get("cuttability", "T2")
+        tier_totals[t] = round(tier_totals.get(t, 0.0) + r["recurring_actual"], 2)
+    below_the_line = sorted(below_rows, key=lambda r: abs(r["recurring_actual"]), reverse=True)
+
     return {
         "entity": entity, "year": year, "prior_year": prior,
         "basis": "Recurring cash expense (excludes non-cash & one-offs)",
@@ -144,6 +165,10 @@ def cost_cut_report(entity, year, groups=None):
         "behaviour_totals": behaviour_totals,
         "addressable_base": addressable,
         "fixed_variable_ratio": round(fixed_v / var_v, 2) if abs(var_v) > 0.005 else None,
+        "addressable_operating_cost": addressable_operating_cost,
+        "below_the_line": below_the_line,
+        "below_the_line_total": below_the_line_total,
+        "tier_totals": tier_totals,
         "accounts": by_size,
         "top_opportunities": by_growth[:10],
         "source": "TM1 gl_src_trial_balance (live)",
