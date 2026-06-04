@@ -174,8 +174,13 @@ def cost_cut_report(entity, year, groups=None):
             "yoy_pct": round((a - p) / abs(p) * 100, 1) if abs(p) > 0.005 else None,
         })
 
+    # % of the ADDRESSABLE base (not total) so a leaf's "% of cost" reconciles to
+    # its group's "% of addressable" subtotal — same denominator as the headline.
+    addressable_operating_cost = round(
+        sum(r["recurring_actual"] for r in rows if r.get("is_addressable", True)), 2)
+    pct_base = addressable_operating_cost if abs(addressable_operating_cost) > 0.005 else total_cur
     for r in rows:
-        r["pct_of_cost"] = round(r["recurring_actual"] / total_cur * 100, 1) if abs(total_cur) > 0.005 else 0.0
+        r["pct_of_cost"] = round(r["recurring_actual"] / pct_base * 100, 1) if abs(pct_base) > 0.005 else 0.0
 
     # Overlay user-set targets (Postgres) → RAG. Targets are goals, not plan/actuals.
     total_target, total_rag = _apply_targets(entity, year, total_cur, rows)
@@ -204,7 +209,7 @@ def cost_cut_report(entity, year, groups=None):
     # derivatives, contra/recovery) sits BELOW THE LINE — visible, not counted.
     addressable_rows = [r for r in rows if r.get("is_addressable", True)]
     below_rows = [r for r in rows if not r.get("is_addressable", True)]
-    addressable_operating_cost = round(sum(r["recurring_actual"] for r in addressable_rows), 2)
+    # addressable_operating_cost already computed above (pct base).
     below_the_line_total = round(sum(r["recurring_actual"] for r in below_rows), 2)
     tier_totals = {}
     for r in addressable_rows:
