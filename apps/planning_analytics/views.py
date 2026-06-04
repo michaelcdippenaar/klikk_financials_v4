@@ -422,6 +422,35 @@ class TM1DimensionAliasesView(APIView):
             return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
 
 
+class TM1ElementLabelsView(APIView):
+    """POST { dimension, alias, elements?: [..], hierarchy? }
+    -> { dimension, alias, labels: { element: label } }.
+
+    Resolves principal element keys to an alias attribute value (e.g. an entity
+    UUID -> its name) via the }ElementAttributes_<dim> control cube. POST (not GET)
+    so the element list travels in the body: TM1 element keys can contain commas,
+    which a querystring + split(',') would corrupt, and the body has no URL-length
+    cap. Omit ``elements`` to resolve the whole (capped) hierarchy. Labels fall back
+    to the element key when the alias value is blank."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        d = request.data or {}
+        dim = d.get("dimension")
+        alias = d.get("alias")
+        if not dim or not alias:
+            return Response({"error": "dimension and alias are required"}, status=status.HTTP_400_BAD_REQUEST)
+        raw = d.get("elements")
+        elements = [str(e).strip() for e in raw if str(e).strip()] if isinstance(raw, list) else []
+        try:
+            if not elements:
+                elements = [e["name"] for e in _mdx.dimension_elements(dim, hier=d.get("hierarchy")) if e.get("name")]
+            labels = _mdx.element_names(dim, elements, attribute=alias)
+            return Response({"dimension": dim, "alias": alias, "labels": labels})
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+
 class TM1PivotQueryView(APIView):
     """POST { cube, rows:[{dimension,members[]}], cols:[...], filters:{dim:member}, suppress }"""
     permission_classes = [IsAuthenticated]
