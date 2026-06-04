@@ -41,19 +41,21 @@ def cube_dimensions(cube):
     return [d["Name"] for d in r.json().get("Dimensions", [])]
 
 
-def dimension_elements(dim, top=20000):
+def dimension_elements(dim, hier=None, top=20000):
+    h = hier or dim
     base, s = _session()
-    r = s.get(base + "/Dimensions('%s')/Hierarchies('%s')/Elements?$select=Name,Type&$top=%d" % (dim, dim, top),
+    r = s.get(base + "/Dimensions('%s')/Hierarchies('%s')/Elements?$select=Name,Type&$top=%d" % (dim, h, top),
               timeout=60, verify=False)
     r.raise_for_status()
     return [{"name": e["Name"], "type": e.get("Type")} for e in r.json().get("value", [])]
 
 
-def dimension_children(dim, parent):
-    """Direct children (components) of a consolidated element."""
+def dimension_children(dim, parent, hier=None):
+    """Direct children (components) of a consolidated element in a given hierarchy."""
+    h = hier or dim
     base, s = _session()
     r = s.get(base + "/Dimensions('%s')/Hierarchies('%s')/Elements('%s')?$expand=Components($select=Name,Type)"
-              % (dim, dim, str(parent).replace("'", "''")), timeout=60, verify=False)
+              % (dim, h, str(parent).replace("'", "''")), timeout=60, verify=False)
     r.raise_for_status()
     return [{"name": c["Name"], "type": c.get("Type")} for c in r.json().get("Components", [])]
 
@@ -80,19 +82,26 @@ def element_names(dim, elements, attribute="name"):
         out[el] = v or el
     return out
 
-def _member(dim, el):
+def _member(dim, el, hier=None):
+    h = hier or dim
     el = str(el).replace("]", "]]")
-    return "[%s].[%s].[%s]" % (dim, dim, el)
+    return "[%s].[%s].[%s]" % (dim, h, el)
 
 
 def _axis_set(spec):
     parts = []
     for d in spec or []:
         dim = d["dimension"]
+        hier = d.get("hierarchy") or dim
+        subset = d.get("subset")
+        if subset:
+            sub = str(subset).replace('"', '')
+            parts.append('{TM1SubsetToSet([%s].[%s], "%s", "public")}' % (dim, hier, sub))
+            continue
         members = d.get("members") or []
         if not members:
             continue
-        parts.append("{" + ",".join(_member(dim, m) for m in members) + "}")
+        parts.append("{" + ",".join(_member(dim, m, hier) for m in members) + "}")
     if not parts:
         return None
     out = parts[0]
@@ -146,3 +155,55 @@ def execute_mdx(mdx):
 
 def run_pivot(cube, rows, cols, filters=None, suppress=True):
     return execute_mdx(build_mdx(cube, rows, cols, filters=filters, suppress=suppress))
+
+
+def list_hierarchies(dim):
+    """Visible hierarchies of a dimension. Hides the system 'Leaves' hierarchy;
+    default hierarchy is the one named == dim."""
+    base, s_ = _session()
+    r = s_.get(base + "/Dimensions('%s')/Hierarchies?$select=Name" % dim, timeout=30, verify=False)
+    r.raise_for_status()
+    names = [h["Name"] for h in r.json().get("value", [])]
+    visible = [n for n in names if n != "Leaves"]
+    alts = [n for n in visible if n != dim]
+    return {"dimension": dim, "default": dim,
+            "hierarchies": [{"name": n, "is_default": n == dim} for n in visible],
+            "has_alternates": len(alts) > 0}
+
+
+def list_subsets(dim, hier=None):
+    """Public subsets of a dimension/hierarchy. dynamic = has an MDX Expression."""
+    h = hier or dim
+    base, s_ = _session()
+    url = base + "/Dimensions('%s')/Hierarchies('%s')/Subsets?$select=Name,Expression" % (dim, h)
+    r = s_.get(url, timeout=30, verify=False)
+    if r.status_code >= 400:  # some builds reject Expression on the collection
+        r = s_.get(base + "/Dimensions('%s')/Hierarchies('%s')/Subsets?$select=Name" % (dim, h), timeout=30, verify=False)
+    r.raise_for_status()
+    return [{"name": x["Name"], "dynamic": bool(x.get("Expression"))} for x in r.json().get("value", [])]
+
+
+def subset_members(dim, subset, hier=None, top=500):
+    """Resolved members of a subset (works for static AND dynamic — the server
+    evaluates dynamic expressions). Capped by top."""
+    h = hier or dim
+    base, s_ = _session()
+    sub = str(subset).replace("'", "''")
+    url = (base + "/Dimensions('%s')/Hierarchies('%s')/Subsets('%s')?$select=Name,Expression"
+                  "&$expand=Elements($select=Name,Type;$top=%d)" % (dim, h, sub, top))
+    r = s_.get(url, timeout=90, verify=False)
+    r.raise_for_status()
+    d = r.json()
+    els = [{"name": e["Name"], "type": e.get("Type")} for e in d.get("Elements", [])]
+    return {"subset": subset, "dynamic": bool(d.get("Expression")),
+            "members": els, "truncated": len(els) >= top}
+
+
+def list_aliases(dim, hier=None):
+    """Alias-type element attribute names for a dimension/hierarchy (display labels)."""
+    h = hier or dim
+    base, s_ = _session()
+    r = s_.get(base + "/Dimensions('%s')/Hierarchies('%s')/ElementAttributes?$select=Name,Type" % (dim, h),
+               timeout=30, verify=False)
+    r.raise_for_status()
+    return [a["Name"] for a in r.json().get("value", []) if a.get("Type") == "Alias"]

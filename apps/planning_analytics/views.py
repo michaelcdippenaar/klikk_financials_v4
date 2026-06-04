@@ -343,7 +343,8 @@ class TM1DimensionElementsView(APIView):
         if not dim:
             return Response({"error": "dimension is required"}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            return Response({"dimension": dim, "elements": _mdx.dimension_elements(dim)})
+            return Response({"dimension": dim, "hierarchy": request.query_params.get("hierarchy") or dim,
+                             "elements": _mdx.dimension_elements(dim, hier=request.query_params.get("hierarchy"))})
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
 
@@ -359,7 +360,64 @@ class TM1DimensionChildrenView(APIView):
         if not dim or not parent:
             return Response({"error": "dimension and parent are required"}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            return Response({"children": _mdx.dimension_children(dim, parent)})
+            return Response({"children": _mdx.dimension_children(dim, parent, hier=request.query_params.get("hierarchy"))})
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+class TM1DimensionHierarchiesView(APIView):
+    """GET ?dimension=X -> visible hierarchies (Leaves hidden); has_alternates flag."""
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        dim = request.query_params.get("dimension")
+        if not dim:
+            return Response({"error": "dimension is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            return Response(_mdx.list_hierarchies(dim))
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+class TM1SubsetsView(APIView):
+    """GET ?dimension=X[&hierarchy=H] -> public subsets (name + dynamic flag)."""
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        dim = request.query_params.get("dimension")
+        if not dim:
+            return Response({"error": "dimension is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            return Response({"subsets": _mdx.list_subsets(dim, hier=request.query_params.get("hierarchy"))})
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+class TM1SubsetMembersView(APIView):
+    """GET ?dimension=X&subset=S[&hierarchy=H&top=N] -> resolved members (capped)."""
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        dim = request.query_params.get("dimension")
+        subset = request.query_params.get("subset")
+        if not dim or not subset:
+            return Response({"error": "dimension and subset are required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            top = int(request.query_params.get("top") or 500)
+        except ValueError:
+            top = 500
+        try:
+            return Response(_mdx.subset_members(dim, subset, hier=request.query_params.get("hierarchy"), top=top))
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+class TM1DimensionAliasesView(APIView):
+    """GET ?dimension=X[&hierarchy=H] -> alias attribute names (display labels)."""
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        dim = request.query_params.get("dimension")
+        if not dim:
+            return Response({"error": "dimension is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            return Response({"dimension": dim, "aliases": _mdx.list_aliases(dim, hier=request.query_params.get("hierarchy"))})
         except Exception as e:
             return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
 
