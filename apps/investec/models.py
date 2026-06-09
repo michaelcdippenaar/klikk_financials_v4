@@ -214,6 +214,12 @@ class InvestecBankAccount(models.Model):
     kyc_compliant = models.BooleanField(default=False)
     profile_id = models.CharField(max_length=70, blank=True)
     profile_name = models.CharField(max_length=70, blank=True)
+    owner = models.CharField(
+        max_length=70,
+        blank=True,
+        db_index=True,
+        help_text="Person who owns this account (e.g. 'MC', 'Wife'). Used for personal-expenses grouping.",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

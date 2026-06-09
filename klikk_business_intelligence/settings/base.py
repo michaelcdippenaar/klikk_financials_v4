@@ -69,6 +69,7 @@ INSTALLED_APPS = [
     'apps.financial_investments',
     'apps.planning_analytics',
     'apps.ai_agent',
+    'apps.personal_expenses',  # Personal-expenses classification + reporting
 ]
 
 MIDDLEWARE = [
@@ -235,6 +236,15 @@ def _build_investec_profiles():
     return profiles
 
 INVESTEC_PROFILES = _build_investec_profiles()
+
+# Optional: map Investec profileId (or accountNumber) -> owner label for the
+# personal-expenses grouping (e.g. MC vs Wife). Env format:
+#   INVESTEC_OWNER_MAP="profileId1=MC,profileId2=Wife"   (or accountNumber=Owner)
+INVESTEC_OWNER_MAP = {
+    kv.split('=', 1)[0].strip(): kv.split('=', 1)[1].strip()
+    for kv in (os.environ.get('INVESTEC_OWNER_MAP') or '').split(',')
+    if '=' in kv
+}
 
 # TM1 / IBM Planning Analytics — default server (used when no TM1ServerConfig in DB).
 # Trail balance: cube Trail_Balance, source gl_src_trail_balance; TI import process cub.gl_src_trial_balance.import
