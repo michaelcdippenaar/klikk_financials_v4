@@ -154,7 +154,20 @@ def execute_mdx(mdx):
 
 
 def run_pivot(cube, rows, cols, filters=None, suppress=True):
-    return execute_mdx(build_mdx(cube, rows, cols, filters=filters, suppress=suppress))
+    result = execute_mdx(build_mdx(cube, rows, cols, filters=filters, suppress=suppress))
+    # Authoritative axis envelope (PAW-grade nested-axis Step 1): expose the
+    # ordered dimension names per axis + member tuples-as-arrays, so the frontend
+    # builds a true nested header instead of reconstructing/flattening tuples.
+    # Additive: the legacy `columns`/`rows` keys are retained for existing consumers.
+    result["colAxis"] = {
+        "dimensions": [d.get("dimension") for d in (cols or []) if d.get("dimension")],
+        "tuples": result.get("columns", []),
+    }
+    result["rowAxis"] = {
+        "dimensions": [d.get("dimension") for d in (rows or []) if d.get("dimension")],
+        "tuples": [g.get("members", []) for g in result.get("rows", [])],
+    }
+    return result
 
 
 def list_hierarchies(dim):
