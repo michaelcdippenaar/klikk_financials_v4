@@ -53,7 +53,13 @@ class XeroTrailBalanceManager(DataFrameManager):
                     AND ex.organisation_id = j.organisation_id
                     AND (ex.journal_type = '' OR ex.journal_type = j.journal_type)
                     AND (ex.journal_number IS NULL OR ex.journal_number = j.journal_number)
-                    AND (ex.journal_id = '' OR ex.journal_id = j.journal_id)
+                    -- Match the WHOLE journal, never a single line. Manual-journal line IDs are
+                    -- minted as "{journal_id}_{lineindex}", so strip any trailing _<N> from both
+                    -- sides before comparing. A bare journal-level id is unchanged by the strip and
+                    -- still matches every leg; this prevents half-excluding (orphaning) one leg,
+                    -- which otherwise unbalances the trial balance by the excluded leg's amount.
+                    AND (ex.journal_id = ''
+                         OR regexp_replace(ex.journal_id, '_[0-9]+$', '') = regexp_replace(j.journal_id, '_[0-9]+$', ''))
                     AND (ex.date IS NULL OR ex.date = j.date::date)
                     AND (ex.description = '' OR ex.description = j.description)
                     AND (ex.reference = '' OR ex.reference = j.reference)
