@@ -289,10 +289,10 @@ AI_AGENT_OPENAI_MODEL = os.environ.get('AI_AGENT_OPENAI_MODEL') or os.environ.ge
 AI_AGENT_MAX_TOKENS = int(os.environ.get('AI_AGENT_MAX_TOKENS', '2048'))
 AI_AGENT_MAX_TOOL_ROUNDS = int(os.environ.get('AI_AGENT_MAX_TOOL_ROUNDS', '8'))
 
-# Local sentence-transformers embeddings (all-MiniLM-L6-v2, 384-dim)
+# Local sentence-transformers embeddings (BAAI/bge-m3, 1024-dim)
 AI_AGENT_VOYAGE_API_KEY = os.environ.get('VOYAGE_API_KEY', '')
 AI_AGENT_VOYAGE_MODEL = os.environ.get('VOYAGE_MODEL', 'voyage-3-lite')
-AI_AGENT_EMBEDDING_DIM = int(os.environ.get('EMBEDDING_DIM', '384'))
+AI_AGENT_EMBEDDING_DIM = int(os.environ.get('EMBEDDING_DIM', '1024'))
 
 # RAG settings (vectors stored in default klikk_financials_v4 database)
 AI_AGENT_RAG_TOP_K = int(os.environ.get('RAG_TOP_K', '5'))

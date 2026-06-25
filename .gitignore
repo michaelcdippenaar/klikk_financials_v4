@@ -80,6 +80,9 @@ coverage.xml
 db_25112025.json
 *.sql
 database_dump.sql
+# ...but version-controlled RAG pgvector migration scripts are tracked.
+!apps/ai_agent/rag/sql/
+!apps/ai_agent/rag/sql/*.sql
 
 # Google Cloud credentials
 credentials/
