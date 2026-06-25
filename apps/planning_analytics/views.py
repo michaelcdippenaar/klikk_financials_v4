@@ -307,3 +307,62 @@ class TrackingMappingAddView(APIView):
 
         overall_success = all(a.get('success') for a in actions)
         return Response({'xero_name': xero_name, 'actions': actions, 'success': overall_success})
+
+
+# ============================================================================
+# TM1 slice-and-dice (PAW-free): metadata + MDX pivot query
+# ============================================================================
+from apps.planning_analytics.services import mdx_query as _mdx  # noqa: E402
+
+
+class TM1CubesView(APIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        try:
+            return Response({"cubes": _mdx.list_cubes()})
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+class TM1CubeDimensionsView(APIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        cube = request.query_params.get("cube")
+        if not cube:
+            return Response({"error": "cube is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            return Response({"cube": cube, "dimensions": _mdx.cube_dimensions(cube)})
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+class TM1DimensionElementsView(APIView):
+    permission_classes = [IsAuthenticated]
+    def get(self, request):
+        dim = request.query_params.get("dimension")
+        if not dim:
+            return Response({"error": "dimension is required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            return Response({"dimension": dim, "elements": _mdx.dimension_elements(dim)})
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+
+class TM1PivotQueryView(APIView):
+    """POST { cube, rows:[{dimension,members[]}], cols:[...], filters:{dim:member}, suppress }"""
+    permission_classes = [IsAuthenticated]
+    def post(self, request):
+        d = request.data
+        cube = d.get("cube")
+        rows = d.get("rows") or []
+        cols = d.get("cols") or []
+        if not cube or not rows or not cols:
+            return Response({"error": "cube, rows and cols are required"}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            result = _mdx.run_pivot(cube, rows, cols, filters=d.get("filters") or {},
+                                    suppress=bool(d.get("suppress", True)))
+            return Response(result)
+        except ValueError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)

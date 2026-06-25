@@ -386,7 +386,18 @@ def check_declared_dividends(
 
     def _fetch_ticker_info(symbol_str: str) -> dict:
         try:
-            return yf.Ticker(symbol_str).info or {}
+            t = yf.Ticker(symbol_str)
+            info = t.info or {}
+            # Capture most recent paid dividend (yfinance returns CENTS for .JO).
+            # Used to detect foreign dual-listings whose lastDividendValue is the
+            # primary-listing currency, not ZAR.
+            try:
+                divs = t.dividends
+                if divs is not None and len(divs):
+                    info["_recent_div_raw"] = float(divs.iloc[-1])
+            except Exception:
+                pass
+            return info
         except Exception as e:
             return {"_error": str(e)}
 
@@ -451,15 +462,25 @@ def check_declared_dividends(
             })
             continue
 
-        # Auto-detect dividend category based on exchange
-        # Non-.JO symbols are foreign; .JO symbols are domestic (regular by default)
-        # Special dividends must be manually classified — yfinance doesn't distinguish
-        dividend_category = "foreign" if not symbol_str.upper().endswith(".JO") else "regular"
+        # Auto-detect dividend category + correct currency.
+        # Non-.JO symbols are foreign; .JO are domestic ZAR by default. BUT some
+        # JSE dual-listed foreign companies (Richemont/CHF, BAT/GBP, Investec PLC/
+        # GBP, Reinet/EUR, Prosus/USD) report lastDividendValue in the PRIMARY-
+        # listing currency even though currency==ZAc. financialCurrency is NOT a
+        # safe signal (Naspers/Investec Ltd report USD/GBP yet pay ZAR). The robust
+        # discriminator is the dividend HISTORY (ZAR cents for .JO): if the incoming
+        # amount is far below the recent ZAR dividend, it is a foreign-currency
+        # figure mislabelled as ZAR — fall back to the ZAR history and flag foreign.
+        is_jse = symbol_str.upper().endswith(".JO")
+        dividend_category = "regular" if is_jse else "foreign"
         currency = info.get("currency", "")
-        if symbol_str.upper().endswith(".JO") and currency.upper() == "ZAC":
-            # yfinance's lastDividendValue is already Rand-denominated for
-            # JSE shares even when the ticker metadata reports ZAc.
+        if is_jse:
             currency = "ZAR"
+            recent_raw = info.get("_recent_div_raw")
+            recent_zar = (recent_raw / 100.0) if recent_raw else None
+            if recent_zar and amount and float(amount) < recent_zar * 0.5:
+                amount = round(recent_zar, 6)
+                dividend_category = "foreign"
 
         saved = False
         save_error = None

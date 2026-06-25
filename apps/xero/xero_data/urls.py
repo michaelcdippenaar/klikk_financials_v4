@@ -19,4 +19,13 @@ urlpatterns = [
     # Aged reports — list views (future UI)
     path('aged-payables/', views.XeroAgedPayablesListView.as_view(), name='aged_payables_list'),
     path('aged-receivables/', views.XeroAgedReceivablesListView.as_view(), name='aged_receivables_list'),
+
+    # Quotes — sync + list + detail
+    path('quotes/sync/', views.XeroSyncQuotesView.as_view(), name='sync_quotes'),
+    path('quotes/', views.XeroQuoteListView.as_view(), name='quotes_list'),
+    path('quotes/<str:quote_id>/', views.XeroQuoteDetailView.as_view(), name='quote_detail'),
+    # Invoices — sync + list + detail (parallel to XeroTransactionSource)
+    path('invoices/sync/', views.XeroSyncInvoicesView.as_view(), name='sync_invoices'),
+    path('invoices/', views.XeroInvoiceListView.as_view(), name='invoices_list'),
+    path('invoices/<str:invoice_id>/', views.XeroInvoiceDetailView.as_view(), name='invoice_detail'),
 ]

@@ -29,6 +29,7 @@ urlpatterns = [
     path('dividend-calendar/check/', views.dividend_calendar_check),
     path('dividend-calendar/update-category/', views.dividend_calendar_update_category),
     path('dividend-calendar/update-payment-date/', views.dividend_calendar_update_payment_date),
+    path('dividend-calendar/update-amount/', views.dividend_calendar_update_amount),
     path('dividend-forecast/adjust/', views.dividend_forecast_adjust),
     path('dividend-forecast/adjust-pending/', views.dividend_forecast_adjust_pending),
     path('dividend-forecast/verify/', views.dividend_forecast_verify),
