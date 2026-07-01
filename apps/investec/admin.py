@@ -71,9 +71,10 @@ class InvestecBankAccountAdmin(admin.ModelAdmin):
         'product_name',
         'kyc_compliant',
         'profile_name',
+        'owner',
         'created_at',
     ]
-    list_filter = ['kyc_compliant']
+    list_filter = ['kyc_compliant', 'owner']
     search_fields = ['account_id', 'account_number', 'account_name', 'reference_name']
     readonly_fields = ['created_at', 'updated_at']
     inlines = [InvestecBankTransactionInline]

@@ -214,6 +214,12 @@ class InvestecBankAccount(models.Model):
     kyc_compliant = models.BooleanField(default=False)
     profile_id = models.CharField(max_length=70, blank=True)
     profile_name = models.CharField(max_length=70, blank=True)
+    owner = models.CharField(
+        max_length=70,
+        blank=True,
+        db_index=True,
+        help_text="Person who owns this account (e.g. 'MC', 'Wife'). Used for personal-expenses grouping.",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -298,3 +304,63 @@ class InvestecBankSyncLog(models.Model):
     class Meta:
         verbose_name = 'Investec Bank Sync Log'
         verbose_name_plural = 'Investec Bank Sync Logs'
+
+
+class CashflowForecast(models.Model):
+    """Report 1 — Combined 13-Week Cash-Flow forecast rows (the forward obligation series).
+
+    One row per (run_id, scenario, week, forecast line). Written by
+    apps.investec.cashflow_forecast.generate_cashflow_forecast(), which REPLACES
+    all rows for a (run_id, scenario) on regenerate — fully idempotent.
+
+    NOTE: the table was created by migration 0027; the model class was missing
+    from models.py, leaving Django's model state diverged from migration history
+    (the next `makemigrations` would have generated a DELETE for this table and
+    its live rows). Re-added here field-for-field to reconverge state — no schema
+    change, no migration needed.
+    """
+
+    DIRECTION_IN = 'in'
+    DIRECTION_OUT = 'out'
+    DIRECTION_CHOICES = [(DIRECTION_IN, 'In'), (DIRECTION_OUT, 'Out')]
+
+    run_id = models.CharField(
+        max_length=64,
+        db_index=True,
+        help_text='Forecast run identifier. A regenerate replaces all rows for (run_id, scenario).',
+    )
+    run_date = models.DateField(
+        db_index=True,
+        help_text='Anchor date the run was generated from (week-1 start).',
+    )
+    scenario = models.CharField(max_length=32, db_index=True)
+    week_start_date = models.DateField(db_index=True)
+    week_index = models.IntegerField(help_text='1-based week number within the run (1..weeks).')
+    entity = models.CharField(max_length=40, blank=True)
+    capacity = models.CharField(max_length=16, blank=True)
+    category = models.CharField(max_length=32, db_index=True)
+    direction = models.CharField(max_length=4, choices=DIRECTION_CHOICES)
+    amount = models.DecimalField(max_digits=15, decimal_places=2)
+    is_internal = models.BooleanField(
+        default=False,
+        help_text='True for inter-company flows that ELIMINATE at group level (one economic unit).',
+    )
+    source = models.CharField(
+        max_length=64,
+        blank=True,
+        help_text="Provenance: 'prototype', 'rule:recurring', 'rule:vat', etc.",
+    )
+    note = models.CharField(max_length=255, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = 'Cashflow Forecast Row'
+        verbose_name_plural = 'Cashflow Forecast Rows'
+        ordering = ['run_id', 'scenario', 'week_index', 'direction', 'category']
+        indexes = [
+            models.Index(fields=['run_id', 'scenario', 'week_index'], name='investec_ca_run_id_3cef37_idx'),
+            models.Index(fields=['scenario', 'run_date'], name='investec_ca_scenari_b53673_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.run_id}/{self.scenario} W{self.week_index} {self.direction} {self.category} {self.amount}"

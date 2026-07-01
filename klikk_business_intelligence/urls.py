@@ -43,6 +43,7 @@ urlpatterns = [
     path('xero/validation/', include('apps.xero.xero_validation.urls')),
     path('api/investec/', include('apps.investec.urls')),
     path('api/financial-investments/', include('apps.financial_investments.urls')),
+    path('api/personal-expenses/', include('apps.personal_expenses.urls')),
 
     # Planning Analytics
     path('api/planning-analytics/', include('apps.planning_analytics.urls')),

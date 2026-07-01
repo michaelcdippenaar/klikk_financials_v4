@@ -1,0 +1,354 @@
+tag;category;type;transaction_type
+MOORE MANAGEMENT SER;Accountants;business;OnlineBankingPayments
+MOORE STELLENBOSCH;Auditors;business;OnlineBankingPayments
+ATLANTIC CLEANING SERVICES;Cleaning;business;OnlineBankingPayments
+APEX CONSTRUCTION;Construction;business;OnlineBankingPayments
+CHARITY;Domestic Salaries;business;OnlineBankingPayments
+GEORGE;Domestic Salaries;business;OnlineBankingPayments
+JOICE;Domestic Salaries;business;OnlineBankingPayments
+JOICE BULELWA;Domestic Salaries;business;OnlineBankingPayments
+JOICE NANNY;Domestic Salaries;business;OnlineBankingPayments
+TANJA;Domestic Salaries;business;OnlineBankingPayments
+ELECTROCO;Electricity;business;OnlineBankingPayments
+SUN POWER PLANET;Electricity;business;OnlineBankingPayments
+SLAVE DISTRIBUTORS;Events;business;OnlineBankingPayments
+REMOTE ENTRY SYSTEMS;Gates;business;OnlineBankingPayments
+FLANDRIA;Hardware_Store;business;OnlineBankingPayments
+INVESTECPB 363177001;Home Loan;business;DebitOrders
+INVESTECPB 363177002;Home Loan;business;DebitOrders
+INVESTECPB 363177003;Home Loan;business;DebitOrders
+RAWSON;Home Rental;business;OnlineBankingPayments
+TRIGGER BOX;Hosting;business;OnlineBankingPayments
+HEROTEL;ISP;business;DebitOrders
+VOX INTERNET;ISP;business;OnlineBankingPayments
+VOX TELECOMMUNICATIONS;ISP;business;OnlineBankingPayments
+FASTER PAYMENT FEE;Interest;business;OnlineBankingPayments
+AIRCON AND REFRIGERATION;Kitchen Appliances;business;OnlineBankingPayments
+JP MULLER;Legal;business;OnlineBankingPayments
+BRENDAN BESPROEING;Maintenance;business;OnlineBankingPayments
+CW PLUMBERS;Maintenance;business;OnlineBankingPayments
+JOSEPH ROSS;Maintenance;business;OnlineBankingPayments
+POOL NURSE;Maintenance;business;OnlineBankingPayments
+STEVEN ISAAC;Maintenance;business;OnlineBankingPayments
+1 BOSCHENDAL MUNICIPALITY;Municipal Cost;business;OnlineBankingPayments
+13 IRENE PARK MUNICIPALITY;Municipal Cost;business;OnlineBankingPayments
+18 DR MALAN MUNICIPALITY;Municipal Cost;business;OnlineBankingPayments
+18 IRENE PARK MUNICIPALITY;Municipal Cost;business;OnlineBankingPayments
+23IRENE PARK MUNICIPALITY;Municipal Cost;business;OnlineBankingPayments
+4 OTTERKUIL MUNICIPALITY;Municipal Cost;business;OnlineBankingPayments
+6 IRENE PARK MUNICIPALITY;Municipal Cost;business;OnlineBankingPayments
+MUNICIPALITY - 1 BOSCH;Municipal Cost;business;OnlineBankingPayments
+MUNICIPALITY - 13 IRENE;Municipal Cost;business;OnlineBankingPayments
+MUNICIPALITY - 18 DR MALAN;Municipal Cost;business;OnlineBankingPayments
+MUNICIPALITY - 18 IRENE;Municipal Cost;business;OnlineBankingPayments
+MUNICIPALITY - 23 IRENE;Municipal Cost;business;OnlineBankingPayments
+MUNICIPALITY - 6 IRENE;Municipal Cost;business;OnlineBankingPayments
+STELLENBOSCH MUN;Municipal Cost;business;OnlineBankingPayments
+STELLENBOSCH MUN - OTTERKUIL;Municipal Cost;business;OnlineBankingPayments
+WEBSTEL PROJECTS;Paving;business;OnlineBankingPayments
+CALTEX;Petrol Station;business;CardPurchases
+CLTX;Petrol Station;business;CardPurchases
+ENGEN;Petrol Station;business;CardPurchases
+FRESHSTOP;Petrol Station;business;CardPurchases
+SHELL;Petrol Station;business;CardPurchases
+TOTAL;Petrol Station;business;CardPurchases
+DRAINMEN;Plumbing;business;OnlineBankingPayments
+BATHROOM ROOM 4 U;Plumbing Supplies;business;OnlineBankingPayments
+AMSECURITY;Security;business;DebitOrders
+SPIKES AND RAISES;Security;business;OnlineBankingPayments
+MOORE TAX SERVICES;Tax Service;business;OnlineBankingPayments
+MSVA TAX;Tax Service;business;OnlineBankingPayments
+1 B-E-D ANDREW;Rental Income;income;Deposits
+1 B-EN-D ANDREW;Rental Income;income;Deposits
+1 BD FLAT DALEEN;Rental Income;income;Deposits
+1 BD ROSS;Rental Income;income;Deposits
+1 BED ANDREW;Rental Income;income;Deposits
+1 BOSCH-EN-DAL ELMA;Rental Income;income;Deposits
+1 BOSCHDEL REW;Rental Income;income;Deposits
+1 BOSH EN DAL;Rental Income;income;Deposits
+10011924075;Rental Income;income;Deposits
+13 IP ZAHN EKKERD;Rental Income;income;Deposits
+13 IRENEPARK I DE WET;Rental Income;income;Deposits
+13IRENEFLAT2 DEPOSIT;Rental Income;income;Deposits
+13IRENEFLAT2 NICCA;Rental Income;income;Deposits
+13IRENEFLAT2 RENT;Rental Income;income;Deposits
+13IRENEHOUSE;Rental Income;income;Deposits
+13IRP2023;Rental Income;income;Deposits
+18 DR MALAN AMY;Rental Income;income;Deposits
+18 DR MALAN TIAAN;Rental Income;income;Deposits
+18 DRMALAN RD REECEFAIRWEATHER;Rental Income;income;Deposits
+18 IRENE PARK RENT -;Rental Income;income;Deposits
+18 IRENE PARK RENT - HARRY ODE;Rental Income;income;Deposits
+18 IRENE PARK RENT - NICOL HAN;Rental Income;income;Deposits
+18 IRP TEN2 WARD;Rental Income;income;Deposits
+18 IRP TEN3;Rental Income;income;Deposits
+18 IRP TEN4 TUCKER;Rental Income;income;Deposits
+18IRENEPARK DEPOSIT;Rental Income;income;Deposits
+1BD ROSS;Rental Income;income;Deposits
+1BOSCH-EN-DAL DEBORAH;Rental Income;income;Deposits
+1BOSCHDEP;Rental Income;income;Deposits
+1BOSFLATDEP;Rental Income;income;Deposits
+23 IP ANDREW;Rental Income;income;Deposits
+23 IP ANDREW INTRNET;Rental Income;income;Deposits
+23 IP ANDREW SEALRLE;Rental Income;income;Deposits
+23 IP REMKO;Rental Income;income;Deposits
+23 IP REW;Rental Income;income;Deposits
+23 IRENE - EDWARDS;Rental Income;income;Deposits
+23 IRENEPARK;Rental Income;income;Deposits
+23 IREPAR ANDREW MAY;Rental Income;income;Deposits
+23IP WESLEY;Rental Income;income;Deposits
+6 IP LIZEL;Rental Income;income;Deposits
+6 IP LIZEL DEPOSIT;Rental Income;income;Deposits
+6 IP NTANDO;Rental Income;income;Deposits
+6 IRENEPARK_THOM;Rental Income;income;Deposits
+6IP THOM;Rental Income;income;Deposits
+6IRENE WAY C BURNELL;Rental Income;income;Deposits
+6IRENEHOUSE CHELS;Rental Income;income;Deposits
+6IRENEPARK BURNELL;Rental Income;income;Deposits
+6IRP LEHMAN MICHAEL;Rental Income;income;Deposits
+6IRP ROSS;Rental Income;income;Deposits
+6IRP TEN2;Rental Income;income;Deposits
+7 MARINA MUNISIPALE REK;Rental Income;income;Deposits
+A ALANT 13 IRENE REN;Rental Income;income;Deposits
+ABSA BANK 10011924075;Rental Income;income;Deposits
+ABSA BANK 18 IRENE PARK DE WET;Rental Income;income;Deposits
+ABSA BANK 18 IRP TEN1 BARRETT;Rental Income;income;Deposits
+ABSA BANK 18 IRP TEN3;Rental Income;income;Deposits
+ABSA BANK 1BOSCH-EN-DAL;Rental Income;income;Deposits
+ABSA BANK 1BOSCHDEP JEANRI;Rental Income;income;Deposits
+ABSA BANK 1BOSCHDESHUURJEANRI;Rental Income;income;Deposits
+ABSA BANK BARRETT IRP TEN1;Rental Income;income;Deposits
+ABSA BANK DEC RENT VAN RENSBUR;Rental Income;income;Deposits
+ABSA BANK DIRK UYS 13 IRENE P;Rental Income;income;Deposits
+ABSA BANK FREDERIK;Rental Income;income;Deposits
+ABSA BANK GERBER + 18DR.LOFT;Rental Income;income;Deposits
+ABSA BANK JEANRI1BOSCH-EN-DAL;Rental Income;income;Deposits
+ABSA BANK MC DIPPENAAR BDY EDM;Rental Income;income;Deposits
+ABSA BANK NADIA CRONJE;Rental Income;income;Deposits
+ABSA BANK NIC HAY;Rental Income;income;Deposits
+ABSA BANK NIEKUS FAURIE RENT;Rental Income;income;Deposits
+ABSA BANK PATTON COLLECTION;Rental Income;income;Deposits
+ABSA BANK RYNOIRENEPARK18;Rental Income;income;Deposits
+B LUNDT;Rental Income;income;Deposits
+B LUNDT -13 IRENE FL;Rental Income;income;Deposits
+B LUNDT DES. HUUR;Rental Income;income;Deposits
+B MORSE;Rental Income;income;Deposits
+BEN PAMA DEPOSIT 23 IRENE PARK;Rental Income;income;Deposits
+BEN PAMA RENT 23 IRENE PARK;Rental Income;income;Deposits
+BEN PAMA RENT OCT23 IRENE PARK;Rental Income;income;Deposits
+BEN PAMA WIFI 23 IRENE PARK;Rental Income;income;Deposits
+BRIGITTA DEPOSIT;Rental Income;income;Deposits
+BRIGITTA RENT;Rental Income;income;Deposits
+BURNELL REF 6IRP;Rental Income;income;Deposits
+C LELLYETT DEPOSIT + DEC;Rental Income;income;Deposits
+CAPITEC 13 IP ZAHN EKKERD;Rental Income;income;Deposits
+CAPITEC 1BOSCHDEP;Rental Income;income;Deposits
+CAPITEC 23 IP INTERNET ZAHN;Rental Income;income;Deposits
+CAPITEC 23 IP ZAHN;Rental Income;income;Deposits
+CAPITEC 23 IP ZAHN EKKERD;Rental Income;income;Deposits
+CAPITEC A ALANT;Rental Income;income;Deposits
+CAPITEC I VISAGIE;Rental Income;income;Deposits
+CAPITEC INV 0306;Rental Income;income;Deposits
+CAPITEC NXT OHANA SOUND;Rental Income;income;Deposits
+CAPITEC T VISAGIE;Rental Income;income;Deposits
+CAPITEC T.TUCKERDEPOSIT;Rental Income;income;Deposits
+CAPITEC VORTEX OPEN SOURCE;Rental Income;income;Deposits
+CW LAMPRECHT 1 BOSCH;Rental Income;income;Deposits
+D ROSS 6 IRENE PARK;Rental Income;income;Deposits
+DEBORAH 1BOSCH-EN-DAL;Rental Income;income;Deposits
+DEP13IRENE2022;Rental Income;income;Deposits
+DEP13IRENE2022 (RYAN L);Rental Income;income;Deposits
+DIRK UYS 13 IRENE P;Rental Income;income;Deposits
+DIRK VERDOES ATT INC;Rental Income;income;Deposits
+ELECTRICITY BALANCE;Rental Income;income;Deposits
+EWILKES;Rental Income;income;Deposits
+FX62959216;Rental Income;income;Deposits
+FX62999232;Rental Income;income;Deposits
+FX63050302;Rental Income;income;Deposits
+G. WALSH IRENE RD;Rental Income;income;Deposits
+GEORGIA PATTON RENT;Rental Income;income;Deposits
+GERBER + 18DR.LOFT;Rental Income;income;Deposits
+GUSTAV ALLMANN RENT;Rental Income;income;Deposits
+HANNAH 13 IRENEHOUSE;Rental Income;income;Deposits
+HANNAHRENT 13 IRENEHOUSE;Rental Income;income;Deposits
+I VISAGIE;Rental Income;income;Deposits
+I VISAGIE RENTAL;Rental Income;income;Deposits
+IN0287 6 IRENE PARK;Rental Income;income;Deposits
+INV 0298 6IRP BURNEL;Rental Income;income;Deposits
+INV 0314 REF 6IRP;Rental Income;income;Deposits
+INV0324 REF 6IRP;Rental Income;income;Deposits
+INV0336;Rental Income;income;Deposits
+ISLSAN1812775;Rental Income;income;Deposits
+ISLSAN2057677;Rental Income;income;Deposits
+ISLSAN2113082;Rental Income;income;Deposits
+JACO HUUR AUGUST;Rental Income;income;Deposits
+JACO HUUR JULY;Rental Income;income;Deposits
+JACO HUUR JUNE;Rental Income;income;Deposits
+JACO HUUR MAART;Rental Income;income;Deposits
+JACO HUUR MEI;Rental Income;income;Deposits
+JACO HUUR NOVEMBER;Rental Income;income;Deposits
+JACO OCTOBER;Rental Income;income;Deposits
+KAYLA RENT;Rental Income;income;Deposits
+KLIKK (PTY) LTD 363177001;Rental Income;income;Deposits
+KLIKK (PTY) LTD 363177002;Rental Income;income;Deposits
+KLIKK (PTY) LTD 363177003;Rental Income;income;Deposits
+KYLIE BOSCH EN DAL D;Rental Income;income;Deposits
+KYLIE BOSCH EN DAL DEPOSIT;Rental Income;income;Deposits
+LEER SKULD;Rental Income;income;Deposits
+LELLYETT;Rental Income;income;Deposits
+LIANNDI AUGUST;Rental Income;income;Deposits
+LIANNDI JUNE;Rental Income;income;Deposits
+LIANNDI MAY;Rental Income;income;Deposits
+LIANNDI RENT JULY;Rental Income;income;Deposits
+LIANNDI TENANT;Rental Income;income;Deposits
+LUAN SWART;Rental Income;income;Deposits
+LUAN SWART 18 DRM FLAT;Rental Income;income;Deposits
+M DU PLESSIS 1 BOSCH;Rental Income;income;Deposits
+MATT MORTON;Rental Income;income;Deposits
+MAYMARIEVDHEEVER;Rental Income;income;Deposits
+MC DIPPENAAR BDY EDM;Rental Income;income;Deposits
+MICHAEL LEHMAN DEPOS;Rental Income;income;Deposits
+MLD TRUST 10013017883;Rental Income;income;Deposits
+MLD TRUST 1100591058500;Rental Income;income;Deposits
+MR MC DIPPENAAR 10011910139;Rental Income;income;Deposits
+N MARAIS 1 BOSCH;Rental Income;income;Deposits
+N MARAIS DEPOSIT 1 BOSCH;Rental Income;income;Deposits
+NADIA CRONJE;Rental Income;income;Deposits
+OUTSURANCE OT78502770 ID2518;Rental Income;income;Deposits
+OUTSURANCESU335457824 X12582;Rental Income;income;Deposits
+OUTSURANCESU336410178 X22234;Rental Income;income;Deposits
+OUTSURANCESU337793742 X42068;Rental Income;income;Deposits
+PSGTP0002303516ULCU1;Rental Income;income;Deposits
+R MOTTA MARQUES 18 D;Rental Income;income;Deposits
+R MOTTA MARQUES 18 DR MALAN;Rental Income;income;Deposits
+R MOTTA MARQUES JULY 18DRMALAN;Rental Income;income;Deposits
+REMOTE PAYMENT-KAYLA;Rental Income;income;Deposits
+RENT;Rental Income;income;Deposits
+RENT JUNE;Rental Income;income;Deposits
+RENT MAY;Rental Income;income;Deposits
+ROXANNE MOTTA MARQUE;Rental Income;income;Deposits
+ROXANNE MOTTA MARQUES;Rental Income;income;Deposits
+ROXANNE MOTTA MARQUES 18 DR MA;Rental Income;income;Deposits
+ROXANNE MOTTA MARQUES DEC;Rental Income;income;Deposits
+RYAN L;Rental Income;income;Deposits
+RYAN LIEBENBERG;Rental Income;income;Deposits
+SANTAM 10544492/SSV;Rental Income;income;Deposits
+SARB DIVID;Rental Income;income;Deposits
+STEFANIE;Rental Income;income;Deposits
+STRAUSS DALY;Rental Income;income;Deposits
+TENANT 1 - 18 IRENE;Rental Income;income;Deposits
+TIFF LELLYETT;Rental Income;income;Deposits
+TIFF OUTSTANDING AMOUNT;Rental Income;income;Deposits
+TIFFY LELLYETT;Rental Income;income;Deposits
+VAN DEN HEEVER M;Rental Income;income;Deposits
+AFRICAMPS;Accomedation;personal;OnlineBankingPayments
+AFRICAMPS ROUTES;Accomedation;personal;OnlineBankingPayments
+JUANIKA STORMS VLEI;Accomedation;personal;OnlineBankingPayments
+OENA GROUP;Accomedation;personal;OnlineBankingPayments
+OENA GROUP - VORTEX;Accomedation;personal;OnlineBankingPayments
+STORMSVLEI RIVERSIDE COTTAGES;Accomedation;personal;OnlineBankingPayments
+WATERVAL COUNTRY LODGE;Accomedation;personal;OnlineBankingPayments
+BEATPORT;Audio Video Services;personal;CardPurchases
+DEEZER;Audio Video Services;personal;CardPurchases
+DISNEY;Audio Video Services;personal;CardPurchases
+GAIA;Audio Video Services;personal;CardPurchases
+NETFLIX;Audio Video Services;personal;CardPurchases
+TIDAL;Audio Video Services;personal;CardPurchases
+HERBY HILL SUPPLIES;Clothes;personal;OnlineBankingPayments
+CHECKERS;Groceries;personal;CardPurchases
+EIKEBOOM SLAGTE;Groceries;personal;CardPurchases
+FROZEN FOR YOU;Groceries;personal;CardPurchases
+LIQUORLAND;Groceries;personal;CardPurchases
+PEREGRINE;Groceries;personal;CardPurchases
+SPAR;Groceries;personal;CardPurchases
+STILBAAI SLAGHUISSTILL;Groceries;personal;CardPurchases
+SUPERSPAR;Groceries;personal;CardPurchases
+TOPS;Groceries;personal;CardPurchases
+WOOLWORTHS;Groceries;personal;CardPurchases
+OUTSURANCE;Insurance;personal;DebitOrders
+PSGKONS;Insurance;personal;DebitOrders
+SANTAM;Insurance;personal;DebitOrders
+NONNA;Kids;personal;OnlineBankingPayments
+APTEEK;Medical;personal;CardPurchases
+APTEEK;Medical;personal;OnlineBankingPayments
+DERMASTORE;Medical;personal;CardPurchases
+DIE BOORD PHARMACY;Medical;personal;CardPurchases
+DISC PREM;Medical;personal;CardPurchases
+DISC PREM;Medical;personal;DebitOrders
+DR A VERMEULEN;Medical;personal;OnlineBankingPayments
+DR ANDRE DE WAAL;Medical;personal;OnlineBankingPayments
+DR BOSMAN;Medical;personal;CardPurchases
+DR BOSMAN;Medical;personal;OnlineBankingPayments
+DR EDWARD JOHNSON;Medical;personal;OnlineBankingPayments
+SKIN RENEWAL;Medical;personal;CardPurchases
+STELKOR;Medical;personal;CardPurchases
+STELKOR;Medical;personal;OnlineBankingPayments
+SUNSHINE PET RESORT;PETS;personal;OnlineBankingPayments
+CHANTELLE SCOTT;People;personal;OnlineBankingPayments
+DENE BEACON ISLE;People;personal;OnlineBankingPayments
+FREDERIK BDAY;People;personal;OnlineBankingPayments
+JOE BOTHA;People;personal;OnlineBankingPayments
+NATALY MUSROOM;People;personal;OnlineBankingPayments
+QUITIN SNYMAN;People;personal;OnlineBankingPayments
+RG RABIE;People;personal;OnlineBankingPayments
+ROXY POWERS;People;personal;OnlineBankingPayments
+ABOUT CATS N DOGS;Pets;personal;CardPurchases
+HAPPY BOUND KENNELS;Pets;personal;OnlineBankingPayments
+ZIMZALA;Pets;personal;CardPurchases
+ZIMZALA;Pets;personal;OnlineBankingPayments
+ETHNOTRADER;Psychedelics;personal;OnlineBankingPayments
+BALBOA;Resturant;personal;CardPurchases
+BOSSA;Resturant;personal;CardPurchases
+COL CACCHIO;Resturant;personal;CardPurchases
+DE AKKERS;Resturant;personal;CardPurchases
+HUSSAR GRILL;Resturant;personal;CardPurchases
+JOHN DORY;Resturant;personal;CardPurchases
+MUGG;Resturant;personal;CardPurchases
+NATURE FARMACY;Resturant;personal;CardPurchases
+OCEAN BASKET;Resturant;personal;CardPurchases
+PANAROTTI;Resturant;personal;CardPurchases
+PUNJAB;Resturant;personal;CardPurchases
+QUAY 4 RESTAURANT;Resturant;personal;CardPurchases
+SPUR;Resturant;personal;CardPurchases
+TOKARA;Resturant;personal;CardPurchases
+ANAT;Takeaway;personal;CardPurchases
+ANDICCIO;Takeaway;personal;CardPurchases
+BOLT FOOD;Takeaway;personal;CardPurchases
+BURGER BROTHERS;Takeaway;personal;CardPurchases
+BURGER KING;Takeaway;personal;CardPurchases
+CHESANYAMA;Takeaway;personal;CardPurchases
+CHICKEN LICKEN;Takeaway;personal;CardPurchases
+CHILLI BITE TRADING;Takeaway;personal;CardPurchases
+DE WAREN5;Takeaway;personal;CardPurchases
+DEBONAIRS;Takeaway;personal;CardPurchases
+DOMINO;Takeaway;personal;CardPurchases
+FISHAWAY;Takeaway;personal;CardPurchases
+GALITO;Takeaway;personal;CardPurchases
+HUNGRY LION;Takeaway;personal;CardPurchases
+KAUAI;Takeaway;personal;CardPurchases
+KFC;Takeaway;personal;CardPurchases
+MCDONALD;Takeaway;personal;CardPurchases
+MR D;Takeaway;personal;CardPurchases
+NACIONAL FISHERIES;Takeaway;personal;CardPurchases
+NANDO;Takeaway;personal;CardPurchases
+NANDOS;Takeaway;personal;CardPurchases
+PEDROS;Takeaway;personal;CardPurchases
+PIZZA HUT;Takeaway;personal;CardPurchases
+PUNJAB;Takeaway;personal;CardPurchases
+ROCOMAMA;Takeaway;personal;CardPurchases
+ROMANS PIZ;Takeaway;personal;CardPurchases
+SIMPLY ASIA;Takeaway;personal;CardPurchases
+STEERS;Takeaway;personal;CardPurchases
+SUBWAY;Takeaway;personal;CardPurchases
+UBER EATS;Takeaway;personal;CardPurchases
+VIDA E;Takeaway;personal;CardPurchases
+WIMPY;Takeaway;personal;CardPurchases
+ALEWYN;;review;OnlineBankingPayments
+CLAUD;;review;OnlineBankingPayments
+HIRSCHS;;review;OnlineBankingPayments
+PC ADDICT;;review;OnlineBankingPayments
+PINPOINT PLUMBING;;review;OnlineBankingPayments
+RAYNARD SNYDERS;;review;OnlineBankingPayments
+UMOJA ORGANICS;;review;OnlineBankingPayments
+KLIKK (PTY) LTD 10011924075;Bank Account;transfer;OnlineBankingPayments
+MLD TRUST 10013017883;Bank Account;transfer;OnlineBankingPayments

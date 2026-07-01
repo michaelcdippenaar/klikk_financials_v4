@@ -779,3 +779,13 @@ TOOL_FUNCTIONS = {
     "build_dividend_yield_chart": build_dividend_yield_chart,
     "build_transaction_summary": build_transaction_summary,
 }
+
+# ---------------------------------------------------------------------------
+#  Report Pack — Report 1 Combined 13-Week Cash-Flow (build_weekly_cash_refresh).
+#  Imported at the bottom so report_pack.cash_flow can import _widget from this
+#  module without a circular import (everything it needs is defined above).
+# ---------------------------------------------------------------------------
+from apps.ai_agent.skills.report_pack import cash_flow as _cash_flow  # noqa: E402
+
+TOOL_SCHEMAS.append(_cash_flow.TOOL_SCHEMA)
+TOOL_FUNCTIONS["build_weekly_cash_refresh"] = _cash_flow.build_cash_flow_report

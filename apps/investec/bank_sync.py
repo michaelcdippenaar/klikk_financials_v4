@@ -58,8 +58,9 @@ def _sync_single_profile(
     accounts_data = [a for a in accounts_data if a["accountId"] not in seen_ids and not seen_ids.add(a["accountId"])]
 
     if not dry_run:
+        owner_map = getattr(settings, "INVESTEC_OWNER_MAP", {})
         for acc in accounts_data:
-            InvestecBankAccount.objects.update_or_create(
+            obj, _created = InvestecBankAccount.objects.update_or_create(
                 account_id=acc["accountId"],
                 defaults={
                     "account_number": acc.get("accountNumber") or "",
@@ -71,6 +72,14 @@ def _sync_single_profile(
                     "profile_name": (acc.get("profileName") or "")[:70],
                 },
             )
+            # Non-destructive owner labelling for personal-expenses grouping:
+            # only fill when blank so a hand-corrected owner is never overwritten.
+            if owner_map and not obj.owner:
+                resolved = (owner_map.get(acc.get("profileId") or "")
+                            or owner_map.get(acc.get("accountNumber") or ""))
+                if resolved:
+                    obj.owner = resolved[:70]
+                    obj.save(update_fields=["owner"])
 
     total_created = 0
     total_updated = 0
