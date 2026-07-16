@@ -6,6 +6,7 @@ Requires Xero OAuth scope: accounting.attachments or accounting.attachments.read
 Supported transaction types: Invoice, CreditNote, BankTransaction.
 """
 import logging
+import os
 from django.core.files.base import ContentFile
 
 from apps.xero.xero_core.models import XeroTenant
@@ -67,6 +68,16 @@ def _content_to_bytes(content):
     if isinstance(content, bytes):
         return content
     if isinstance(content, str):
+        # xero-python saves binary responses to a temp file and returns its PATH as a str;
+        # read (and clean up) the temp file instead of treating the path as content
+        if os.path.isfile(content):
+            with open(content, 'rb') as fh:
+                data = fh.read()
+            try:
+                os.remove(content)
+            except OSError:
+                pass
+            return data
         # Binary content (e.g. PDF) may be returned as str; latin-1 round-trips any byte
         return content.encode('latin-1')
     if hasattr(content, 'read'):
