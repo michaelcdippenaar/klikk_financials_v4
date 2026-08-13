@@ -21,4 +21,6 @@ urlpatterns = [
     path('bank/reports/costs/', views.bank_cost_report_view, name='bank_cost_report'),
     path('bank/sync-status/', views.bank_sync_status_view, name='bank_sync_status'),
     path('bank/sync/', views.bank_sync_trigger_view, name='bank_sync_trigger'),
+    path('bank/beneficiaries/', views.bank_beneficiary_list_view, name='bank_beneficiary_list'),
+    path('bank/beneficiaries/sync/', views.bank_beneficiary_sync_view, name='bank_beneficiary_sync'),
 ]

@@ -15,9 +15,9 @@ from django.http import HttpResponse
 from django.utils.dateparse import parse_date
 from django.utils import timezone
 from decimal import Decimal, InvalidOperation
-from .models import InvestecJseTransaction, InvestecJsePortfolio, InvestecJseShareNameMapping, InvestecJseShareMonthlyPerformance, InvestecBankAccount, InvestecBankTransaction, InvestecBankSyncLog
+from .models import InvestecJseTransaction, InvestecJsePortfolio, InvestecJseShareNameMapping, InvestecJseShareMonthlyPerformance, InvestecBankAccount, InvestecBankTransaction, InvestecBankSyncLog, InvestecBeneficiary
 from .serializers import InvestecJseTransactionSerializer, InvestecJsePortfolioSerializer, InvestecJseShareNameMappingSerializer
-from .bank_sync import run_investec_bank_sync
+from .bank_sync import run_investec_bank_sync, run_investec_beneficiary_sync
 
 
 
@@ -2360,3 +2360,77 @@ def bank_sync_trigger_view(request):
         'from_date': from_date.isoformat(),
         'to_date': to_date.isoformat(),
     })
+
+
+@api_view(['GET'])
+def bank_beneficiary_list_view(request):
+    """
+    List Investec beneficiaries copied into the database.
+    Optional filters: ?q=<name/account fragment>, ?active=true|false, ?limit=, ?offset=.
+    """
+    qs = InvestecBeneficiary.objects.all()
+    active = (request.GET.get('active') or '').strip().lower()
+    if active in ('true', '1', 'yes'):
+        qs = qs.filter(is_active=True)
+    elif active in ('false', '0', 'no'):
+        qs = qs.filter(is_active=False)
+    q = (request.GET.get('q') or '').strip()
+    if q:
+        from django.db.models import Q
+        qs = qs.filter(
+            Q(name__icontains=q) | Q(beneficiary_name__icontains=q)
+            | Q(account_number__icontains=q) | Q(bank_name__icontains=q)
+            | Q(reference_name__icontains=q)
+        )
+    try:
+        limit = min(max(int(request.GET.get('limit', 200)), 1), 1000)
+    except (TypeError, ValueError):
+        limit = 200
+    try:
+        offset = max(int(request.GET.get('offset', 0)), 0)
+    except (TypeError, ValueError):
+        offset = 0
+    total = qs.count()
+    rows = [
+        {
+            'id': b.id,
+            'beneficiary_id': b.beneficiary_id,
+            'name': b.name or b.beneficiary_name,
+            'beneficiary_name': b.beneficiary_name,
+            'bank_name': b.bank_name,
+            'account_number': b.account_number,
+            'branch_code': b.branch_code,
+            'reference_name': b.reference_name,
+            'last_payment_amount': str(b.last_payment_amount) if b.last_payment_amount is not None else None,
+            'last_payment_date': b.last_payment_date.isoformat() if b.last_payment_date else None,
+            'faster_payment_allowed': b.faster_payment_allowed,
+            'cell_no': b.cell_no,
+            'email_address': b.email_address,
+            'is_active': b.is_active,
+            'source_profile': b.source_profile,
+            'profile_id': b.profile_id,
+            'last_seen_at': b.last_seen_at.isoformat() if b.last_seen_at else None,
+        }
+        for b in qs.order_by('name', 'beneficiary_name')[offset:offset + limit]
+    ]
+    return Response({'count': total, 'results': rows})
+
+
+@api_view(['POST'])
+def bank_beneficiary_sync_view(request):
+    """
+    Trigger beneficiary sync from the Investec API (read-only against Investec).
+    Upserts all beneficiaries for every configured credential profile.
+    """
+    result = run_investec_beneficiary_sync(dry_run=False)
+    if result.get('error'):
+        return Response({'error': result['error']}, status=status.HTTP_400_BAD_REQUEST)
+    payload = {
+        'created': result['created'],
+        'updated': result['updated'],
+        'deactivated': result['deactivated'],
+        'profiles_synced': result.get('profiles_synced', 0),
+    }
+    if result.get('errors'):
+        payload['errors'] = result['errors']
+    return Response(payload)
