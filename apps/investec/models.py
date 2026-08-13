@@ -306,6 +306,62 @@ class InvestecBankSyncLog(models.Model):
         verbose_name_plural = 'Investec Bank Sync Logs'
 
 
+class InvestecBeneficiary(models.Model):
+    """
+    Payment beneficiary on an Investec profile. Synced from GET /za/pb/v1/accounts/beneficiaries.
+
+    Profile-scoped, NOT account-scoped: the API returns all beneficiaries for the
+    credential profile with no account linkage, so there is deliberately no FK to
+    InvestecBankAccount (DATABASE_SCHEMA.md's earlier draft had one — that was wrong).
+    Read-only mirror of what was captured in Investec Online; this system never
+    creates or pays beneficiaries.
+    """
+
+    # Which credential profile this row came from (client_id prefix label, e.g. 'profile-1').
+    # Distinct from profile_id, which is Investec's own profile identifier off the payload.
+    source_profile = models.CharField(max_length=40, blank=True, db_index=True)
+    profile_id = models.CharField(max_length=70, blank=True, db_index=True)
+
+    beneficiary_id = models.CharField(max_length=100, db_index=True)
+    name = models.CharField(max_length=200, blank=True)
+    beneficiary_name = models.CharField(max_length=200, blank=True)
+    bank_name = models.CharField(max_length=200, blank=True)
+    account_number = models.CharField(max_length=50, blank=True)
+    branch_code = models.CharField(max_length=20, blank=True)
+    reference_account_number = models.CharField(max_length=50, blank=True)
+    reference_name = models.CharField(max_length=200, blank=True)
+    category_id = models.CharField(max_length=50, blank=True)
+    faster_payment_allowed = models.BooleanField(null=True, blank=True)
+    last_payment_amount = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    last_payment_date = models.DateField(null=True, blank=True)
+    cell_no = models.CharField(max_length=40, blank=True)
+    email_address = models.CharField(max_length=254, blank=True)
+    collection = models.JSONField(null=True, blank=True, help_text="Raw API payload for this beneficiary.")
+
+    # Rows the API stops returning are marked inactive, never deleted, so historic
+    # transaction attributions can't dangle.
+    is_active = models.BooleanField(default=True, db_index=True)
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name', 'beneficiary_name']
+        verbose_name = 'Investec Beneficiary'
+        verbose_name_plural = 'Investec Beneficiaries'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['source_profile', 'beneficiary_id'],
+                name='investec_beneficiary_profile_benid',
+            ),
+        ]
+
+    def __str__(self):
+        label = self.name or self.beneficiary_name or self.beneficiary_id
+        return f"{label} – {self.bank_name} {self.account_number}"
+
+
 class CashflowForecast(models.Model):
     """Report 1 — Combined 13-Week Cash-Flow forecast rows (the forward obligation series).
 

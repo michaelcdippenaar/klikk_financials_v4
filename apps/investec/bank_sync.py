@@ -14,12 +14,19 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.investec.bank_api import (
+    beneficiary_to_model_data,
     fetch_accounts,
     fetch_all_transactions,
+    fetch_beneficiaries,
     get_access_token,
     transaction_to_model_data,
 )
-from apps.investec.models import InvestecBankAccount, InvestecBankSyncLog, InvestecBankTransaction
+from apps.investec.models import (
+    InvestecBankAccount,
+    InvestecBankSyncLog,
+    InvestecBankTransaction,
+    InvestecBeneficiary,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +182,97 @@ def _sync_single_profile(
                     total_updated += 1
 
     return {"created": total_created, "updated": total_updated, "accounts": len(accounts_data)}
+
+
+def run_investec_beneficiary_sync(dry_run: bool = False) -> dict[str, Any]:
+    """
+    Sync Investec beneficiaries from the API for ALL configured profiles.
+
+    Upserts on (source_profile, beneficiary_id); rows no longer returned by the API
+    are marked is_active=False rather than deleted. Read-only against Investec —
+    beneficiaries are created/edited in Investec Online only.
+
+    Returns dict: { created, updated, deactivated, profiles_synced, beneficiaries?, errors? }
+    In dry_run the fetched (unsaved) rows are returned under "beneficiaries".
+    """
+    base_url = getattr(settings, "INVESTEC_BASE_URL", "").strip() or "https://openapi.investec.com"
+    profiles = getattr(settings, "INVESTEC_PROFILES", [])
+
+    if not profiles:
+        return {
+            "created": 0,
+            "updated": 0,
+            "deactivated": 0,
+            "error": "No Investec credential profiles configured. Check INVESTEC_CLIENT_ID / INVESTEC_CLIENT_SECRET / INVESTEC_API_KEY in settings.",
+        }
+
+    now = timezone.now()
+    total_created = 0
+    total_updated = 0
+    total_deactivated = 0
+    dry_run_rows: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    for i, profile in enumerate(profiles, start=1):
+        client_id = profile.get("client_id") or ""
+        source_profile = f"profile-{i}-{client_id[:8]}"
+        label = f"Profile {i} ({client_id[:8]}...)"
+        try:
+            if not all([client_id, profile.get("client_secret"), profile.get("api_key")]):
+                errors.append(f"{label}: incomplete credentials.")
+                continue
+            token = get_access_token(base_url, client_id, profile["client_secret"], profile["api_key"])
+            bens = fetch_beneficiaries(base_url, token)
+            logger.info("%s: fetched %d beneficiaries", label, len(bens))
+
+            if dry_run:
+                for ben in bens:
+                    row = beneficiary_to_model_data(ben)
+                    row["source_profile"] = source_profile
+                    dry_run_rows.append(row)
+                continue
+
+            seen_ben_ids: set[str] = set()
+            with transaction.atomic():
+                for ben in bens:
+                    data = beneficiary_to_model_data(ben)
+                    ben_id = data["beneficiary_id"]
+                    if not ben_id or ben_id in seen_ben_ids:
+                        continue
+                    seen_ben_ids.add(ben_id)
+                    data["is_active"] = True
+                    data["last_seen_at"] = now
+                    _obj, created = InvestecBeneficiary.objects.update_or_create(
+                        source_profile=source_profile,
+                        beneficiary_id=ben_id,
+                        defaults=data,
+                    )
+                    if created:
+                        total_created += 1
+                    else:
+                        total_updated += 1
+                # Only deactivate on a non-empty response: an empty list is more
+                # likely an API hiccup than a genuinely emptied beneficiary book.
+                if seen_ben_ids:
+                    total_deactivated += InvestecBeneficiary.objects.filter(
+                        source_profile=source_profile,
+                        is_active=True,
+                    ).exclude(beneficiary_id__in=seen_ben_ids).update(is_active=False)
+        except Exception as e:
+            errors.append(f"{label}: {e}")
+            logger.exception("Error syncing beneficiaries for %s", label)
+
+    result: dict[str, Any] = {
+        "created": total_created,
+        "updated": total_updated,
+        "deactivated": total_deactivated,
+        "profiles_synced": len(profiles),
+    }
+    if dry_run:
+        result["beneficiaries"] = dry_run_rows
+    if errors:
+        result["errors"] = errors
+    return result
 
 
 def run_investec_bank_sync(

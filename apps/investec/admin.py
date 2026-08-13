@@ -7,6 +7,7 @@ from .models import (
     InvestecBankAccount,
     InvestecBankTransaction,
     InvestecBankSyncLog,
+    InvestecBeneficiary,
 )
 
 
@@ -104,3 +105,14 @@ class InvestecBankTransactionAdmin(admin.ModelAdmin):
 class InvestecBankSyncLogAdmin(admin.ModelAdmin):
     list_display = ['key', 'last_synced_at']
     readonly_fields = ['key', 'last_synced_at']
+
+
+@admin.register(InvestecBeneficiary)
+class InvestecBeneficiaryAdmin(admin.ModelAdmin):
+    list_display = [
+        'name', 'beneficiary_name', 'bank_name', 'account_number', 'branch_code',
+        'last_payment_amount', 'last_payment_date', 'is_active', 'source_profile',
+    ]
+    list_filter = ['is_active', 'bank_name', 'source_profile']
+    search_fields = ['name', 'beneficiary_name', 'account_number', 'beneficiary_id']
+    readonly_fields = ['collection', 'last_seen_at', 'created_at', 'updated_at']
