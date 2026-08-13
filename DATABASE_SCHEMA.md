@@ -652,27 +652,35 @@ Bank transactions from Investec API.
 | collection | jsonb | YES | |
 
 ### `investec_investecbanktransactioncontext`
-Enriched context for bank transactions (beneficiary, Xero contact mapping).
-
-| Column | Type | Nullable | Notes |
-|--------|------|----------|-------|
-| **id** | bigint | NO | PK |
-| transaction_id | bigint | NO | FK → investec_investecbanktransaction(id) |
-| beneficiary_id | bigint | YES | FK → investec_investecbeneficiary(id) |
-| xero_contact_id | varchar(55) | YES | FK → xero_metadata_xerocontacts(contacts_id) |
+**PLANNED — not yet built.** Enriched context for bank transactions (beneficiary, Xero contact mapping). No model or migration exists for this table yet; when building it, link transaction → investec_investecbeneficiary → xero contact.
 
 ### `investec_investecbeneficiary`
-Investec beneficiaries.
+Investec payment beneficiaries, synced from `GET /za/pb/v1/accounts/beneficiaries` (migration 0030, built 2026-08-13). **Profile-scoped, not account-scoped** — the API returns beneficiaries per credential profile with no account linkage, so there is deliberately NO FK to investec_investecbankaccount. Unique on (source_profile, beneficiary_id). Soft-deactivated (is_active=false) when a row disappears from the API, never deleted.
 
 | Column | Type | Nullable | Notes |
 |--------|------|----------|-------|
 | **id** | bigint | NO | PK |
-| account_id | bigint | NO | FK → investec_investecbankaccount(id) |
-| beneficiary_id | varchar(100) | NO | |
+| source_profile | varchar(40) | NO | credential-profile label, e.g. `profile-1-<cid8>` |
+| profile_id | varchar(70) | NO | Investec's own profileId off the payload |
+| beneficiary_id | varchar(100) | NO | unique with source_profile |
 | name | varchar(200) | NO | |
-| bank_name | varchar(200) | YES | |
-| account_number | varchar(50) | YES | |
-| collection | jsonb | YES | |
+| beneficiary_name | varchar(200) | NO | |
+| bank_name | varchar(200) | NO | |
+| account_number | varchar(50) | NO | |
+| branch_code | varchar(20) | NO | |
+| reference_account_number | varchar(50) | NO | |
+| reference_name | varchar(200) | NO | |
+| category_id | varchar(50) | NO | |
+| faster_payment_allowed | boolean | YES | |
+| last_payment_amount | numeric | YES | |
+| last_payment_date | date | YES | |
+| cell_no | varchar(40) | NO | |
+| email_address | varchar(254) | NO | |
+| collection | jsonb | YES | raw API payload |
+| is_active | boolean | NO | soft-deactivate flag |
+| last_seen_at | timestamptz | YES | |
+
+Requires the **beneficiary scope** on the Investec API key (the 2026-08 key only had `accounts balances documents.* transactions` — beneficiary reads 403 until the scope is added in Investec Online).
 
 ### `investec_investecbanksynclog`
 Sync history for bank data.
