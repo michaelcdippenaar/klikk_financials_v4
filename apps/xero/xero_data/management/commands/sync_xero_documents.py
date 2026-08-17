@@ -7,8 +7,15 @@ Usage:
   python manage.py sync_xero_documents TENANT_ID
   python manage.py sync_xero_documents TENANT_ID --transaction-ids ID1 ID2
   python manage.py sync_xero_documents TENANT_ID --types Invoice CreditNote
+  python manage.py sync_xero_documents TENANT_ID --since 3                  # incremental: last 3 days
+  python manage.py sync_xero_documents TENANT_ID --modified-after 2026-08-01T00:00:00Z
+  python manage.py sync_xero_documents TENANT_ID --max-api-calls 4000 --offset 0   # chunked backfill
 """
-from django.core.management.base import BaseCommand
+from datetime import datetime, timedelta, timezone as dt_timezone
+
+from django.core.management.base import BaseCommand, CommandError
+from django.utils import timezone
+
 from apps.xero.xero_data.document_sync import sync_documents_for_tenant
 
 
@@ -36,6 +43,33 @@ class Command(BaseCommand):
             choices=['Invoice', 'CreditNote', 'BankTransaction'],
             help='Optional transaction types to sync. Default: all supported.',
         )
+        parser.add_argument(
+            '--since',
+            type=int,
+            default=None,
+            metavar='DAYS',
+            help='Incremental mode: only sync transactions whose Xero UpdatedDateUTC is within the last DAYS days.',
+        )
+        parser.add_argument(
+            '--modified-after',
+            type=str,
+            default=None,
+            metavar='ISO_DATETIME',
+            help='Incremental mode: only sync transactions updated in Xero at/after this ISO-8601 datetime '
+                 '(e.g. 2026-08-01T00:00:00Z). Naive values are treated as UTC.',
+        )
+        parser.add_argument(
+            '--max-api-calls',
+            type=int,
+            default=None,
+            help='Stop cleanly after this many Xero API calls (tenant limits: 60/min, 5000/day).',
+        )
+        parser.add_argument(
+            '--offset',
+            type=int,
+            default=0,
+            help='Skip the first N transactions (pk order) — resume point for a chunked backfill.',
+        )
 
     def handle(self, *args, **options):
         tenant_id = options['tenant_id']
@@ -45,11 +79,29 @@ class Command(BaseCommand):
         if transaction_ids is not None and len(transaction_ids) == 0:
             transaction_ids = None
 
+        if options.get('since') is not None and options.get('modified_after'):
+            raise CommandError('--since and --modified-after are mutually exclusive.')
+
+        modified_after = None
+        if options.get('since') is not None:
+            modified_after = timezone.now() - timedelta(days=options['since'])
+        elif options.get('modified_after'):
+            raw = options['modified_after']
+            try:
+                modified_after = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+            except ValueError:
+                raise CommandError(f'Invalid --modified-after value: {raw!r} (expected ISO-8601)')
+            if modified_after.tzinfo is None:
+                modified_after = modified_after.replace(tzinfo=dt_timezone.utc)
+
         result = sync_documents_for_tenant(
             tenant_id,
             user=None,
             transaction_ids=transaction_ids,
             source_types=source_types,
+            modified_after=modified_after,
+            max_api_calls=options.get('max_api_calls'),
+            offset=options.get('offset') or 0,
         )
 
         if result['success']:
@@ -58,7 +110,14 @@ class Command(BaseCommand):
             )
         else:
             self.stdout.write(self.style.WARNING(result['message']))
-        self.stdout.write(f"Synced: {result['synced']}, Skipped: {result['skipped']}")
+        self.stdout.write(
+            f"Synced: {result['synced']}, Skipped: {result['skipped']}, "
+            f"Processed: {result['processed']}, API calls: {result['api_calls']}"
+        )
+        if result['stopped_early']:
+            self.stdout.write(self.style.WARNING(
+                f"Stopped early ({result['stopped_early']}). Resume with: --offset {result['next_offset']}"
+            ))
         for err in result['errors']:
             self.stderr.write(self.style.ERROR(err))
 

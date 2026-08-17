@@ -127,6 +127,11 @@ def update_xero_transactions(tenant_id, user=None, load_all=False):
         transaction_calls = [
             ('invoices', lambda: xero_api.invoices().get()),
             ('bank_transactions', lambda: xero_api.bank_transactions().get()),
+            # Transfers between own bank accounts are NOT returned by the
+            # BankTransactions endpoint — without this call every transfer is
+            # invisible and per-account bank balances drift by the transferred
+            # amounts (net zero in total, so the TB still balances and hides it).
+            ('bank_transfers', lambda: xero_api.bank_transfers().get()),
             ('payments', lambda: xero_api.payments().get()),
             ('credit_notes', lambda: xero_api.credit_notes().get()),
             ('prepayments', lambda: xero_api.prepayments().get()),

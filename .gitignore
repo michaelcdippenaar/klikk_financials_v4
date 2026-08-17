@@ -44,9 +44,16 @@ db.sqlite3-journal
 .DS_Store
 
 # Environment variables
+# NOTE: bare ".env" matches ONLY a file named exactly .env — it does NOT cover
+# .env.app-docker, .env.staging, or *.bak copies. Those carry live secrets
+# (DJANGO_SECRET_KEY, DB_PASSWORD, GITHUB_WEBHOOK_SECRET, API keys), so match
+# every .env* variant and any backup of one.
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.sample
+*.bak
+*.bak.*
 
 # Migrations (optional - uncomment if you don't want to track migrations)
 # */migrations/*.py

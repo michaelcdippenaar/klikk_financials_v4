@@ -116,6 +116,12 @@ class TransactionProcessor:
             'TAX_COLLECTED': ['LIA.CUR.TAX.GST', 'LIA.CUR.TAX'],
             'TAX_PAID': ['ASS.CUR.TAX.GST', 'ASS.CUR.TAX'],
         }
+
+        # Tax accounts are resolved by a dedicated, VAT-specific lookup — see
+        # _get_vat_control_account. The generic LIA.CUR.TAX prefix is NOT safe
+        # here because it also matches LIA.CUR.TAX.INC (Income Tax Payable).
+        if account_type in ('TAX_COLLECTED', 'TAX_PAID'):
+            return self._get_vat_control_account()
         
         # Try reporting code lookup first
         if account_type in REPORTING_CODES:
@@ -135,6 +141,48 @@ class TransactionProcessor:
         accounts = self._accounts_by_type.get(xero_type, [])
         return accounts[0] if accounts else None
     
+    def _get_vat_control_account(self):
+        """
+        Resolve the VAT control account for this tenant.
+
+        All three SA tenants run a single-VAT-control chart: input and output VAT
+        net into one CURRLIAB account, so both TAX_COLLECTED and TAX_PAID resolve
+        here. Two traps this guards against:
+
+        1. The generic prefix 'LIA.CUR.TAX' ALSO matches 'LIA.CUR.TAX.INC'
+           (Income Tax Payable). Matching that would balance the books while
+           posting VAT into income tax. Income-tax codes are excluded outright.
+        2. The old lookup used .first() with no ordering, so when several accounts
+           shared a prefix the winner was whatever Postgres returned first. All
+           lookups here are explicitly ordered.
+
+        Returns XeroAccount, or None if nothing safe matches (callers log and skip;
+        we never guess an account for money).
+        """
+        from apps.xero.xero_metadata.models import XeroAccount
+
+        base = XeroAccount.objects.filter(organisation=self.organisation)
+
+        # 1. Precise VAT/GST reporting codes, most specific first.
+        for code in ('LIA.CUR.TAX.VAT', 'LIA.CUR.TAX.GST',
+                     'ASS.CUR.TAX.VAT', 'ASS.CUR.TAX.GST'):
+            account = base.filter(reporting_code=code).order_by('code').first()
+            if account:
+                return account
+
+        # 2. Fall back to name, for charts whose VAT account is coded too loosely
+        #    to match (e.g. Tremly's "Vat Control Account" is coded only 'LIA').
+        #    Restricted to balance-sheet accounts and never an income-tax account.
+        account = (base.filter(name__iregex=r'\mva[t]\M|\mgst\M',
+                               type__in=('CURRLIAB', 'CURRENT', 'LIABILITY'))
+                       .exclude(name__icontains='income')
+                       .exclude(reporting_code__startswith='LIA.CUR.TAX.INC')
+                       .order_by('code').first())
+        if account:
+            return account
+
+        return None
+
     def _get_tax_account(self, transaction_type):
         """
         Get the appropriate tax account based on transaction type.
@@ -147,10 +195,24 @@ class TransactionProcessor:
         """
         if transaction_type in ['ACCREC', 'RECEIVE']:
             # Output tax / GST collected
-            return self._get_system_account('TAX_COLLECTED')
+            key = 'TAX_COLLECTED'
         else:  # ACCPAY, SPEND
             # Input tax / GST paid
-            return self._get_system_account('TAX_PAID')
+            key = 'TAX_PAID'
+
+        account = self._get_system_account(key)
+        if account is None:
+            # Never fail silently here. An unresolved tax account means the tax
+            # leg is skipped and the transaction posts one-sided, which puts the
+            # trial balance out by exactly the VAT on every affected transaction.
+            logger.error(
+                "No %s account resolvable for tenant %s (%s) - tax journal leg will be "
+                "SKIPPED for %s transactions and the trial balance will not balance. "
+                "Add an account with a VAT reporting code to this tenant's chart.",
+                key, self.organisation.tenant_name,
+                self.organisation.tenant_id, transaction_type,
+            )
+        return account
     
     def _parse_date(self, date_value):
         """
@@ -488,7 +550,13 @@ class TransactionProcessor:
                 )
                 if entry:
                     entries.append(entry)
-        
+            else:
+                logger.error(
+                    "Invoice %s (%s, tenant %s): tax leg of %s SKIPPED - no tax account. "
+                    "This invoice will be out of balance by that amount.",
+                    reference, invoice_type, self.organisation.tenant_name, total_tax,
+                )
+
         # Add receivables/payables entry
         # For ACCREC: Debit AR (positive)
         # For ACCPAY: Credit AP (negative)
@@ -643,7 +711,13 @@ class TransactionProcessor:
                 )
                 if entry:
                     entries.append(entry)
-        
+            else:
+                logger.error(
+                    "Bank transaction %s (%s, tenant %s): tax leg of %s SKIPPED - no tax "
+                    "account. This transaction will be out of balance by that amount.",
+                    reference, txn_type, self.organisation.tenant_name, total_tax,
+                )
+
         # Add bank account entry (total including tax)
         if bank_account:
             if is_spend:
@@ -874,6 +948,12 @@ class TransactionProcessor:
                 )
                 if entry:
                     entries.append(entry)
+            else:
+                logger.error(
+                    "Credit note %s (%s, tenant %s): tax leg of %s SKIPPED - no tax "
+                    "account. This credit note will be out of balance by that amount.",
+                    reference, cn_type, self.organisation.tenant_name, total_tax,
+                )
         
         # Add AR/AP entry (opposite of invoice, including tax)
         if cn_type == 'ACCRECCREDIT':
@@ -1030,6 +1110,68 @@ class TransactionProcessor:
         return [e for e in entries if e]
     
     @transaction.atomic
+    def process_bank_transfer(self, transaction_source):
+        """
+        Process a bank transfer to journal entries.
+
+        Transfers between own bank accounts are NOT returned by Xero's
+        BankTransactions endpoint, so they reach us only via the BankTransfers
+        endpoint. Each transfer books two legs:
+            Debit  the TO bank account   (+amount)
+            Credit the FROM bank account (-amount)
+        Net zero overall — which is exactly why the missing legs never showed
+        as a trial-balance imbalance while individual bank balances drifted.
+        """
+        transfer = transaction_source.collection
+        transfer_id = transfer.get('BankTransferID')
+        date = self._parse_date(transfer.get('Date'))
+        amount = round_amount(transfer.get('Amount', 0))
+
+        from_id = (transfer.get('FromBankAccount') or {}).get('AccountID')
+        to_id = (transfer.get('ToBankAccount') or {}).get('AccountID')
+        from_account = self._accounts_by_id.get(from_id) if from_id else None
+        to_account = self._accounts_by_id.get(to_id) if to_id else None
+
+        if amount == Decimal('0'):
+            return []
+        if not from_account or not to_account:
+            logger.error(
+                "Bank transfer %s (tenant %s): from/to account not found "
+                "(from=%s, to=%s) - transfer SKIPPED, bank balances will drift.",
+                transfer_id, self.organisation.tenant_name, from_id, to_id,
+            )
+            return []
+
+        # Xero reports Amount in the FROM account's currency. For same-currency
+        # transfers CurrencyRate is 1/absent. Foreign-currency transfers need a
+        # base-currency conversion; flag them loudly instead of guessing.
+        rate = transfer.get('CurrencyRate')
+        if rate not in (None, 0, 1, 1.0, '1', '1.0'):
+            logger.warning(
+                "Bank transfer %s (tenant %s): CurrencyRate=%s - amount booked "
+                "unconverted in the from-account currency; verify FX handling.",
+                transfer_id, self.organisation.tenant_name, rate,
+            )
+
+        reference = f"Bank transfer {str(transfer_id)[:8]}"
+        entries = []
+        for account, signed_amount, direction in (
+            (to_account, amount, f"from {from_account.name}"),
+            (from_account, -amount, f"to {to_account.name}"),
+        ):
+            entry = self._create_journal_entry(
+                transaction_source=transaction_source,
+                account=account,
+                amount=signed_amount,
+                date=date,
+                description=f"Bank transfer {direction}",
+                reference=reference,
+                journal_type='transaction',
+            )
+            if entry:
+                entries.append(entry)
+        return entries
+
     def process_all_transactions(self, clear_existing=False, touched_transaction_ids=None):
         """
         Process all transactions for the organisation to journal entries.
@@ -1087,6 +1229,7 @@ class TransactionProcessor:
         stats = {
             'invoices_processed': 0,
             'bank_transactions_processed': 0,
+            'bank_transfers_processed': 0,
             'payments_processed': 0,
             'credit_notes_processed': 0,
             'prepayments_processed': 0,
@@ -1106,6 +1249,7 @@ class TransactionProcessor:
         processor_map = {
             'Invoice': (self.process_invoice, 'invoices_processed'),
             'BankTransaction': (self.process_bank_transaction, 'bank_transactions_processed'),
+            'BankTransfer': (self.process_bank_transfer, 'bank_transfers_processed'),
             'Payment': (self.process_payment, 'payments_processed'),
             'CreditNote': (self.process_credit_note, 'credit_notes_processed'),
             'Prepayment': (self.process_prepayment, 'prepayments_processed'),

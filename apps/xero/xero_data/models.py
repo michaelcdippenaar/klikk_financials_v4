@@ -259,6 +259,15 @@ class XeroJournalsSourceManager(models.Manager):
             # Only POSTED manual journals and active regular journals should create journal entries
             journal_status = j.get('Status', '')
             if journal_status in ('VOIDED', 'DELETED', 'DRAFT'):
+                # Skipping is not enough: a journal ingested while POSTED (or
+                # before this filter existed) already has legs in XeroJournals.
+                # Voiding/deleting it in Xero must remove those legs here too,
+                # else the dead journal distorts per-account balances forever
+                # (e.g. 1 Boschendal @ Cost sat at exactly double for years).
+                stale = XeroJournals.objects.filter(journal_source=j_obj).delete()[0]
+                if stale:
+                    print(f"[PROCESS JOURNALS] {journal_status} journal "
+                          f"{j_obj.journal_id}: removed {stale} stale legs")
                 skipped_by_status += 1
                 journals_to_mark_processed.append(j_obj)
                 continue
