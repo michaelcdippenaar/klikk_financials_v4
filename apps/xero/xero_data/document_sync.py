@@ -7,7 +7,13 @@ Supported transaction types: Invoice, CreditNote, BankTransaction.
 """
 import logging
 import os
+import re
+import time
+from datetime import datetime, timezone as dt_timezone
+
 from django.core.files.base import ContentFile
+
+from xero_python.exceptions import RateLimitException
 
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_data.models import XeroTransactionSource, XeroDocument
@@ -18,6 +24,72 @@ logger = logging.getLogger(__name__)
 
 # Transaction types that support attachments in Xero Accounting API
 SUPPORTED_SOURCE_TYPES = ('Invoice', 'CreditNote', 'BankTransaction')
+
+# Xero tenant limits: 60 calls/min, 5000 calls/day.
+DEFAULT_CALLS_PER_MINUTE = 55
+
+_XERO_DATE_RE = re.compile(r'/Date\((\d+)(?:[+-]\d{4})?\)/')
+
+
+def parse_xero_date(value):
+    """Parse Xero's /Date(ms+0000)/ or an ISO-8601 string into an aware UTC datetime, or None."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=dt_timezone.utc)
+    if isinstance(value, str):
+        m = _XERO_DATE_RE.search(value)
+        if m:
+            return datetime.fromtimestamp(int(m.group(1)) / 1000.0, tz=dt_timezone.utc)
+        try:
+            dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+            return dt if dt.tzinfo else dt.replace(tzinfo=dt_timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
+class XeroDailyLimitReached(Exception):
+    """The Xero per-day API limit is exhausted; retrying within the minute window will not help."""
+
+
+def _retry_after_seconds(exc, default=65):
+    try:
+        ra = exc.headers.get('retry-after') or exc.headers.get('Retry-After')
+        if ra:
+            return max(int(float(ra)) + 1, 1)
+    except Exception:
+        pass
+    return default
+
+
+class _RateLimitedCaller:
+    """Throttles Xero API calls under the per-minute limit; waits out minute-window 429s,
+    raises XeroDailyLimitReached when the daily limit is hit."""
+
+    def __init__(self, calls_per_minute=DEFAULT_CALLS_PER_MINUTE):
+        self.min_interval = 60.0 / calls_per_minute
+        self.calls = 0
+        self._last_call = 0.0
+
+    def __call__(self, fn, *args):
+        for attempt in (1, 2):
+            wait = self.min_interval - (time.monotonic() - self._last_call)
+            if wait > 0:
+                time.sleep(wait)
+            self._last_call = time.monotonic()
+            self.calls += 1
+            try:
+                return fn(*args)
+            except RateLimitException as e:
+                problem = (e.rate_limit or '').lower()
+                if problem == 'day' or attempt == 2:
+                    raise XeroDailyLimitReached(
+                        f"Xero rate limit ({problem or 'unknown window'}) still hit after backoff"
+                    ) from e
+                delay = _retry_after_seconds(e)
+                logger.warning("Xero per-minute rate limit hit; sleeping %ss before retry", delay)
+                time.sleep(delay)
 
 # Map our transaction_source string to (list_attachments_method, get_content_method) on AccountingApi
 def _get_invoice_attachments(api, tenant_id, entity_id):
@@ -100,7 +172,9 @@ def _content_to_bytes(content):
         return str(content).encode('latin-1')
 
 
-def sync_documents_for_tenant(tenant_id, user=None, transaction_ids=None, source_types=None):
+def sync_documents_for_tenant(tenant_id, user=None, transaction_ids=None, source_types=None,
+                              modified_after=None, max_api_calls=None, offset=0,
+                              calls_per_minute=DEFAULT_CALLS_PER_MINUTE):
     """
     Fetch attachments from Xero for transactions and save as XeroDocument linked to XeroTransactionSource.
 
@@ -109,14 +183,29 @@ def sync_documents_for_tenant(tenant_id, user=None, transaction_ids=None, source
         user: Optional user (for credentials lookup)
         transaction_ids: Optional set or list of Xero transaction IDs (e.g. InvoiceID). If None, syncs for all supported types.
         source_types: Optional list of transaction_source values, e.g. ['Invoice', 'CreditNote']. If None, uses SUPPORTED_SOURCE_TYPES.
+        modified_after: Optional aware datetime; only transactions whose Xero UpdatedDateUTC is at or
+            after this are synced (transactions with no parseable UpdatedDateUTC are included as a safety net).
+        max_api_calls: Optional cap on Xero API calls this run; the sync stops cleanly when reached.
+        offset: Skip the first N transactions of the (pk-ordered) queryset — resume point for chunked backfills.
+        calls_per_minute: Throttle ceiling (Xero tenant limit is 60/min).
 
     Returns:
-        dict: { 'success': bool, 'message': str, 'synced': int, 'errors': list, 'skipped': int }
+        dict with: success, message, synced, errors, skipped, processed, api_calls,
+        stopped_early (None | 'daily-limit' | 'max-api-calls'), next_offset.
     """
+    def _result(success, message, synced=0, errors=None, skipped=0, processed=0,
+                api_calls=0, stopped_early=None):
+        return {
+            'success': success, 'message': message, 'synced': synced,
+            'errors': errors or [], 'skipped': skipped, 'processed': processed,
+            'api_calls': api_calls, 'stopped_early': stopped_early,
+            'next_offset': offset + processed,
+        }
+
     try:
         tenant = XeroTenant.objects.get(tenant_id=tenant_id)
     except XeroTenant.DoesNotExist:
-        return {'success': False, 'message': f'Tenant {tenant_id} not found', 'synced': 0, 'errors': [], 'skipped': 0}
+        return _result(False, f'Tenant {tenant_id} not found')
 
     credentials = _get_credentials_for_tenant(tenant_id, user)
     if not credentials.scope:
@@ -147,29 +236,56 @@ def sync_documents_for_tenant(tenant_id, user=None, transaction_ids=None, source
     )
     if transaction_ids is not None:
         qs = qs.filter(transactions_id__in=transaction_ids)
+    qs = qs.order_by('pk')
+    if offset:
+        qs = qs[offset:]
 
+    call = _RateLimitedCaller(calls_per_minute=calls_per_minute)
     synced = 0
     errors = []
     skipped = 0
+    processed = 0
+    unparsed_dates = 0
+    stopped_early = None
 
-    for source in qs:
+    for source in qs.iterator():
+        if max_api_calls is not None and call.calls >= max_api_calls:
+            stopped_early = 'max-api-calls'
+            break
+
         txn_id = source.transactions_id
         txn_type = source.transaction_source
         getters = ATTACHMENT_GETTERS.get(txn_type)
         if not getters:
+            processed += 1
             skipped += 1
             continue
 
+        if modified_after is not None:
+            updated = parse_xero_date((source.collection or {}).get('UpdatedDateUTC'))
+            if updated is None:
+                unparsed_dates += 1
+            elif updated < modified_after:
+                processed += 1
+                skipped += 1
+                continue
+
         list_fn, content_fn = getters
         try:
-            serialized = list_fn(api, tenant_id, txn_id)
+            serialized = call(list_fn, api, tenant_id, txn_id)
+        except XeroDailyLimitReached as e:
+            stopped_early = 'daily-limit'
+            errors.append(f"{txn_type} {txn_id}: {e}")
+            break
         except Exception as e:
+            processed += 1
             errors.append(f"{txn_type} {txn_id} list attachments: {e}")
             logger.debug("List attachments failed for %s %s: %s", txn_type, txn_id, e)
             continue
 
         attachments = _attachment_list_from_response(serialized)
         if not attachments:
+            processed += 1
             continue
 
         for att in attachments:
@@ -182,8 +298,12 @@ def sync_documents_for_tenant(tenant_id, user=None, transaction_ids=None, source
             mime = (_mime if isinstance(_mime, str) else 'application/octet-stream').strip() or 'application/octet-stream'
 
             try:
-                content = content_fn(api, tenant_id, txn_id, att_id, mime)
+                content = call(content_fn, api, tenant_id, txn_id, att_id, mime)
                 data = _content_to_bytes(content)
+            except XeroDailyLimitReached as e:
+                stopped_early = 'daily-limit'
+                errors.append(f"{txn_type} {txn_id} attachment {file_name}: {e}")
+                break
             except Exception as e:
                 errors.append(f"{txn_type} {txn_id} attachment {file_name}: {e}")
                 logger.debug("Get attachment content failed: %s", e)
@@ -205,10 +325,25 @@ def sync_documents_for_tenant(tenant_id, user=None, transaction_ids=None, source
             else:
                 logger.debug("Updated document %s for %s %s", file_name, txn_type, txn_id)
 
-    return {
-        'success': len(errors) == 0,
-        'message': f"Synced {synced} document(s) for tenant {tenant_id}",
-        'synced': synced,
-        'errors': errors,
-        'skipped': skipped,
-    }
+        if stopped_early:
+            # Daily limit hit mid-transaction: do not count it as processed so the
+            # next run's offset retries this transaction from scratch.
+            break
+        processed += 1
+
+    if unparsed_dates:
+        logger.warning(
+            "%d transaction(s) had no parseable UpdatedDateUTC and were included in the incremental sync",
+            unparsed_dates,
+        )
+
+    message = f"Synced {synced} document(s) for tenant {tenant_id} ({call.calls} API calls, {processed} transactions processed)"
+    if stopped_early:
+        message += f"; stopped early: {stopped_early}, resume with offset={offset + processed}"
+
+    result = _result(
+        len(errors) == 0, message,
+        synced=synced, errors=errors, skipped=skipped, processed=processed,
+        api_calls=call.calls, stopped_early=stopped_early,
+    )
+    return result
