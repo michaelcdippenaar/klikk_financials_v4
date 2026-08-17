@@ -14,8 +14,14 @@ from apps.xero.xero_cube.services import process_xero_data, import_pnl_by_tracki
 from apps.xero.xero_sync.api_call_logging import log_xero_api_calls
 
 
+# SECURITY (2026-06-26): the views below require IsAuthenticated. These /xero/cube/*
+# endpoints are internet-exposed via the Caddy edge (console.8-bit.space/backend/*) and
+# one of them mutates financial data (trial-balance rebuild). They are consumed ONLY by
+# the frontend, which sends a Bearer JWT (klikk_portal src/api/client.js). The MCP does
+# NOT call /xero/cube/*. Do NOT revert to AllowAny. NOTE: xero_data/* is still AllowAny
+# because the MCP calls it without KLIKK_API_TOKEN — lock that only after the MCP has a token.
 class XeroProcessDataView(APIView):
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         """
@@ -54,7 +60,7 @@ class XeroProcessDataView(APIView):
 
 
 class XeroDataSummaryView(APIView):
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         """Get a summary of data for a tenant."""
@@ -83,7 +89,7 @@ class XeroTrailBalanceListView(APIView):
     Query params: tenant_id (required), contact_id (optional), tracking1_id (optional), tracking2_id (optional),
                   year, month, account_id, limit (default 5000, max 100000).
     """
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         tenant_id = request.query_params.get('tenant_id')
@@ -185,7 +191,7 @@ class XeroLineItemsListView(APIView):
     Query params: tenant_id (required), contact_id (optional), tracking1_id (optional), tracking2_id (optional),
                   account_id, year, month, date_from (YYYY-MM-DD), date_to (YYYY-MM-DD), limit (default 5000, max 100000).
     """
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         tenant_id = request.query_params.get('tenant_id')
@@ -310,7 +316,7 @@ class ImportPnlByTrackingView(APIView):
         include_tracking (optional bool, default true). Set false for faster
             overall-only reconciliation imports.
     """
-    permission_classes = [AllowAny]  # TODO: IsAuthenticated for production
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         tenant_id = request.data.get('tenant_id')
@@ -352,7 +358,7 @@ class PnlSummaryByTrackingView(APIView):
         year (optional)
         month (optional)
     """
-    permission_classes = [AllowAny]  # TODO: IsAuthenticated for production
+    permission_classes = [IsAuthenticated]
 
     INCOME_TYPES = {'REVENUE', 'OTHERINCOME'}
     EXPENSE_TYPES = {'EXPENSE', 'DIRECTCOSTS', 'OVERHEADS'}
@@ -517,7 +523,7 @@ class AccountBalanceSummaryView(APIView):
         year (optional) - filter to specific year
         month (optional) - filter to specific month (1-12)
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     INCOME_TYPES = {'REVENUE', 'OTHERINCOME'}
     EXPENSE_TYPES = {'EXPENSE', 'DIRECTCOSTS', 'OVERHEADS'}
