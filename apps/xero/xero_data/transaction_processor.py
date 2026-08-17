@@ -1110,6 +1110,68 @@ class TransactionProcessor:
         return [e for e in entries if e]
     
     @transaction.atomic
+    def process_bank_transfer(self, transaction_source):
+        """
+        Process a bank transfer to journal entries.
+
+        Transfers between own bank accounts are NOT returned by Xero's
+        BankTransactions endpoint, so they reach us only via the BankTransfers
+        endpoint. Each transfer books two legs:
+            Debit  the TO bank account   (+amount)
+            Credit the FROM bank account (-amount)
+        Net zero overall — which is exactly why the missing legs never showed
+        as a trial-balance imbalance while individual bank balances drifted.
+        """
+        transfer = transaction_source.collection
+        transfer_id = transfer.get('BankTransferID')
+        date = self._parse_date(transfer.get('Date'))
+        amount = round_amount(transfer.get('Amount', 0))
+
+        from_id = (transfer.get('FromBankAccount') or {}).get('AccountID')
+        to_id = (transfer.get('ToBankAccount') or {}).get('AccountID')
+        from_account = self._accounts_by_id.get(from_id) if from_id else None
+        to_account = self._accounts_by_id.get(to_id) if to_id else None
+
+        if amount == Decimal('0'):
+            return []
+        if not from_account or not to_account:
+            logger.error(
+                "Bank transfer %s (tenant %s): from/to account not found "
+                "(from=%s, to=%s) - transfer SKIPPED, bank balances will drift.",
+                transfer_id, self.organisation.tenant_name, from_id, to_id,
+            )
+            return []
+
+        # Xero reports Amount in the FROM account's currency. For same-currency
+        # transfers CurrencyRate is 1/absent. Foreign-currency transfers need a
+        # base-currency conversion; flag them loudly instead of guessing.
+        rate = transfer.get('CurrencyRate')
+        if rate not in (None, 0, 1, 1.0, '1', '1.0'):
+            logger.warning(
+                "Bank transfer %s (tenant %s): CurrencyRate=%s - amount booked "
+                "unconverted in the from-account currency; verify FX handling.",
+                transfer_id, self.organisation.tenant_name, rate,
+            )
+
+        reference = f"Bank transfer {str(transfer_id)[:8]}"
+        entries = []
+        for account, signed_amount, direction in (
+            (to_account, amount, f"from {from_account.name}"),
+            (from_account, -amount, f"to {to_account.name}"),
+        ):
+            entry = self._create_journal_entry(
+                transaction_source=transaction_source,
+                account=account,
+                amount=signed_amount,
+                date=date,
+                description=f"Bank transfer {direction}",
+                reference=reference,
+                journal_type='transaction',
+            )
+            if entry:
+                entries.append(entry)
+        return entries
+
     def process_all_transactions(self, clear_existing=False, touched_transaction_ids=None):
         """
         Process all transactions for the organisation to journal entries.
@@ -1167,6 +1229,7 @@ class TransactionProcessor:
         stats = {
             'invoices_processed': 0,
             'bank_transactions_processed': 0,
+            'bank_transfers_processed': 0,
             'payments_processed': 0,
             'credit_notes_processed': 0,
             'prepayments_processed': 0,
@@ -1186,6 +1249,7 @@ class TransactionProcessor:
         processor_map = {
             'Invoice': (self.process_invoice, 'invoices_processed'),
             'BankTransaction': (self.process_bank_transaction, 'bank_transactions_processed'),
+            'BankTransfer': (self.process_bank_transfer, 'bank_transfers_processed'),
             'Payment': (self.process_payment, 'payments_processed'),
             'CreditNote': (self.process_credit_note, 'credit_notes_processed'),
             'Prepayment': (self.process_prepayment, 'prepayments_processed'),

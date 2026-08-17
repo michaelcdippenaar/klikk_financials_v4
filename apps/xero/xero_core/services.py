@@ -758,12 +758,28 @@ class XeroAccountingApi:
 
             def get(self):
                 from apps.xero.xero_core.services import serialize_model
-                print(f"[BANK_TRANSFERS] Fetching bank transfers for tenant {self.organisation.tenant_id}")
-                bank_transfers_obj = self.api_client.get_bank_transfers(self.parent.tenant_id)
-                response = serialize_model(bank_transfers_obj)['BankTransfers']
-                print(f"[BANK_TRANSFERS] Retrieved {len(response)} bank transfers")
-                XeroTransactionSource.objects.create_bank_transfers_from_xero(self.organisation, response)
+                from apps.xero.xero_sync.models import XeroLastUpdate
+                modified_since = XeroLastUpdate.objects.get_utc_date_time('bank_transfers', self.organisation)
+                kwargs = {}
+                if modified_since:
+                    kwargs['if_modified_since'] = modified_since
+                bank_transfers_obj = self.api_client.get_bank_transfers(self.parent.tenant_id, **kwargs)
+                response = serialize_model(bank_transfers_obj)['BankTransfers'] or []
+                if response:
+                    XeroTransactionSource.objects.create_bank_transfers_from_xero(self.organisation, response)
+                    # Track touched ids + affected periods so incremental journal
+                    # reprocessing and the per-period TB rebuild both cover transfers.
+                    if getattr(self.parent, 'touched_transaction_ids', None) is not None:
+                        for r in response:
+                            tid = r.get('BankTransferID')
+                            if tid:
+                                self.parent.touched_transaction_ids.add(tid)
+                affected = sorted(self.parent._affected_periods_for_items(response, 'Date')) if response else []
+                XeroLastUpdate.objects.update_or_create_timestamp('bank_transfers', self.organisation)
+                if settings.DEBUG and response:
+                    print(f"[Sync] Bank transfers: {len(response)} fetched")
                 logger.info(f"Successfully updated bank transfers for tenant {self.organisation.tenant_id}")
+                return {'records': len(response), 'api_calls': 1, 'affected_periods': affected}
 
         return BankTransfers(self)
 
