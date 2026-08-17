@@ -61,8 +61,13 @@ class XeroTrailBalanceManager(DataFrameManager):
                     AND (ex.journal_id = ''
                          OR regexp_replace(ex.journal_id, '_[0-9]+$', '') = regexp_replace(j.journal_id, '_[0-9]+$', ''))
                     AND (ex.date IS NULL OR ex.date = j.date::date)
-                    AND (ex.description = '' OR ex.description = j.description)
-                    AND (ex.reference = '' OR ex.reference = j.reference)
+                    -- description/reference are per-LINE on a manual journal, so binding on
+                    -- them defeats the whole-journal strip above: a rule carrying one line's
+                    -- description matches only that line and orphans the rest. When the rule
+                    -- keys on journal_id we already have whole-journal identity, so ignore
+                    -- them. They still bind for rules that have no journal_id to key on.
+                    AND (ex.journal_id <> '' OR ex.description = '' OR ex.description = j.description)
+                    AND (ex.journal_id <> '' OR ex.reference = '' OR ex.reference = j.reference)
             )
         """
 

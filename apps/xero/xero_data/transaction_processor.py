@@ -116,6 +116,12 @@ class TransactionProcessor:
             'TAX_COLLECTED': ['LIA.CUR.TAX.GST', 'LIA.CUR.TAX'],
             'TAX_PAID': ['ASS.CUR.TAX.GST', 'ASS.CUR.TAX'],
         }
+
+        # Tax accounts are resolved by a dedicated, VAT-specific lookup — see
+        # _get_vat_control_account. The generic LIA.CUR.TAX prefix is NOT safe
+        # here because it also matches LIA.CUR.TAX.INC (Income Tax Payable).
+        if account_type in ('TAX_COLLECTED', 'TAX_PAID'):
+            return self._get_vat_control_account()
         
         # Try reporting code lookup first
         if account_type in REPORTING_CODES:
@@ -135,6 +141,48 @@ class TransactionProcessor:
         accounts = self._accounts_by_type.get(xero_type, [])
         return accounts[0] if accounts else None
     
+    def _get_vat_control_account(self):
+        """
+        Resolve the VAT control account for this tenant.
+
+        All three SA tenants run a single-VAT-control chart: input and output VAT
+        net into one CURRLIAB account, so both TAX_COLLECTED and TAX_PAID resolve
+        here. Two traps this guards against:
+
+        1. The generic prefix 'LIA.CUR.TAX' ALSO matches 'LIA.CUR.TAX.INC'
+           (Income Tax Payable). Matching that would balance the books while
+           posting VAT into income tax. Income-tax codes are excluded outright.
+        2. The old lookup used .first() with no ordering, so when several accounts
+           shared a prefix the winner was whatever Postgres returned first. All
+           lookups here are explicitly ordered.
+
+        Returns XeroAccount, or None if nothing safe matches (callers log and skip;
+        we never guess an account for money).
+        """
+        from apps.xero.xero_metadata.models import XeroAccount
+
+        base = XeroAccount.objects.filter(organisation=self.organisation)
+
+        # 1. Precise VAT/GST reporting codes, most specific first.
+        for code in ('LIA.CUR.TAX.VAT', 'LIA.CUR.TAX.GST',
+                     'ASS.CUR.TAX.VAT', 'ASS.CUR.TAX.GST'):
+            account = base.filter(reporting_code=code).order_by('code').first()
+            if account:
+                return account
+
+        # 2. Fall back to name, for charts whose VAT account is coded too loosely
+        #    to match (e.g. Tremly's "Vat Control Account" is coded only 'LIA').
+        #    Restricted to balance-sheet accounts and never an income-tax account.
+        account = (base.filter(name__iregex=r'\mva[t]\M|\mgst\M',
+                               type__in=('CURRLIAB', 'CURRENT', 'LIABILITY'))
+                       .exclude(name__icontains='income')
+                       .exclude(reporting_code__startswith='LIA.CUR.TAX.INC')
+                       .order_by('code').first())
+        if account:
+            return account
+
+        return None
+
     def _get_tax_account(self, transaction_type):
         """
         Get the appropriate tax account based on transaction type.
@@ -147,10 +195,24 @@ class TransactionProcessor:
         """
         if transaction_type in ['ACCREC', 'RECEIVE']:
             # Output tax / GST collected
-            return self._get_system_account('TAX_COLLECTED')
+            key = 'TAX_COLLECTED'
         else:  # ACCPAY, SPEND
             # Input tax / GST paid
-            return self._get_system_account('TAX_PAID')
+            key = 'TAX_PAID'
+
+        account = self._get_system_account(key)
+        if account is None:
+            # Never fail silently here. An unresolved tax account means the tax
+            # leg is skipped and the transaction posts one-sided, which puts the
+            # trial balance out by exactly the VAT on every affected transaction.
+            logger.error(
+                "No %s account resolvable for tenant %s (%s) - tax journal leg will be "
+                "SKIPPED for %s transactions and the trial balance will not balance. "
+                "Add an account with a VAT reporting code to this tenant's chart.",
+                key, self.organisation.tenant_name,
+                self.organisation.tenant_id, transaction_type,
+            )
+        return account
     
     def _parse_date(self, date_value):
         """
@@ -488,7 +550,13 @@ class TransactionProcessor:
                 )
                 if entry:
                     entries.append(entry)
-        
+            else:
+                logger.error(
+                    "Invoice %s (%s, tenant %s): tax leg of %s SKIPPED - no tax account. "
+                    "This invoice will be out of balance by that amount.",
+                    reference, invoice_type, self.organisation.tenant_name, total_tax,
+                )
+
         # Add receivables/payables entry
         # For ACCREC: Debit AR (positive)
         # For ACCPAY: Credit AP (negative)
@@ -643,7 +711,13 @@ class TransactionProcessor:
                 )
                 if entry:
                     entries.append(entry)
-        
+            else:
+                logger.error(
+                    "Bank transaction %s (%s, tenant %s): tax leg of %s SKIPPED - no tax "
+                    "account. This transaction will be out of balance by that amount.",
+                    reference, txn_type, self.organisation.tenant_name, total_tax,
+                )
+
         # Add bank account entry (total including tax)
         if bank_account:
             if is_spend:
@@ -874,6 +948,12 @@ class TransactionProcessor:
                 )
                 if entry:
                     entries.append(entry)
+            else:
+                logger.error(
+                    "Credit note %s (%s, tenant %s): tax leg of %s SKIPPED - no tax "
+                    "account. This credit note will be out of balance by that amount.",
+                    reference, cn_type, self.organisation.tenant_name, total_tax,
+                )
         
         # Add AR/AP entry (opposite of invoice, including tax)
         if cn_type == 'ACCRECCREDIT':
