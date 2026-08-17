@@ -66,6 +66,10 @@ class Command(BaseCommand):
                             help='Absolute residual treated as reconciled (default 0.01)')
         parser.add_argument('--limit', type=int, default=25,
                             help='Max residual rows to print (default 25)')
+        parser.add_argument('--all-years', action='store_true',
+                            help='Compare at every financial-year end, not just --date')
+        parser.add_argument('--export', default=None,
+                            help='Write the comparison to this .xlsx (or .csv) path')
 
     # ------------------------------------------------------------------ Xero
     def _fetch_xero_tb(self, tenant, as_at):
@@ -132,6 +136,93 @@ class Command(BaseCommand):
         """, [tenant_id, date_from, date_to])
         return {a: float(v) for a, v in rows}
 
+    # ------------------------------------------------------------- all years
+    def _bridged(self, tenant, accounts, retained, fiscal_start, as_at):
+        """Per-account (xero, ours+excl+close) at one as-at date."""
+        epoch = date_cls(1900, 1, 1)
+        fy_start = (date_cls(as_at.year, fiscal_start, 1)
+                    if as_at.month >= fiscal_start
+                    else date_cls(as_at.year - 1, fiscal_start, 1))
+        xero = self._fetch_xero_tb(tenant, as_at)
+        ours_all = self._our_balances(tenant.tenant_id, epoch, as_at)
+        ours_fy = self._our_balances(tenant.tenant_id, fy_start, as_at)
+        excl_all = self._excluded_balances(tenant.tenant_id, epoch, as_at)
+        excl_fy = self._excluded_balances(tenant.tenant_id, fy_start, as_at)
+        close = sum(
+            ours_all.get(a, 0.0) - ours_fy.get(a, 0.0)
+            + excl_all.get(a, 0.0) - excl_fy.get(a, 0.0)
+            for a, acc in accounts.items() if acc.type in PNL_TYPES)
+        out = {}
+        for account_id in set(list(xero) + list(ours_all)):
+            acc = accounts.get(account_id)
+            is_pnl = bool(acc and acc.type in PNL_TYPES)
+            ours = (ours_fy if is_pnl else ours_all).get(account_id, 0.0) \
+                + (excl_fy if is_pnl else excl_all).get(account_id, 0.0)
+            if retained and account_id == retained.account_id:
+                ours += close
+            out[account_id] = (xero.get(account_id, 0.0), ours)
+        return out
+
+    def _run_all_years(self, tenant, accounts, retained, fiscal_start, as_at, export):
+        from datetime import timedelta
+        first = _q("""SELECT MIN(date) FROM xero_data_xerojournals
+                      WHERE organisation_id=%s AND journal_type <> 'journal'""",
+                   [tenant.tenant_id])[0][0]
+        first_year = first.year + (1 if first.month >= fiscal_start else 0)
+        ends, y = [], first_year
+        while True:
+            end = (date_cls(y, fiscal_start, 1) - timedelta(days=1)
+                   if fiscal_start > 1 else date_cls(y, 12, 31))
+            if end >= as_at:
+                break
+            ends.append((f"FY{y}", end))
+            y += 1
+        ends.append((f"FY{y} (to {as_at})", as_at))
+
+        per_year, names = {}, {}
+        for label, end in ends:
+            self.stdout.write(f"  fetching {label} ({end}) ...")
+            per_year[label] = self._bridged(tenant, accounts, retained,
+                                            fiscal_start, end)
+        all_ids = sorted(
+            {a for d in per_year.values() for a in d},
+            key=lambda a: (accounts[a].type if a in accounts else 'z',
+                           accounts[a].name if a in accounts else a))
+        header = ['account', 'type']
+        for label, _ in ends:
+            header += [f'{label} Xero', f'{label} ours', f'{label} diff']
+        rows = []
+        for account_id in all_ids:
+            acc = accounts.get(account_id)
+            row = [acc.name if acc else account_id, acc.type if acc else '?']
+            for label, _ in ends:
+                xv, ov = per_year[label].get(account_id, (0.0, 0.0))
+                row += [round(xv, 2), round(ov, 2), round(ov - xv, 2)]
+            rows.append(row)
+
+        out_path = export or f'/tmp/xero_recon_{tenant.tenant_name.replace(" ", "_")}.xlsx'
+        try:
+            import pandas as pd
+            df = pd.DataFrame(rows, columns=header)
+            if out_path.endswith('.csv'):
+                df.to_csv(out_path, index=False)
+            else:
+                df.to_excel(out_path, index=False, sheet_name=tenant.tenant_name[:31])
+        except Exception as exc:  # openpyxl missing etc. — never lose the data
+            out_path = out_path.rsplit('.', 1)[0] + '.csv'
+            import csv
+            with open(out_path, 'w', newline='') as fh:
+                w = csv.writer(fh)
+                w.writerow(header)
+                w.writerows(rows)
+            self.stdout.write(f"  (xlsx failed: {exc}; wrote CSV instead)")
+        bad = sum(1 for r in rows if any(abs(r[i]) > 0.01
+                  for i in range(4, len(r), 3)))
+        self.stdout.write(
+            f"Exported {len(rows)} accounts x {len(ends)} years -> {out_path}"
+            f"  ({bad} accounts differ somewhere)")
+        return None
+
     # ------------------------------------------------------------------ main
     def handle(self, *args, **opts):
         from apps.xero.xero_core.models import XeroTenant
@@ -164,6 +255,10 @@ class Command(BaseCommand):
         self.stdout.write(
             f"Reconciling {tenant.tenant_name} to Xero TB report as at {as_at} "
             f"(FY starts {fy_start})")
+
+        if opts['all_years']:
+            return self._run_all_years(tenant, accounts, retained, fiscal_start,
+                                       as_at, opts['export'])
 
         xero = self._fetch_xero_tb(tenant, as_at)
         ours_all = self._our_balances(tenant.tenant_id, epoch, as_at)
