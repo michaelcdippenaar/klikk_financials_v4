@@ -8,6 +8,7 @@ Orchestrate the full Planning Analytics pipeline:
 import time
 from django.db import connection
 from apps.planning_analytics.services.tm1_client import execute_process, _resolve_credentials
+from apps.xero.xero_core.exceptions import DailyLimitReached
 
 
 def _load_tm1_processes_from_db():
@@ -91,6 +92,16 @@ def run_pipeline(
             }]
         }
 
+    def _daily_limit_abort(step, exc, t0):
+        # Xero's per-day budget is gone — every further Xero call this run
+        # would fail too. Abort the pipeline cleanly; tonight's/tomorrow's run
+        # picks up after the counter resets.
+        step['message'] = f'Xero daily API limit reached: {exc}'
+        step['daily_limit'] = True
+        step['elapsed_s'] = round(time.time() - t0, 1)
+        results.append(step)
+        return {'steps': results, 'aborted': 'xero-daily-limit'}
+
     try:
         # Step 1 - Update Metadata (accounts, contacts, tracking categories)
         step = {'step': 'update_metadata', 'success': False}
@@ -101,6 +112,8 @@ def run_pipeline(
             step['success'] = meta_result.get('status') != 'error'
             step['message'] = meta_result.get('message', 'Metadata updated')
             step['stats'] = meta_result.get('stats')
+        except DailyLimitReached as exc:
+            return _daily_limit_abort(step, exc, t0)
         except Exception as exc:
             step['message'] = str(exc)
         step['elapsed_s'] = round(time.time() - t0, 1)
@@ -120,6 +133,8 @@ def run_pipeline(
             step['success'] = True
             step['message'] = 'Postgres updated from Xero'
             step['stats'] = sync_result.get('stats')
+        except DailyLimitReached as exc:
+            return _daily_limit_abort(step, exc, t0)
         except Exception as exc:
             step['message'] = str(exc)
         step['elapsed_s'] = round(time.time() - t0, 1)
@@ -141,6 +156,8 @@ def run_pipeline(
             step['success'] = True
             step['message'] = result.get('message', 'Xero data processed')
             step['stats'] = result.get('stats')
+        except DailyLimitReached as exc:
+            return _daily_limit_abort(step, exc, t0)
         except Exception as exc:
             step['message'] = str(exc)
         step['elapsed_s'] = round(time.time() - t0, 1)

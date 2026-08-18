@@ -3,15 +3,21 @@ Core Xero API client services.
 """
 import datetime
 import logging
+import zlib
+
 import requests
+import urllib3
 
 from django.conf import settings
+from django.db import connection
 from django.utils import timezone
 from xero_python.accounting import AccountingApi
 from xero_python.api_client import ApiClient, Configuration
 from xero_python.api_client.oauth2 import OAuth2Token
 from xero_python.api_client.serializer import serialize
+from xero_python.exceptions import HTTPStatusException, RateLimitException
 
+from apps.xero.xero_core.exceptions import DailyLimitReached
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_auth.models import XeroClientCredentials, XeroAuthSettings, XeroTenantToken
 
@@ -20,6 +26,65 @@ logger = logging.getLogger(__name__)
 # Cache for XeroAuthSettings to avoid repeated database queries
 _auth_settings_cache = None
 XERO_PAGE_SIZE = 250
+
+# (connect, read) timeouts applied to every HTTP request to Xero. Without these
+# a dropped connection or a server-side stall hangs the calling job forever
+# (2026-08-18 incident: jobs blocked for hours, jamming the scheduler).
+HTTP_TIMEOUT = (10, 120)
+
+# Longest Retry-After we are willing to sleep out. Xero's minute-window 429s
+# carry Retry-After <= 60s; anything larger is the DAILY limit (Retry-After of
+# several hours) and sleeping on it presents as an indefinite hang. Callers get
+# DailyLimitReached instead and must abort cleanly.
+MAX_RETRY_AFTER_SLEEP = 120
+
+# Advisory-lock namespace (int4) for single-flight Xero token refresh: "XERO".
+_XERO_REFRESH_LOCK_CLASSID = 0x5845524F
+
+
+def _headers_from(source):
+    """Best-effort headers mapping from an exception, REST response, or dict."""
+    headers = getattr(source, 'headers', None)
+    if headers is None and hasattr(source, 'getheaders'):
+        try:
+            headers = source.getheaders()
+        except Exception:
+            headers = None
+    if headers is None and isinstance(source, dict):
+        headers = source
+    return headers or {}
+
+
+def retry_after_seconds(source, default=65):
+    """Seconds from the Retry-After header of an exception/response (default if absent)."""
+    try:
+        headers = _headers_from(source)
+        ra = headers.get('retry-after') or headers.get('Retry-After')
+        if ra:
+            return max(int(float(ra)) + 1, 1)
+    except Exception:
+        pass
+    return default
+
+
+def raise_if_daily_limit(source):
+    """Convert a day-window 429 (exception or raw response) into DailyLimitReached.
+
+    Treats an over-cap Retry-After as the daily limit even when the
+    X-Rate-Limit-Problem header is missing, so a multi-hour wait can never be
+    mistaken for a minute-window backoff.
+    """
+    headers = _headers_from(source)
+    problem = (headers.get('x-rate-limit-problem')
+               or headers.get('X-Rate-Limit-Problem') or '').lower()
+    delay = retry_after_seconds(source)
+    if problem == 'day' or delay > MAX_RETRY_AFTER_SLEEP:
+        cause = source if isinstance(source, BaseException) else None
+        raise DailyLimitReached(
+            f"Xero daily API limit reached ({problem or 'window unknown'}, "
+            f"Retry-After={delay}s); aborting instead of sleeping",
+            retry_after=delay,
+        ) from cause
 
 
 class TenantTokenData:
@@ -54,6 +119,9 @@ class TenantTokenData:
     
     def refresh_from_db(self):
         """Reload token data from credentials."""
+        # Re-fetch the credentials row itself so a refresh done by ANOTHER
+        # process (concurrent job) is visible, not just our in-memory copy.
+        self.credentials.refresh_from_db()
         token_data = self.credentials.get_tenant_token_data(self.tenant_id)
         if token_data:
             self.token = token_data.get('token', {})
@@ -103,10 +171,59 @@ class XeroApiClient:
             ),
             pool_threads=1,
         )
+        self._install_http_guards()
         self.tenant_token = None
         if tenant_id:
             self.tenant_token = self.get_tenant_token()
             self.configure_api_client(self.tenant_token)
+
+    def _install_http_guards(self):
+        """Give every SDK HTTP call a default timeout and daily-limit conversion.
+
+        All xero_python API methods funnel through rest_client.request(); wrapping
+        it here means no call can hang without a timeout, and a day-window 429
+        surfaces as DailyLimitReached at the point of the call rather than a
+        multi-hour sleep somewhere in a retry loop.
+        """
+        rest_client = self.api_client.rest_client
+
+        # CRITICAL: urllib3's DEFAULT Retry policy honours Retry-After on 429
+        # responses INSIDE the pool manager — on a day-limit 429 it sleeps for
+        # hours in urllib3.util.retry.sleep_for_retry before any of our code
+        # (or even the SDK) sees the response. That was the invisible hang of
+        # the 2026-08-18 incident. Disable Retry-After honouring and all
+        # status-based retries so a 429 surfaces immediately as
+        # RateLimitException; keep a couple of connect/read retries for
+        # transient network blips.
+        rest_client.pool_manager.connection_pool_kw['retries'] = urllib3.Retry(
+            total=2,
+            connect=2,
+            read=1,
+            status=0,
+            status_forcelist=frozenset(),
+            respect_retry_after_header=False,
+        )
+
+        original_request = rest_client.request
+
+        def request_with_guards(*args, **kwargs):
+            if not kwargs.get('_request_timeout'):
+                kwargs['_request_timeout'] = HTTP_TIMEOUT
+            try:
+                response = original_request(*args, **kwargs)
+            except HTTPStatusException as e:
+                # rest.py raises the BASE HTTPStatusException for any non-2xx;
+                # it only becomes RateLimitException after translation higher
+                # up, so 429 must be detected by status here.
+                if getattr(e, 'status', None) == 429:
+                    raise_if_daily_limit(e)
+                raise
+            # Backstop in case a 429 response is ever returned un-raised.
+            if getattr(response, 'status', None) == 429:
+                raise_if_daily_limit(response)
+            return response
+
+        rest_client.request = request_with_guards
 
     def get_tenant_token(self):
         """Get tenant token data from credentials.tenant_tokens or XeroTenantToken model."""
@@ -227,85 +344,127 @@ class XeroApiClient:
             tenant_token.expires_at = timezone.now() + datetime.timedelta(seconds=token.get('expires_in', 1800))
             tenant_token.save()
 
+    @staticmethod
+    def _token_is_fresh(tenant_token):
+        """True if the access token is valid for at least another 30 seconds."""
+        return not (
+            tenant_token.expires_at
+            and tenant_token.expires_at <= timezone.now() + datetime.timedelta(seconds=30)
+        )
+
+    @staticmethod
+    def _refresh_lock_ids(tenant_token):
+        """(classid, objid) advisory-lock pair for this credentials+tenant token."""
+        tenant_id = getattr(tenant_token, 'tenant_id', None) or (
+            tenant_token.tenant.tenant_id if getattr(tenant_token, 'tenant', None) else 'unknown'
+        )
+        objid = zlib.crc32(f"{tenant_token.credentials.pk}:{tenant_id}".encode())
+        if objid >= 2 ** 31:  # pg advisory lock args are signed int4
+            objid -= 2 ** 32
+        return _XERO_REFRESH_LOCK_CLASSID, objid
+
     def refresh_token_if_expired(self, tenant_token):
-        """Check if token is expired and refresh it if needed."""
-        # Add a small buffer (30 seconds) to refresh before actual expiration
-        if tenant_token.expires_at and tenant_token.expires_at <= timezone.now() + datetime.timedelta(seconds=30):
-            logger.info(f"Token expired or expiring soon (expires_at: {tenant_token.expires_at}), refreshing...")
-            # Use cached auth settings to avoid repeated database queries
-            global _auth_settings_cache
-            if _auth_settings_cache is None:
-                _auth_settings_cache = XeroAuthSettings.objects.first()
-            auth_settings = _auth_settings_cache
-            
-            if not auth_settings:
-                raise ValueError("XeroAuthSettings not configured in the database")
-            credentials = tenant_token.credentials
-            refresh_url = auth_settings.refresh_url
-            # Use Basic authentication like the callback does
-            import base64
-            tokenb4 = f"{credentials.client_id}:{credentials.client_secret}"
-            basic_token = base64.urlsafe_b64encode(tokenb4.encode()).decode()
-            headers = {
-                'Authorization': f"Basic {basic_token}",
-                'Content-Type': 'application/x-www-form-urlencoded'
-            }
-            data = {
-                "grant_type": "refresh_token",
-                "refresh_token": tenant_token.refresh_token
+        """Refresh the token if expired — single-flight across processes.
+
+        Xero ROTATES the refresh token on every use, so two processes refreshing
+        concurrently leaves the loser holding a dead refresh token (401 /
+        invalid_grant — the 2026-08-18 incident). A Postgres advisory lock keyed
+        on (credentials, tenant) serializes the refresh; waiters re-check after
+        acquiring the lock and reuse the winner's fresh token instead of
+        refreshing again.
+        """
+        if self._token_is_fresh(tenant_token):
+            return
+        classid, objid = self._refresh_lock_ids(tenant_token)
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_lock(%s, %s)", [classid, objid])
+        try:
+            tenant_token.refresh_from_db()
+            if self._token_is_fresh(tenant_token):
+                logger.info("Token already refreshed by a concurrent process; reusing it")
+                return
+            self._perform_token_refresh(tenant_token)
+        finally:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_advisory_unlock(%s, %s)", [classid, objid])
+
+    def _perform_token_refresh(self, tenant_token):
+        """Refresh the token against Xero's identity endpoint (caller holds the lock)."""
+        logger.info(f"Token expired or expiring soon (expires_at: {tenant_token.expires_at}), refreshing...")
+        # Use cached auth settings to avoid repeated database queries
+        global _auth_settings_cache
+        if _auth_settings_cache is None:
+            _auth_settings_cache = XeroAuthSettings.objects.first()
+        auth_settings = _auth_settings_cache
+
+        if not auth_settings:
+            raise ValueError("XeroAuthSettings not configured in the database")
+        credentials = tenant_token.credentials
+        refresh_url = auth_settings.refresh_url
+        # Use Basic authentication like the callback does
+        import base64
+        tokenb4 = f"{credentials.client_id}:{credentials.client_secret}"
+        basic_token = base64.urlsafe_b64encode(tokenb4.encode()).decode()
+        headers = {
+            'Authorization': f"Basic {basic_token}",
+            'Content-Type': 'application/x-www-form-urlencoded'
+        }
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": tenant_token.refresh_token
+        }
+        try:
+            response = requests.post(refresh_url, headers=headers, data=data, timeout=HTTP_TIMEOUT)
+            response.raise_for_status()
+            new_token = response.json()
+            # Update the specific tenant token
+            tenant_token.token = new_token
+            tenant_token.refresh_token = new_token.get('refresh_token', tenant_token.refresh_token)
+            tenant_token.expires_at = timezone.now() + datetime.timedelta(seconds=new_token.get('expires_in', 1800))
+            tenant_token.save()
+            tenant_id_display = tenant_token.tenant_id if hasattr(tenant_token, 'tenant_id') else (tenant_token.tenant.tenant_id if tenant_token.tenant else 'unknown')
+            logger.info(f"Successfully refreshed token for tenant {tenant_id_display}")
+        except requests.HTTPError as e:
+            # Log detailed error information
+            tenant_id_display = tenant_token.tenant_id if hasattr(tenant_token, 'tenant_id') else (tenant_token.tenant.tenant_id if tenant_token.tenant else 'unknown')
+            error_details = {
+                'status_code': e.response.status_code if e.response else None,
+                'url': refresh_url,
+                'tenant_id': tenant_id_display,
+                'error': str(e)
             }
             try:
-                response = requests.post(refresh_url, headers=headers, data=data)
-                response.raise_for_status()
-                new_token = response.json()
-                # Update the specific tenant token
-                tenant_token.token = new_token
-                tenant_token.refresh_token = new_token.get('refresh_token', tenant_token.refresh_token)
-                tenant_token.expires_at = timezone.now() + datetime.timedelta(seconds=new_token.get('expires_in', 1800))
-                tenant_token.save()
-                tenant_id_display = tenant_token.tenant_id if hasattr(tenant_token, 'tenant_id') else (tenant_token.tenant.tenant_id if tenant_token.tenant else 'unknown')
-                logger.info(f"Successfully refreshed token for tenant {tenant_id_display}")
-            except requests.HTTPError as e:
-                # Log detailed error information
-                tenant_id_display = tenant_token.tenant_id if hasattr(tenant_token, 'tenant_id') else (tenant_token.tenant.tenant_id if tenant_token.tenant else 'unknown')
-                error_details = {
-                    'status_code': e.response.status_code if e.response else None,
-                    'url': refresh_url,
-                    'tenant_id': tenant_id_display,
-                    'error': str(e)
-                }
-                try:
-                    if e.response:
-                        error_details['response_body'] = e.response.text[:500]  # Limit response body length
-                        error_details['response_json'] = e.response.json() if e.response.headers.get('content-type', '').startswith('application/json') else None
-                except:
-                    pass  # Ignore errors parsing response
+                if e.response:
+                    error_details['response_body'] = e.response.text[:500]  # Limit response body length
+                    error_details['response_json'] = e.response.json() if e.response.headers.get('content-type', '').startswith('application/json') else None
+            except:
+                pass  # Ignore errors parsing response
                 
-                logger.error(
-                    f"Failed to refresh token for tenant {tenant_id_display}: "
-                    f"HTTP {error_details['status_code']} - {error_details.get('response_body', str(e))}",
-                    extra=error_details
-                )
+            logger.error(
+                f"Failed to refresh token for tenant {tenant_id_display}: "
+                f"HTTP {error_details['status_code']} - {error_details.get('response_body', str(e))}",
+                extra=error_details
+            )
                 
-                # Raise a more descriptive error
-                error_msg = f"Token refresh failed for tenant {tenant_id_display}"
-                if error_details.get('response_json') and 'error' in error_details['response_json']:
-                    error_msg += f": {error_details['response_json']['error']}"
-                    if 'error_description' in error_details['response_json']:
-                        error_msg += f" - {error_details['response_json']['error_description']}"
-                elif error_details.get('response_body'):
-                    error_msg += f" (HTTP {error_details['status_code']}): {error_details['response_body'][:200]}"
-                else:
-                    error_msg += f" (HTTP {error_details['status_code']})"
+            # Raise a more descriptive error
+            error_msg = f"Token refresh failed for tenant {tenant_id_display}"
+            if error_details.get('response_json') and 'error' in error_details['response_json']:
+                error_msg += f": {error_details['response_json']['error']}"
+                if 'error_description' in error_details['response_json']:
+                    error_msg += f" - {error_details['response_json']['error_description']}"
+            elif error_details.get('response_body'):
+                error_msg += f" (HTTP {error_details['status_code']}): {error_details['response_body'][:200]}"
+            else:
+                error_msg += f" (HTTP {error_details['status_code']})"
                 
-                raise ValueError(error_msg) from e
-            except requests.RequestException as e:
-                tenant_id_display = tenant_token.tenant_id if hasattr(tenant_token, 'tenant_id') else (tenant_token.tenant.tenant_id if tenant_token.tenant else 'unknown')
-                logger.error(
-                    f"Failed to refresh token for tenant {tenant_id_display}: {str(e)}",
-                    exc_info=True
-                )
-                raise ValueError(f"Token refresh request failed for tenant {tenant_id_display}: {str(e)}") from e
+            raise ValueError(error_msg) from e
+        except requests.RequestException as e:
+            tenant_id_display = tenant_token.tenant_id if hasattr(tenant_token, 'tenant_id') else (tenant_token.tenant.tenant_id if tenant_token.tenant else 'unknown')
+            logger.error(
+                f"Failed to refresh token for tenant {tenant_id_display}: {str(e)}",
+                exc_info=True
+            )
+            raise ValueError(f"Token refresh request failed for tenant {tenant_id_display}: {str(e)}") from e
 
 
 class XeroAccountingApi:

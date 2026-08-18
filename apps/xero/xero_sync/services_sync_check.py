@@ -7,6 +7,7 @@ from datetime import timedelta
 from django.utils import timezone
 
 from django.db import models
+from apps.xero.xero_core.exceptions import DailyLimitReached
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_sync.models import XeroLastUpdate
 from apps.xero.xero_sync.services import update_xero_models
@@ -155,13 +156,27 @@ def check_and_retry_out_of_sync(tenant_id=None, max_retry_age_hours=24):
                 logger.warning(f"Skipping unknown endpoint {endpoint} for tenant {tenant_id}")
             
             results['retried'] += 1
-        
+
+        except DailyLimitReached as e:
+            # The tenant's daily Xero budget is exhausted — every remaining retry
+            # for this tenant would fail the same way. Abort cleanly; the next
+            # hourly run after the counter resets will pick the items up again.
+            detail['status'] = 'failed'
+            detail['error'] = str(e)
+            results['failed'] += 1
+            results['aborted'] = 'xero-daily-limit'
+            results['details'].append(detail)
+            logger.warning(
+                f"Xero daily API limit reached for tenant {tenant_id}; "
+                f"aborting out-of-sync retries for this tenant: {e}"
+            )
+            break
         except Exception as e:
             detail['status'] = 'failed'
             detail['error'] = str(e)
             results['failed'] += 1
             logger.error(f"Error retrying {endpoint} for tenant {tenant_id}: {str(e)}", exc_info=True)
-        
+
         results['details'].append(detail)
     
     logger.info(

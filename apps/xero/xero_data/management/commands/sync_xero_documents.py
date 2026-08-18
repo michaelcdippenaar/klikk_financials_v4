@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone as dt_timezone
 from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
+from apps.xero.xero_core.exceptions import DailyLimitReached
 from apps.xero.xero_data.document_sync import sync_documents_for_tenant
 
 
@@ -94,15 +95,22 @@ class Command(BaseCommand):
             if modified_after.tzinfo is None:
                 modified_after = modified_after.replace(tzinfo=dt_timezone.utc)
 
-        result = sync_documents_for_tenant(
-            tenant_id,
-            user=None,
-            transaction_ids=transaction_ids,
-            source_types=source_types,
-            modified_after=modified_after,
-            max_api_calls=options.get('max_api_calls'),
-            offset=options.get('offset') or 0,
-        )
+        try:
+            result = sync_documents_for_tenant(
+                tenant_id,
+                user=None,
+                transaction_ids=transaction_ids,
+                source_types=source_types,
+                modified_after=modified_after,
+                max_api_calls=options.get('max_api_calls'),
+                offset=options.get('offset') or 0,
+            )
+        except DailyLimitReached as e:
+            # Daily-limit hits inside the sync loop become stopped_early='daily-limit';
+            # this catches ones raised outside it (e.g. client setup). Abort cleanly —
+            # a non-zero exit makes the backfill wrapper stand down for the night.
+            self.stderr.write(self.style.ERROR(f'Xero daily API limit reached: {e}'))
+            raise SystemExit(1)
 
         if result['success']:
             self.stdout.write(

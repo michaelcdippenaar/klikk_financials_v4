@@ -15,10 +15,17 @@ from django.core.files.base import ContentFile
 
 from xero_python.exceptions import RateLimitException
 
+from apps.xero.xero_core.exceptions import DailyLimitReached
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_data.models import XeroTransactionSource, XeroDocument
 from apps.xero.xero_data.services import _get_credentials_for_tenant
-from apps.xero.xero_core.services import XeroApiClient, XeroAccountingApi, serialize_model
+from apps.xero.xero_core.services import (
+    MAX_RETRY_AFTER_SLEEP,
+    XeroApiClient,
+    XeroAccountingApi,
+    retry_after_seconds,
+    serialize_model,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -49,23 +56,13 @@ def parse_xero_date(value):
     return None
 
 
-class XeroDailyLimitReached(Exception):
-    """The Xero per-day API limit is exhausted; retrying within the minute window will not help."""
-
-
-def _retry_after_seconds(exc, default=65):
-    try:
-        ra = exc.headers.get('retry-after') or exc.headers.get('Retry-After')
-        if ra:
-            return max(int(float(ra)) + 1, 1)
-    except Exception:
-        pass
-    return default
+# Back-compat name; the canonical exception lives in apps.xero.xero_core.exceptions.
+XeroDailyLimitReached = DailyLimitReached
 
 
 class _RateLimitedCaller:
     """Throttles Xero API calls under the per-minute limit; waits out minute-window 429s,
-    raises XeroDailyLimitReached when the daily limit is hit."""
+    raises DailyLimitReached when the daily limit is hit."""
 
     def __init__(self, calls_per_minute=DEFAULT_CALLS_PER_MINUTE):
         self.min_interval = 60.0 / calls_per_minute
@@ -82,12 +79,17 @@ class _RateLimitedCaller:
             try:
                 return fn(*args)
             except RateLimitException as e:
+                # Day-window 429s are normally converted to DailyLimitReached by
+                # XeroApiClient's HTTP guard before reaching here; this branch
+                # handles minute-window 429s, with the same cap as a backstop.
                 problem = (e.rate_limit or '').lower()
-                if problem == 'day' or attempt == 2:
-                    raise XeroDailyLimitReached(
-                        f"Xero rate limit ({problem or 'unknown window'}) still hit after backoff"
+                delay = retry_after_seconds(e)
+                if problem == 'day' or delay > MAX_RETRY_AFTER_SLEEP or attempt == 2:
+                    raise DailyLimitReached(
+                        f"Xero rate limit ({problem or 'unknown window'}, "
+                        f"Retry-After={delay}s) — aborting instead of sleeping",
+                        retry_after=delay,
                     ) from e
-                delay = _retry_after_seconds(e)
                 logger.warning("Xero per-minute rate limit hit; sleeping %ss before retry", delay)
                 time.sleep(delay)
 

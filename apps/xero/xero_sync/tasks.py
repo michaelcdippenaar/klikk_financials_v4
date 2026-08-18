@@ -8,6 +8,7 @@ from django.utils import timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
+from apps.xero.xero_core.exceptions import DailyLimitReached
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_sync.models import XeroTenantSchedule, XeroTaskExecutionLog
 from apps.xero.xero_sync.services import update_xero_models
@@ -140,6 +141,16 @@ def run_update_task(tenant_id):
             log_entry.error_message = error_msg
             log_entry.completed_at = timezone.now()
             log_entry.save()
+    except DailyLimitReached as e:
+        # Clean abort: the tenant's daily Xero budget is gone, so retrying now is
+        # pointless. Mark the run failed and return so the scheduler slot is
+        # released (a hung/looping job here is what jammed max_instances=1 in the
+        # 2026-08-18 incident); a later run after the reset will catch up.
+        error_msg = f"Update task aborted for tenant {tenant_id}: {str(e)}"
+        logger.warning(error_msg)
+        if log_entry:
+            log_entry.mark_failed(error_msg)
+        logger.warning(f"Skipping process task for tenant {tenant_id} - Xero daily API limit reached")
     except ValueError as e:
         # Handle authentication/token errors specifically
         error_msg = f"Update task failed for tenant {tenant_id}: {str(e)}"

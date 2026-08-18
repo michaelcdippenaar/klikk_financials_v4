@@ -3,6 +3,7 @@ Xero metadata services - handles updating accounts, contacts, and tracking categ
 """
 import time
 import logging
+from apps.xero.xero_core.exceptions import DailyLimitReached
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_core.services import XeroApiClient, XeroAccountingApi
 from apps.xero.xero_auth.models import XeroClientCredentials
@@ -76,6 +77,8 @@ def update_metadata(tenant_id, user=None):
                 XeroLastUpdate.objects.update_or_create_timestamp(name, tenant)
                 print(f"[METADATA] ✓ {name} finished")
                 logger.info(f"Successfully updated {name} for tenant {tenant_id}")
+            except DailyLimitReached:
+                raise  # abort the whole update — further Xero calls cannot succeed today
             except Exception as e:
                 error_msg = f"Failed to update {name}: {str(e)}"
                 print(f"[METADATA] ✗ {name} failed: {str(e)}")
@@ -97,6 +100,8 @@ def update_metadata(tenant_id, user=None):
             }
         }
         
+    except DailyLimitReached:
+        raise
     except Exception as e:
         duration = time.time() - start_time
         error_msg = f"Failed to update metadata: {str(e)}"

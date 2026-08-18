@@ -6,6 +6,7 @@ import time
 import logging
 from django.db.models import Q
 
+from apps.xero.xero_core.exceptions import DailyLimitReached
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_core.services import XeroApiClient, XeroAccountingApi
 from apps.xero.xero_auth.models import XeroClientCredentials
@@ -75,6 +76,8 @@ def update_xero_models(tenant_id, user=None):
         else:
             print(f"[UPDATE] ✗ Metadata updates completed with errors")
             logger.warning(f"Metadata update completed with errors for tenant {tenant_id}")
+    except DailyLimitReached:
+        raise  # abort the whole update — further Xero calls cannot succeed today
     except Exception as e:
         error_msg = f"Failed to update metadata: {str(e)}"
         print(f"[UPDATE] ✗ Metadata update failed: {str(e)}")
@@ -104,6 +107,8 @@ def update_xero_models(tenant_id, user=None):
                 stats[f'{name}_updated'] = 1
                 print(f"[UPDATE] ✓ {name} finished")
                 logger.info(f"Successfully updated {name} for tenant {tenant_id}")
+            except DailyLimitReached:
+                raise
             except Exception as e:
                 error_msg = f"Failed to update {name}: {str(e)}"
                 print(f"[UPDATE] ✗ {name} failed: {str(e)}")
@@ -119,6 +124,8 @@ def update_xero_models(tenant_id, user=None):
             stats['journals_updated'] = 1
             print(f"[UPDATE] ✓ manual journals finished")
             logger.info(f"Successfully updated manual journals for tenant {tenant_id}")
+        except DailyLimitReached:
+            raise
         except Exception as e:
             error_msg = f"Failed to update manual journals: {str(e)}"
             print(f"[UPDATE] ✗ manual journals failed: {str(e)}")
@@ -140,6 +147,9 @@ def update_xero_models(tenant_id, user=None):
             'stats': stats
         }
         
+    except DailyLimitReached as e:
+        logger.warning(f"Xero daily API limit reached for tenant {tenant_id}; aborting update cleanly: {e}")
+        raise
     except ValueError as e:
         # Handle authentication/token errors specifically
         duration = time.time() - start_time
