@@ -84,14 +84,18 @@ def run_update_task(tenant_id):
         data_endpoints = ['journals', 'manual_journals']
         
         # Check metadata completion
+        # NOTE: `organisation` is the XeroLastUpdate FK to XeroTenant; the local
+        # tenant object is `tenant`. `end_time` was folded into `date` by
+        # migration 0010_simplify_last_update. Both wrong names raised before
+        # run_process_task could ever be reached.
         metadata_complete = True
         for endpoint in metadata_endpoints:
             try:
                 last_update = XeroLastUpdate.objects.get(
                     end_point=endpoint,
-                    organisation=organisation
+                    organisation=tenant
                 )
-                if not last_update.end_time:
+                if not last_update.date:
                     metadata_complete = False
                     break
             except XeroLastUpdate.DoesNotExist:
@@ -104,9 +108,9 @@ def run_update_task(tenant_id):
             try:
                 last_update = XeroLastUpdate.objects.get(
                     end_point=endpoint,
-                    organisation=organisation
+                    organisation=tenant
                 )
-                if not last_update.end_time:
+                if not last_update.date:
                     data_complete = False
                     break
             except XeroLastUpdate.DoesNotExist:
