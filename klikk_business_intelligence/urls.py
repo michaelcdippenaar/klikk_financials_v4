@@ -49,6 +49,9 @@ urlpatterns = [
     path('api/planning-analytics/', include('apps.planning_analytics.urls')),
     path('api/ai-agent/', include('apps.ai_agent.urls')),
 
+    # Year-end audit check registry (read-only; raw SQL over audit.checks)
+    path('audit/', include('apps.audit.urls')),
+
     # Deployment webhook
     path('deployment/', include('apps.deployment.urls')),
 ]
