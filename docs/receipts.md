@@ -1,6 +1,6 @@
 # Klikk Financials — Audit → Receipts (Slippies review workflow)
 *Living document. Describes the `apps.receipts` app (backend) and the console page `Audit → Receipts` (portal) as of branch `feature/receipts`, backend commit `1460497`. Written from the code, not from intent — where the code and this page disagree, the code wins and this page needs fixing.*
-*Version 2 — 19 Aug 2026. Updated for the auth gate (§3, §7) and the journal-type discriminator (§5); deployed, see §10.*
+*Version 3 — 20 Aug 2026. Adds bulk actions (`POST …/bulk/`, §3.6), the `ids_only` list mode that feeds "select all N filtered" (§3.1), and a 200-row page size on the console table (§8). Version 2 (19 Aug) added the auth gate (§3, §7) and the journal-type discriminator (§5).*
 
 ---
 
@@ -80,9 +80,13 @@ The raw SQL never joins these tables. Review state is attached after the query b
 
 `klikk_business_intelligence/urls.py`: `path('audit/receipts/', include('apps.receipts.urls'))`, placed **before** `path('audit/', …)` so it isn't shadowed. Behind nginx the public prefix is `/backend`, so the production URL is `https://console.8-bit.space/backend/audit/receipts/`.
 
-**Auth, stated plainly.** The project's DRF default is `AllowAny`, so every endpoint here opts out of it explicitly: **all five require an authenticated user and return 401 otherwise.** The four DRF views carry `@permission_classes([IsAuthenticated])`. The export is a plain Django view (§3.5) and therefore has no permission classes at all, so it carries `@drf_login_required` instead — a decorator in `views.py` that instantiates `DEFAULT_AUTHENTICATION_CLASSES`, runs them against the raw request, and on failure returns `401 {"detail": "Authentication credentials were not provided."}` with `WWW-Authenticate: Bearer realm="api"`. It is applied outside `@require_GET` so an anonymous caller never reaches the view body, and only ever on a GET, where session auth's CSRF enforcement is a no-op.
+**Auth, stated plainly.** The project's DRF default is `AllowAny`, so every endpoint here opts out of it explicitly: **all six require an authenticated user and return 401 otherwise.** The five DRF views carry `@permission_classes([IsAuthenticated])`. The export is a plain Django view (§3.5) and therefore has no permission classes at all, so it carries `@drf_login_required` instead — a decorator in `views.py` that instantiates `DEFAULT_AUTHENTICATION_CLASSES`, runs them against the raw request, and on failure returns `401 {"detail": "Authentication credentials were not provided."}` with `WWW-Authenticate: Bearer realm="api"`. It is applied outside `@require_GET` so an anonymous caller never reaches the view body, and only ever on a GET, where session auth's CSRF enforcement is a no-op.
 
 The console sends a simplejwt Bearer token on every call including the export (`rest_framework_simplejwt.authentication.JWTAuthentication` is first in `DEFAULT_AUTHENTICATION_CLASSES`; `TokenAuthentication` and `SessionAuthentication` are also enabled project-wide and satisfy the check too). The signed slip viewer (§7) is the one deliberate exception and stays public — a browser `<img>` / `<iframe>` cannot carry a Bearer token, and exported spreadsheets link to it; its guard is the HMAC in `?s=`.
+
+**NUL bytes (0x00).** JSON and query strings both permit ` `; a Postgres `text` column cannot store it, and psycopg raises *"A string literal cannot contain NUL"* while **binding the parameter**, before the statement is ever sent. Unguarded, that is a raw 500 from pure client input — found by the adversarial bulk suite on 20 Aug 2026, on three live paths (a `sha256s` entry, `note`/`comment`, and `?q=`, the last of which also affected the list and the export and predated the bulk work).
+
+The split is deliberate: **reads scrub, writes reject.** `services.strip_nul` strips NUL from `q` and `category`, consistent with this endpoint's contract that unparseable filter values are ignored rather than rejected (and a NUL in a search box is never intentional). Every write path — `bulk/`, `review/`, `comments/` — returns **400** via `_nul_error` instead, because silently dropping bytes out of a note the caller sent is worse than telling them it was malformed.
 
 ### 3.1 `GET /audit/receipts/` — list — **auth required**
 
@@ -101,9 +105,22 @@ All filters are optional and combine with AND. Unparseable values are **ignored*
 | `min_total` / `max_total` | decimal | on `TOTAL_SQL` |
 | `ordering` | `slip_ts`, `-slip_ts` (default), `total`, `-total`, `supplier`, `-supplier`, `xero_status`, `-xero_status` | whitelist only; anything else → default |
 | `page` | int ≥ 1, default 1 | |
-| `page_size` | 1..200, default 50 | |
+| `page_size` | 1..200, default 50 | out-of-range values are **clamped**, not rejected (`_int(…, lo=1, hi=MAX_PAGE_SIZE)`) — `page_size=500` silently returns 200 rows |
+| `ids_only` | bool | returns just the matching sha256s (below) instead of rows |
 
 `totals` is computed over the **whole filter**, not the page.
+
+#### `ids_only=1` — the sha256s for the whole filter
+
+Feeds the console's **"select all N matching this filter"** affordance, which needs every id in the filter, not just the visible page.
+
+```json
+{"count": 147, "sha256s": ["a56aae…", "…"], "truncated": false}
+```
+
+`page` / `page_size` are ignored; `ordering` and every filter behave exactly as in the normal path, so the ids are precisely the rows the current filter selects. Capped at `MAX_IDS = 2000` with `truncated: true` when the filter matched more.
+
+This mode deliberately skips the journal LATERAL (§5) and the two `attach_review_state` ORM queries — it is a single indexed scan of `sha256`, which is the entire reason it exists. It therefore also does **not** bind `JOURNAL_ARGS`, because there are no lateral placeholders in the statement. Do not "fix" that by adding them.
 
 Response (shape from `_shape_row` + `attach_review_state`; values from a real row):
 
@@ -187,6 +204,37 @@ Columns, in order: `date` (= `slip_ts`), `supplier`, `total`, `category`, `xero_
 
 **Why it is a plain Django view.** `receipts_export_view` is `@require_GET`, not `@api_view`, on purpose: DRF content negotiation treats `?format=` as a renderer override and would 404 on `csv`/`xlsx` before the view ran. Consequence: it cannot use DRF permission classes, so auth is explicit — `@drf_login_required`, outermost (§3). Auth is checked **before** the `format` validation, so an anonymous caller gets the same 401 for `format=csv`, `format=xlsx` and `format=exe` and cannot probe the endpoint.
 
+### 3.6 `POST /audit/receipts/bulk/` — **auth required**
+
+Applies one or more review actions to up to 500 receipts in a single call. This is what the console's bulk-action bar posts.
+
+```
+POST /audit/receipts/bulk/
+Authorization: Bearer <jwt>
+{"sha256s": ["a56aae…", "b1c9f0…"], "set_to_process": true, "decision": "CAPTURE",
+ "note": "Sept fuel batch", "comment": "Bulk-flagged for the Sept capture run"}
+
+200
+{"updated": 2, "commented": 2, "unknown": []}
+```
+
+| Key | Required | Effect |
+|---|---|---|
+| `sha256s` | **yes** | list of sha256 strings, de-duplicated preserving order, **1..500 after de-duplication** |
+| `set_to_process` | no | sets `SlipReview.to_process` |
+| `decision` | no | sets `SlipReview.decision`; must be in the enum, and `''` **clears** it |
+| `note` | no | sets `SlipReview.note`; `''` is a legitimate "clear the note" |
+| `comment` | no | adds exactly **one** `SlipComment` per receipt, authored by the request user |
+
+At least one of the four action keys must be **present** (400 otherwise). The check is on key presence, not truthiness, so `{"note": ""}` is a valid clear.
+
+- `updated` counts `SlipReview` upserts (0 when only `comment` was sent); `commented` counts `SlipComment` rows created (0 when no `comment` was sent). `updated_by` / `author` come from the JWT user, as everywhere else.
+- **Unknown sha256s are reported, never fatal.** Any id not present in `whatsapp.klikk_slips` is returned in `unknown` and skipped; the known ones are still applied. Even if *every* id is unknown the response is **200** with `updated: 0`, not a 404 — a bulk call is a set operation, and failing the whole batch because one slip was deleted by the sync mid-review would be worse than the partial success the caller can see and act on.
+- The whole batch runs in one `transaction.atomic()`.
+- The 500 cap applies **after** de-duplication. The console chunks larger selections client-side (`BULK_MAX` in `src/api/receipts.js`) and sums the per-batch results.
+
+**Routing gotcha:** `path('bulk/', …)` must be registered **before** `path('<str:sha256>/', …)` in `apps/receipts/urls.py` — Django resolves in declaration order and the catch-all would otherwise swallow it, exactly as it would `export/`.
+
 ---
 
 ## 4. FY bucketing
@@ -265,8 +313,13 @@ The viewer itself stays public **by design**: the modal renders it in a plain `<
 Portal worktree: route `audit/receipts` (name `audit-receipts`) in `src/router/routes.js`, nav entry under the **Audit** group in `src/layouts/PipelineLayout.vue` (Lucide `receipt`), page `src/pages/AuditReceipts.vue`, API client `src/api/receipts.js`, pure helpers `src/utils/receipts.js`.
 
 - **Filters persisted in the query string** (`hydrateFromQuery` / `buildRouteQuery`): `q`, `fy`, `synced`, `status`, `to_process`, `decision`, `date_from`, `date_to`, `page`, `page_size` — defaults are omitted so a clean page has an empty query, and a filtered URL is shareable. `category`, `min_total`, `max_total`, `ordering` exist on the API but are not exposed as controls on the page today.
-- **Server-side pagination**: `page` 1-based, `page_size` 25/50/100 (API max 200); the table never holds more than one page. `totals` in the header come from the API and cover the whole filter.
+- **Server-side pagination**: `page` 1-based, `page_size` **25/50/100/200** (200 = the API maximum, so the selector can never ask for a size the backend would silently clamp); the table never holds more than one page. `totals` in the header come from the API and cover the whole filter. In `pagination="server"` mode KTable cannot change its own page size (the pagination state is controlled by props), so it emits `update:pageSize` and the page re-fetches.
 - Row actions: `to_process` toggle and `decision` select save inline via `PATCH …/review/`; **View** opens the detail modal; **Comment** opens it with the comment box focused. Export buttons call `/export/` with the current (non-paging) filters and download the file.
+- **Bulk actions.** Row checkboxes plus a header select-all (current page) via KTable's `selectable` / `v-model:selectedRowIds`. When every visible row is selected and the filter matches more, a **"select all N matching this filter"** affordance fetches the full id set from `?ids_only=1` (§3.1). A bar appears above the table while anything is selected: **To process ✓ / ✗**, a **Decision** menu (the five values plus *Clear decision*), **Add comment…** (dialog), and **Clear selection**. Each posts to `…/bulk/` (§3.6), updates the visible rows optimistically, reverts them on failure, and toasts the real counts the server returned.
+  - Selection is keyed on `sha256`. KTable's `getRowId` falls back to the **row index** when a row has no `id`, which would silently select the wrong receipts once you change page — so `load()` maps each result to carry `id: r.sha256`. Do not remove that alias.
+  - Selection **survives paging and page-size changes but resets when the filter changes** — `useReceiptSelection` watches a signature built from `buildApiParams(filters, { includePaging: false })`, which excludes `page` and `page_size` by construction.
+  - A successful bulk action deliberately **keeps** the selection so actions can be chained (flag to-process, then set a decision); there is an explicit *Clear selection* button.
+  - **Known race, accepted:** "select all N" snapshots ids at click time. If a receipt stops matching the filter between that fetch and the bulk POST (someone else reviews it, or the 06:00 sync re-runs), the selection can exceed `totals.count` and post a now-stale sha256. The server's `unknown` reporting plus the page's warning toast make it visible rather than silent, which is why it is accepted rather than locked.
 - All calls go through `apiClient`, which attaches the simplejwt Bearer token and refreshes on 401 — so, once the reads are gated (§7), the page keeps working unchanged.
 
 ---
@@ -276,14 +329,15 @@ Portal worktree: route `audit/receipts` (name `audit-receipts`) in `src/router/r
 | Piece | Path |
 |---|---|
 | Raw-SQL query layer, FY helpers, filter builder, shaping | `apps/receipts/services.py` |
-| Views (list, detail, review, comments, export) | `apps/receipts/views.py` |
+| Views (list + `ids_only`, detail, review, comments, bulk, export) | `apps/receipts/views.py` |
 | `SlipReview`, `SlipComment`, `DECISION_CHOICES` | `apps/receipts/models.py` |
 | URLs | `apps/receipts/urls.py` (`app_name = 'receipts'`), mounted from `klikk_business_intelligence/urls.py` |
 | Migration | `apps/receipts/migrations/0001_initial.py` |
 | Signed viewer + `slip_url()` | `apps/audit/slip_view.py`, `apps/audit/urls.py` |
 | `SLIP_VIEW_BASE_URL` | `klikk_business_intelligence/settings/base.py` |
 | App registration | `INSTALLED_APPS` → `'apps.receipts'` |
-| Console | `klikk_portal`: `src/pages/AuditReceipts.vue`, `src/api/receipts.js`, `src/utils/receipts.js`, `src/router/routes.js`, `src/layouts/PipelineLayout.vue` |
+| Console | `klikk_portal`: `src/pages/AuditReceipts.vue`, `src/api/receipts.js`, `src/utils/receipts.js`, `src/composables/useReceiptSelection.js`, `src/router/routes.js`, `src/layouts/PipelineLayout.vue` |
+| Bulk selection state (pure, unit-tested without a router) | `klikk_portal`: `src/composables/useReceiptSelection.js` |
 
 ---
 
@@ -291,7 +345,8 @@ Portal worktree: route `audit/receipts` (name `audit-receipts`) in `src/router/r
 
 - Migration `receipts/0001_initial` creates `receipts_slipreview` and `receipts_slipcomment` only; it does not touch `whatsapp.klikk_slips` or anything else. It was applied on deploy (19 Aug 2026) by the backend image's entrypoint.
 - Deploy recipe: merge `feature/receipts` in both repos → `docker compose up -d --build klikk-financials` (the entrypoint runs `migrate`) → `docker compose up -d --build klikk-financials-console`.
-- Post-deploy checks: `GET /backend/audit/receipts/` returns **401** anonymously; a signed `/backend/audit/slip/<sha>/?s=…` still returns **200** anonymously; the console serves the `audit/receipts` route.
+- Post-deploy checks: `GET /backend/audit/receipts/` returns **401** anonymously; `POST /backend/audit/receipts/bulk/` returns **401** anonymously; a signed `/backend/audit/slip/<sha>/?s=…` still returns **200** anonymously; the console serves the `audit/receipts` route.
+- The bulk endpoint (v3) added **no migration** — it reuses `SlipReview` / `SlipComment` unchanged, so it is a code-only deploy on the backend side.
 - **Warning:** the backend image's ENTRYPOINT (`scripts/docker-entrypoint.sh`) runs `python manage.py migrate --noinput` on **every** container start against the live DB. Any `docker run` / `docker compose run` of that image without `--entrypoint python` (or similar override) will apply this migration as a side effect. Do not start the image casually from a worktree that contains the unapplied migration.
 - `SLIP_VIEW_BASE_URL` must match the public prefix nginx serves the backend under (default `https://console.8-bit.space/backend`); if it is wrong every `view_url` in every export is dead.
 - The feature depends on `openpyxl` for XLSX (already in `requirements.txt`); CSV needs nothing extra.
