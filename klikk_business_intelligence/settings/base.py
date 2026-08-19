@@ -72,6 +72,7 @@ INSTALLED_APPS = [
     'apps.personal_expenses',  # Personal-expenses classification + reporting
     'apps.audit',  # Year-end audit registry (audit.checks / check_runs / check_results)
     'apps.receipts',  # Audit -> Receipts review workflow over whatsapp.klikk_slips
+    'apps.pricelist',  # Equipment rate card + effective-dated prices + quote builder
 ]
 
 MIDDLEWARE = [
@@ -163,10 +164,17 @@ AUTH_USER_MODEL = 'user.User'
 
 # Public base for signed slip-viewer links (apps.audit.slip_view.slip_url / receipts view_url)
 SLIP_VIEW_BASE_URL = os.environ.get('SLIP_VIEW_BASE_URL', 'https://console.8-bit.space/backend')
+# Shared service token for machine callers (the klikk-financials MCP server) that have no
+# Django user. Consumed by klikk_business_intelligence.permissions.ServiceTokenAuthentication.
+# Unset => service-token writes are denied (a warning is logged once).
+KLIKK_API_TOKEN = (os.environ.get('KLIKK_API_TOKEN') or '').strip()
 
 # REST Framework Configuration
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        # Must run BEFORE JWTAuthentication: that class raises InvalidToken (401) on an opaque
+        # Bearer token, so a permission class alone could never accept the service token.
+        'klikk_business_intelligence.permissions.ServiceTokenAuthentication',  # Shared service token (MCP)
         'rest_framework_simplejwt.authentication.JWTAuthentication',  # JWT authentication
         'rest_framework.authentication.TokenAuthentication',  # Keep for backward compatibility
         'rest_framework.authentication.SessionAuthentication',
