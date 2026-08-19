@@ -11,9 +11,10 @@ Contract
   goes through ``TOTAL_SQL`` (regex-guarded cast) — never a bare ``::numeric``.
 * ``xero_status`` has several ``MATCHED…`` variants; it is normalised to a
   ``status_group`` (MATCHED / PENDING / NOT IN XERO / SKIPPED) for filtering.
-* Journal numbers repeat across Xero organisations, so the matched-journal
-  join is scoped by ``xero_org`` -> ``xero_core_xerotenant.tenant_name`` and
-  aggregated to ONE summary row per slip (LATERAL + GROUP BY).
+* ``journal_number`` is only unique within (organisation, journal_type), so the
+  matched-journal join is scoped by BOTH ``JOURNAL_TYPE`` and the organisation
+  (from ``xero_org``, defaulting to Klikk), and aggregated to ONE summary row
+  per slip (LATERAL + GROUP BY).
 * FY runs Jul–Jun and is named by the ending year (FY26 = 2025-07-01..2026-06-30),
   bucketed on ``slip_ts`` in ``SLIP_TZ``.
 * ``SlipReview`` / ``SlipComment`` (this app's own tables) are attached via the
@@ -80,28 +81,67 @@ JOURNAL_COLUMNS = [
     'jn.account_code as j_account_code', 'jn.account_name as j_account_name', 'jn.contact_name as j_contact_name',
 ]
 
+# The Xero mirror holds four journal_type values (journal / transaction / system_journal /
+# manual_journal) and ``journal_number`` is only unique WITHIN (organisation_id, journal_type):
+# ~1,225 same-org (number) pairs span more than one type. Joining on number + org alone therefore
+# aggregates two unrelated transactions into one summary — amount/debit/credit are their sum and
+# description/account come from whichever happened to carry the larger debit (BUG-4).
+#
+# The Slippies auto-recon writes ``journal_number`` from the Xero *Journals* feed, i.e.
+# ``journal_type = 'journal'``. Verified against production on 19 Aug 2026: of the 139 slips
+# carrying a journal_number, 30 resolve under 'journal' (28 of them tying to the slip's OCR total
+# to the cent and to within 3 days of the slip date), 1 under 'manual_journal' (a false match:
+# 8 lines, R1,000 vs a R2,515 slip, dated 19 months earlier) and 0 under 'transaction' —
+# 'transaction' rows are invoice/bank-derived and live in a different number space.
+JOURNAL_TYPE = 'journal'
+
+# Slips carry the tenant NAME (``xero_org``), not its id. A blank/NULL ``xero_org`` means the recon
+# did not record one; those fall back to Klikk, the tenant the register is about. A name that does
+# not match a known tenant resolves to NULL and therefore to no journal — never to another tenant's
+# lines, which would silently show the wrong money.
+KLIKK_TENANT_ID = '41ebfa0e-012e-4ff1-82ba-a9a7585c536c'
+
 # One summary row per slip. The "main" line (description/account/contact) is the largest debit on a
-# non-bank account — the expense side of a receipt; the bank line is the credit side.
-JOURNAL_LATERAL_SQL = """
+# non-bank account — the expense side of a receipt; the bank line is the credit side. The summary
+# aggregates the DEBIT side only (``filter (where j.debit > 0)``), so a credit/bank line can never
+# supply the supplier or the account; a journal with no debit line at all falls back to the whole
+# journal rather than returning nulls.
+_MAIN_LINE_ORDER = "order by coalesce(a.type = 'BANK', false), j.debit desc, j.id"
+
+
+def _main_line(expr: str) -> str:
+    """First value of ``expr`` across the journal's debit lines, falling back to all lines."""
+    agg = f'array_agg({expr} {_MAIN_LINE_ORDER})'
+    return (f'coalesce(({agg} filter (where j.debit > 0 and {expr} is not null))[1], '
+            f'({agg} filter (where {expr} is not null))[1])')
+
+
+JOURNAL_LATERAL_SQL = f"""
 left join lateral (
     select j.journal_number,
-           min(j.date)                                                           as date,
-           (array_agg(j.description order by coalesce(a.type = 'BANK', false), j.debit desc, j.id))[1]             as description,
-           sum(j.debit)                                                          as debit,
-           sum(j.credit)                                                         as credit,
-           sum(j.debit)                                                          as amount,
-           (array_agg(a.code order by coalesce(a.type = 'BANK', false), j.debit desc, j.id))[1]                    as account_code,
-           (array_agg(a.name order by coalesce(a.type = 'BANK', false), j.debit desc, j.id))[1]                    as account_name,
-           (array_agg(c.name order by coalesce(a.type = 'BANK', false), j.debit desc, j.id)
-                filter (where c.name is not null))[1]                            as contact_name
+           min(j.date)                                       as date,
+           {_main_line('j.description')}                     as description,
+           sum(j.debit)                                      as debit,
+           sum(j.credit)                                     as credit,
+           coalesce(sum(j.debit) filter (where j.debit > 0), sum(j.debit))  as amount,
+           {_main_line('a.code')}                            as account_code,
+           {_main_line('a.name')}                            as account_name,
+           {_main_line('c.name')}                            as contact_name
     from xero_data_xerojournals j
-    join xero_core_xerotenant t on t.tenant_id = j.organisation_id and t.tenant_name = s.xero_org
     left join xero_metadata_xeroaccount a on a.account_id = j.account_id
     left join xero_metadata_xerocontacts c on c.contacts_id = j.contact_id
     where j.journal_number = s.journal_number
+      and j.journal_type = %s
+      and j.organisation_id = case
+              when coalesce(s.xero_org, '') = '' then %s
+              else (select t.tenant_id from xero_core_xerotenant t where t.tenant_name = s.xero_org)
+          end
     group by j.journal_number
 ) jn on s.journal_number is not null
 """
+# Bound to the two %s placeholders above; they precede the WHERE-clause args because the
+# lateral appears earlier in the statement.
+JOURNAL_ARGS: list[Any] = [JOURNAL_TYPE, KLIKK_TENANT_ID]
 
 
 # --------------------------------------------------------------------------- #
@@ -262,7 +302,7 @@ def query_totals(where: str, args: list[Any]) -> dict[str, Any]:
 
 def query_slips(where: str, args: list[Any], ordering: str, *, limit: int | None = None, offset: int = 0) -> list[dict[str, Any]]:
     sql = f'{_base_select()} where {where} order by {ordering}'
-    params = list(args)
+    params = [*JOURNAL_ARGS, *args]
     if limit is not None:
         sql += ' limit %s offset %s'
         params += [limit, offset]
@@ -274,7 +314,7 @@ def query_slips(where: str, args: list[Any], ordering: str, *, limit: int | None
 def query_slip(sha256: str) -> dict[str, Any] | None:
     sql = f"{_base_select(['s.ocr'])} where s.sha256 = %s"
     with connection.cursor() as cur:
-        cur.execute(sql, [sha256])
+        cur.execute(sql, [*JOURNAL_ARGS, sha256])
         rows = _fetch_dicts(cur)
     if not rows:
         return None
