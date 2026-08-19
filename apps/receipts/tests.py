@@ -899,7 +899,6 @@ class ReviewPatchTests(ReceiptsFixtureMixin, TestCase):
             self.assertEqual(resp.status_code, 200, (raw, resp.content))
             self.assertEqual(resp.json()['to_process'], want, f'to_process={raw!r}')
 
-    @unittest.expectedFailure  # BUG-3 (minor) — remove this decorator once views.py lowercases the value
     def test_to_process_uppercase_TRUE_is_coerced_true(self):
         # BUG-3: views.py receipt_review_view — `data['to_process'] in (True, 1, '1', 'true', 'True', 'yes', 'on')`
         # means 'TRUE' / 'Yes' / 'ON' silently become False: the client is told 200 but the flag is off.
@@ -909,7 +908,6 @@ class ReviewPatchTests(ReceiptsFixtureMixin, TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(resp.json()['to_process'], "to_process='TRUE' silently coerced to False")
 
-    @unittest.expectedFailure  # BUG-1 — remove this decorator once the view rejects non-dict bodies with 400
     def test_non_object_json_body_does_not_500(self):
         # BUG-1: views.py receipt_review_view does `'note' in data` / `data['note']` on whatever JSON
         # was posted. A JSON *string* body containing the substring 'note' (or 'decision') passes the
@@ -1008,7 +1006,6 @@ class CommentPostTests(ReceiptsFixtureMixin, TestCase):
         created = [c['created_at'] for c in detail['comments']]
         self.assertEqual(created, sorted(created))
 
-    @unittest.expectedFailure  # BUG-2 — remove this decorator once the view rejects non-dict bodies with 400
     def test_non_object_json_body_does_not_500(self):
         # BUG-2: views.py receipt_comments_view `(request.data or {}).get('text')` — a non-empty JSON
         # list / number / string body is truthy and has no .get -> AttributeError -> 500.

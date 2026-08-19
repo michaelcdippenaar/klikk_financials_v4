@@ -26,9 +26,11 @@ from rest_framework.response import Response
 
 from .models import DECISION_VALUES, SlipComment, SlipReview
 from .services import (
-    DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, attach_review_state, build_filters, comment_to_dict, query_slip,
+    DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, _bool, attach_review_state, build_filters, comment_to_dict, query_slip,
     query_slips, query_totals, resolve_ordering, review_to_dict, slip_exists,
 )
+
+_BODY_NOT_OBJECT = 'request body must be a JSON object'
 
 EXPORT_COLUMNS = [
     ('slip_ts', 'date'), ('supplier', 'supplier'), ('total', 'total'), ('category', 'category'),
@@ -90,10 +92,22 @@ def receipt_detail_view(request, sha256):
 def receipt_review_view(request, sha256):
     if not slip_exists(sha256):
         return Response({'detail': 'slip not found'}, status=status.HTTP_404_NOT_FOUND)
-    data = request.data or {}
+    data = request.data
+    if not isinstance(data, dict):
+        # A JSON string/number/list/null parses fine but is not a mapping; `'note' in data` /
+        # `data['note']` would raise TypeError -> 500 from pure client input.
+        return Response({'detail': _BODY_NOT_OBJECT}, status=status.HTTP_400_BAD_REQUEST)
     fields = {}
     if 'to_process' in data:
-        fields['to_process'] = data['to_process'] in (True, 1, '1', 'true', 'True', 'yes', 'on')
+        raw = data['to_process']
+        # Same coercion as services._bool (case-insensitive) so the client never gets a 200 while
+        # a value like 'TRUE' / 'Yes' / 'ON' is silently stored as False. Unrecognised values are
+        # rejected rather than silently coerced; None (explicit clear) stays False.
+        flag = _bool(raw)
+        if flag is None and raw is not None:
+            return Response({'detail': 'to_process must be a boolean (true/false, 1/0, yes/no, on/off)'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        fields['to_process'] = bool(flag)
     if 'decision' in data:
         decision = str(data['decision'] or '').strip().upper()
         if decision not in DECISION_VALUES:
@@ -115,7 +129,10 @@ def receipt_review_view(request, sha256):
 def receipt_comments_view(request, sha256):
     if not slip_exists(sha256):
         return Response({'detail': 'slip not found'}, status=status.HTTP_404_NOT_FOUND)
-    text = str((request.data or {}).get('text') or '').strip()
+    data = request.data
+    if not isinstance(data, dict):
+        return Response({'detail': _BODY_NOT_OBJECT}, status=status.HTTP_400_BAD_REQUEST)
+    text = str(data.get('text') or '').strip()
     if not text:
         return Response({'detail': 'text is required'}, status=status.HTTP_400_BAD_REQUEST)
     comment = SlipComment.objects.create(sha256=sha256, text=text, author=_username(request))
