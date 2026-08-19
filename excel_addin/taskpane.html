@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Klikk Journals</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+</head>
+<body>
+  <div id="app" hidden>
+
+    <header class="hd">
+      <img class="hd__mark" src="assets/icon-32.png" alt="">
+      <div>
+        <h1>Klikk Journals</h1>
+        <p class="hd__sub" id="connLabel">Not connected</p>
+      </div>
+      <button class="iconbtn" id="btnSettings" title="Connection settings" aria-label="Connection settings">&#9881;</button>
+    </header>
+
+    <!-- ── Connection ─────────────────────────────────────────── -->
+    <section class="panel" id="settingsPanel" hidden>
+      <h2>Connection</h2>
+      <label for="baseUrl">API base URL</label>
+      <input type="url" id="baseUrl" spellcheck="false" autocomplete="off">
+      <label for="token">API token</label>
+      <input type="password" id="token" spellcheck="false" autocomplete="off" placeholder="paste the add-in token">
+      <p class="hint">Stored in your Office roaming settings for this account — not saved inside the workbook.</p>
+      <div class="row">
+        <button class="btn btn--primary" id="btnConnect">Connect</button>
+        <button class="btn" id="btnForget">Forget</button>
+      </div>
+      <p class="msg" id="settingsMsg"></p>
+    </section>
+
+    <!-- ── Query ──────────────────────────────────────────────── -->
+    <section class="panel" id="queryPanel" hidden>
+      <h2>Filters</h2>
+
+      <label for="tenant">Entity</label>
+      <select id="tenant"><option value="">All entities</option></select>
+
+      <label for="journalType">Journal type</label>
+      <select id="journalType"><option value="">All types</option></select>
+      <p class="hint hint--warn" id="typeHint" hidden>
+        Xero mirrors each entry under more than one type. Leaving this on “All types”
+        double-counts totals — pick one before summing.
+      </p>
+
+      <div class="grid2">
+        <div>
+          <label for="dateFrom">From</label>
+          <input type="date" id="dateFrom">
+        </div>
+        <div>
+          <label for="dateTo">To</label>
+          <input type="date" id="dateTo">
+        </div>
+      </div>
+
+      <label for="account">Account <span class="lbl-note">code or name</span></label>
+      <input type="text" id="account" list="accountList" spellcheck="false" placeholder="e.g. 446 or Water">
+      <datalist id="accountList"></datalist>
+
+      <label for="contact">Supplier / contact</label>
+      <input type="text" id="contact" list="contactList" spellcheck="false" placeholder="supplier or customer name">
+      <datalist id="contactList"></datalist>
+
+      <details class="more">
+        <summary>More filters</summary>
+        <label for="reference">Reference</label>
+        <input type="text" id="reference" spellcheck="false">
+        <label for="description">Description</label>
+        <input type="text" id="description" spellcheck="false">
+        <label for="amount">Exact amount</label>
+        <input type="text" id="amount" spellcheck="false" inputmode="decimal" placeholder="e.g. 1014.61">
+        <label for="q">Search anywhere</label>
+        <input type="text" id="q" spellcheck="false" placeholder="description, reference, contact, account">
+      </details>
+
+    </section>
+
+    <!-- ── Detail rows ────────────────────────────────────────── -->
+    <section class="panel" id="detailPanel" hidden>
+      <h2>Detail rows</h2>
+      <label for="maxRows">Row limit</label>
+      <select id="maxRows">
+        <option value="5000">5,000</option>
+        <option value="20000" selected>20,000</option>
+        <option value="50000">50,000</option>
+        <option value="100000">100,000</option>
+        <option value="0">No limit</option>
+      </select>
+      <div class="row">
+        <button class="btn btn--primary" id="btnLoad">Load to new sheet</button>
+        <button class="btn" id="btnCount">Count</button>
+      </div>
+      <div class="row">
+        <button class="btn" id="btnPivot" disabled>Add Excel PivotTable to this sheet</button>
+      </div>
+      <div class="count" id="countLine">&nbsp;</div>
+      <p class="hint">A native PivotTable aggregates only the rows on the sheet.
+        For totals over the whole ledger use the cube view below.</p>
+    </section>
+
+    <!-- ── Cube view ──────────────────────────────────────────── -->
+    <section class="panel" id="cubePanel" hidden>
+      <h2>Cube view</h2>
+
+      <label for="measure">Measure</label>
+      <select id="measure"></select>
+
+      <label>Rows <span class="lbl-note">outermost first</span></label>
+      <select id="row1" class="dimsel"></select>
+      <select id="row2" class="dimsel"></select>
+      <select id="row3" class="dimsel"></select>
+
+      <label>Columns</label>
+      <select id="col1" class="dimsel"></select>
+      <select id="col2" class="dimsel"></select>
+
+      <label class="chk"><input type="checkbox" id="suppress" checked> Suppress zero rows</label>
+
+      <div class="row">
+        <button class="btn btn--primary" id="btnCube">Build cube view</button>
+      </div>
+      <p class="hint">Aggregated in Postgres over every matching journal line —
+        the row limit above does not apply.</p>
+      <p class="msg" id="cubeMsg"></p>
+    </section>
+
+    <!-- ── Refresh ────────────────────────────────────────────── -->
+    <section class="panel" id="refreshPanel" hidden>
+      <h2>This sheet</h2>
+      <p class="sheetinfo" id="sheetInfo">No Klikk query is bound to the active sheet.</p>
+      <div class="row">
+        <button class="btn btn--primary" id="btnRefresh" disabled>Refresh</button>
+        <button class="btn" id="btnRestore" disabled>Load filters</button>
+      </div>
+    </section>
+
+    <!-- ── Progress ───────────────────────────────────────────── -->
+    <section class="panel panel--progress" id="progressPanel" hidden>
+      <p class="msg" id="progressMsg"></p>
+      <div class="bar"><div class="bar__fill" id="progressFill"></div></div>
+      <button class="btn btn--danger" id="btnCancel">Cancel</button>
+    </section>
+
+    <p class="msg msg--err" id="errorMsg" hidden></p>
+  </div>
+
+  <div id="boot" class="boot">Loading&hellip;</div>
+
+  <script src="app.js"></script>
+</body>
+</html>

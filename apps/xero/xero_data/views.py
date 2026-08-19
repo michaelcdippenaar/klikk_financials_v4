@@ -5,18 +5,19 @@ import logging
 from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
-from django.db.models import Q
+from django.db.models import Q, Min, Max
 from django.utils.dateparse import parse_date
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
 
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_auth.models import XeroClientCredentials
 from apps.xero.xero_data.services import update_financial_data
 from apps.xero.xero_data.models import XeroJournals, XeroJournalsSource, XeroDocument, AgedPayable, AgedReceivable
+from apps.xero.xero_metadata.models import XeroTracking
 from apps.xero.xero_data.document_sync import sync_documents_for_tenant
 from apps.xero.xero_sync.api_call_logging import log_xero_api_calls
 from apps.xero.xero_data.aged_reports_service import sync_aged_payables, sync_aged_receivables
@@ -36,10 +37,13 @@ class XeroJournalSearchView(APIView):
     - account: account code or account name fragment
     - contact: contact name fragment
     - reference: reference fragment
+    - journal_type: 'journal' or 'transaction' (journals are mirrored under both)
     - description: description fragment
     - limit/offset: pagination, max limit 1000
     """
-    permission_classes = [AllowAny]
+    # Locked down 2026-08-19: this endpoint exposes the full general ledger.
+    # Excel add-in authenticates with a DRF token; the console sends its JWT.
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         qs = XeroJournals.objects.select_related(
@@ -49,6 +53,7 @@ class XeroJournalSearchView(APIView):
             'tracking1',
             'tracking2',
             'transaction_source',
+            'transaction_source__contact',
         ).order_by('-date', '-journal_number', '-id')
 
         q = (request.query_params.get('q') or '').strip()
@@ -57,6 +62,7 @@ class XeroJournalSearchView(APIView):
                 Q(description__icontains=q)
                 | Q(reference__icontains=q)
                 | Q(contact__name__icontains=q)
+                | Q(transaction_source__contact__name__icontains=q)
                 | Q(account__code__icontains=q)
                 | Q(account__name__icontains=q)
                 | Q(organisation__tenant_name__icontains=q)
@@ -75,7 +81,12 @@ class XeroJournalSearchView(APIView):
 
         contact = (request.query_params.get('contact') or '').strip()
         if contact:
-            qs = qs.filter(contact__name__icontains=contact)
+            # journal-type rows carry no contact of their own; the supplier only
+            # exists on the transaction source, so match either side.
+            qs = qs.filter(
+                Q(contact__name__icontains=contact)
+                | Q(transaction_source__contact__name__icontains=contact)
+            )
 
         reference = (request.query_params.get('reference') or '').strip()
         if reference:
@@ -84,6 +95,10 @@ class XeroJournalSearchView(APIView):
         description = (request.query_params.get('description') or '').strip()
         if description:
             qs = qs.filter(description__icontains=description)
+
+        journal_type = (request.query_params.get('journal_type') or '').strip()
+        if journal_type:
+            qs = qs.filter(journal_type__iexact=journal_type)
 
         amount_param = (request.query_params.get('amount') or '').strip()
         if amount_param:
@@ -129,6 +144,10 @@ class XeroJournalSearchView(APIView):
             tracking1 = journal.tracking1
             tracking2 = journal.tracking2
             transaction_source = journal.transaction_source
+            source_contact = transaction_source.contact if transaction_source else None
+            # Xero hangs the supplier off the source document, not the journal line;
+            # only 'transaction' rows carry a contact directly.
+            supplier = contact_obj or source_contact
             results.append({
                 'id': journal.id,
                 'tenant_id': journal.organisation.tenant_id if journal.organisation else '',
@@ -144,9 +163,13 @@ class XeroJournalSearchView(APIView):
                 'credit': str(journal.credit),
                 'tax_amount': str(journal.tax_amount),
                 'contact_name': contact_obj.name if contact_obj else '',
+                'supplier_name': supplier.name if supplier else '',
+                'supplier_via': ('journal' if contact_obj else ('source' if source_contact else '')),
                 'description': journal.description or '',
                 'reference': journal.reference or '',
+                'tracking1_category': tracking1.name if tracking1 else '',
                 'tracking1': tracking1.option if tracking1 else '',
+                'tracking2_category': tracking2.name if tracking2 else '',
                 'tracking2': tracking2.option if tracking2 else '',
                 'transaction_source_type': transaction_source.transaction_source if transaction_source else '',
                 'transaction_source_id': transaction_source.transactions_id if transaction_source else '',
@@ -165,7 +188,10 @@ class XeroUpdateDataView(APIView):
     API endpoint to update Xero transaction data (bank_transactions, invoices, payments, journals).
     This is separate from metadata updates (accounts, contacts, tracking categories).
     """
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    # SECURITY (2026-08-20): mutating Xero trigger. Was AllowAny on a publicly
+    # routed host, so anyone on the internet could start a sync and burn the
+    # 1,000-calls/day tenant budget. Console sends its JWT; MCP uses the service token.
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         """
@@ -230,7 +256,10 @@ class XeroProcessJournalsView(APIView):
     This parses the raw journal data and creates individual journal line records.
     Handles both regular journals and manual journals.
     """
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    # SECURITY (2026-08-20): mutating Xero trigger. Was AllowAny on a publicly
+    # routed host, so anyone on the internet could start a sync and burn the
+    # 1,000-calls/day tenant budget. Console sends its JWT; MCP uses the service token.
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         """
@@ -317,7 +346,10 @@ class XeroSyncDocumentsView(APIView):
 
     Requires Xero OAuth scope: accounting.attachments or accounting.attachments.read.
     """
-    permission_classes = [AllowAny]
+    # SECURITY (2026-08-20): mutating Xero trigger. Was AllowAny on a publicly
+    # routed host, so anyone on the internet could start a sync and burn the
+    # 1,000-calls/day tenant budget. Console sends its JWT; MCP uses the service token.
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         """
@@ -390,7 +422,10 @@ class XeroSyncAgedPayablesView(APIView):
     Response: { "created": N, "updated": N, "skipped": N, "errors": N,
                 "contact_count": N, "completed_at": "<ISO>" }
     """
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    # SECURITY (2026-08-20): mutating Xero trigger. Was AllowAny on a publicly
+    # routed host, so anyone on the internet could start a sync and burn the
+    # 1,000-calls/day tenant budget. Console sends its JWT; MCP uses the service token.
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         tenant_id = request.data.get('tenant_id')
@@ -423,7 +458,10 @@ class XeroSyncAgedReceivablesView(APIView):
     Response: { "created": N, "updated": N, "skipped": N, "errors": N,
                 "contact_count": N, "completed_at": "<ISO>" }
     """
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    # SECURITY (2026-08-20): mutating Xero trigger. Was AllowAny on a publicly
+    # routed host, so anyone on the internet could start a sync and burn the
+    # 1,000-calls/day tenant budget. Console sends its JWT; MCP uses the service token.
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         tenant_id = request.data.get('tenant_id')
@@ -547,7 +585,10 @@ class XeroSyncQuotesView(APIView):
     Payload: { "tenant_id": "<UUID>", "modified_since": "YYYY-MM-DD"?, "full": bool? }
     Response: { stats dict from sync_xero_quotes }
     """
-    permission_classes = [AllowAny]  # TODO: IsAuthenticated for production
+    # SECURITY (2026-08-20): mutating Xero trigger. Was AllowAny on a publicly
+    # routed host, so anyone on the internet could start a sync and burn the
+    # 1,000-calls/day tenant budget. Console sends its JWT; MCP uses the service token.
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         tenant_id = request.data.get('tenant_id')
@@ -728,7 +769,10 @@ from apps.xero.xero_data.invoices_service import sync_xero_invoices  # noqa: E40
 class XeroSyncInvoicesView(APIView):
     """POST /xero/data/invoices/sync/
     Payload: { tenant_id, modified_since?, type?, statuses?, full? }"""
-    permission_classes = [AllowAny]
+    # SECURITY (2026-08-20): mutating Xero trigger. Was AllowAny on a publicly
+    # routed host, so anyone on the internet could start a sync and burn the
+    # 1,000-calls/day tenant budget. Console sends its JWT; MCP uses the service token.
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         tenant_id = request.data.get('tenant_id')
@@ -904,3 +948,69 @@ class XeroInvoiceDetailView(APIView):
             return Response({'error': 'Invoice not found'}, status=status.HTTP_404_NOT_FOUND)
         return Response(_serialize_invoice(inv, include_lines=True),
                         status=status.HTTP_200_OK)
+
+
+class XeroJournalFilterOptionsView(APIView):
+    """
+    Dropdown fodder for the Excel add-in: the tenants and accounts that actually
+    appear in the journal table, plus the distinct journal types.
+
+    Derived from the journals themselves rather than the metadata tables, so the
+    lists never offer a filter that returns nothing.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        tenants = (
+            XeroJournals.objects
+            .values('organisation__tenant_id', 'organisation__tenant_name')
+            .distinct()
+            .order_by('organisation__tenant_name')
+        )
+        accounts = (
+            XeroJournals.objects
+            .values('account__code', 'account__name', 'account__type')
+            .distinct()
+            .order_by('account__code')
+        )
+        journal_types = (
+            XeroJournals.objects
+            .values_list('journal_type', flat=True)
+            .distinct()
+            .order_by('journal_type')
+        )
+        # Suppliers reachable from a journal line — directly, or via the source
+        # document, which is the only place 'journal' rows carry a contact.
+        contacts = sorted({
+            name for name in (
+                list(XeroJournals.objects
+                     .exclude(contact__isnull=True)
+                     .values_list('contact__name', flat=True).distinct())
+                + list(XeroJournals.objects
+                       .exclude(transaction_source__contact__isnull=True)
+                       .values_list('transaction_source__contact__name', flat=True).distinct())
+            ) if name
+        })
+        tracking_categories = sorted({
+            name for name in XeroTracking.objects
+            .values_list('name', flat=True).distinct() if name
+        })
+        date_range = XeroJournals.objects.aggregate(
+            first=Min('date'), last=Max('date')
+        )
+
+        return Response({
+            'tenants': [
+                {'tenant_id': t['organisation__tenant_id'], 'tenant_name': t['organisation__tenant_name']}
+                for t in tenants if t['organisation__tenant_id']
+            ],
+            'accounts': [
+                {'code': a['account__code'], 'name': a['account__name'], 'type': a['account__type']}
+                for a in accounts if a['account__code']
+            ],
+            'journal_types': [jt for jt in journal_types if jt],
+            'contacts': contacts,
+            'tracking_categories': tracking_categories,
+            'date_from': date_range['first'].date().isoformat() if date_range['first'] else None,
+            'date_to': date_range['last'].date().isoformat() if date_range['last'] else None,
+        })

@@ -15,11 +15,12 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
-from django.urls import path, include
+from django.urls import path, include, re_path
 from django.contrib.auth import views as auth_views
 from rest_framework.authtoken.views import obtain_auth_token
 from django.conf import settings
 from django.conf.urls.static import static
+from django.views.static import serve as static_serve
 
 from apps.xero.xero_auth.views import XeroCallbackView
 
@@ -58,6 +59,15 @@ urlpatterns = [
 
     # Deployment webhook
     path('deployment/', include('apps.deployment.urls')),
+
+    # Excel add-in static bundle (manifest + task pane). Public by design:
+    # Office fetches these before any token exists, and they hold no secrets.
+    re_path(
+        r'^excel-addin/(?P<path>.*)$',
+        static_serve,
+        {'document_root': settings.BASE_DIR / 'excel_addin'},
+        name='excel_addin',
+    ),
 ]
 
 # Serve static and media files

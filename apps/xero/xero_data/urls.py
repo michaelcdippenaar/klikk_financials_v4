@@ -1,10 +1,13 @@
 from django.urls import path, re_path
-from apps.xero.xero_data import views
+from apps.xero.xero_data import views, pivot_views
 
 app_name = 'xero_data'
 
 urlpatterns = [
     path('journals/search/', views.XeroJournalSearchView.as_view(), name='journal_search'),
+    path('journals/filters/', views.XeroJournalFilterOptionsView.as_view(), name='journal_filters'),
+    path('journals/pivot/', pivot_views.XeroJournalPivotView.as_view(), name='journal_pivot'),
+    path('journals/pivot/dimensions/', pivot_views.XeroJournalPivotDimensionsView.as_view(), name='journal_pivot_dims'),
     path('update/journals/', views.XeroUpdateDataView.as_view(), name='update_data'),
     # Support both with and without trailing slash
     path('process/journals/', views.XeroProcessJournalsView.as_view(), name='process_journals'),
