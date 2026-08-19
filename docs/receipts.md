@@ -1,6 +1,6 @@
 # Klikk Financials — Audit → Receipts (Slippies review workflow)
 *Living document. Describes the `apps.receipts` app (backend) and the console page `Audit → Receipts` (portal) as of branch `feature/receipts`, backend commit `1460497`. Written from the code, not from intent — where the code and this page disagree, the code wins and this page needs fixing.*
-*Version 1 — 19 Aug 2026. Not yet deployed; see §10.*
+*Version 2 — 19 Aug 2026. Updated for the auth gate (§3, §7) and the journal-type discriminator (§5); deployed, see §10.*
 
 ---
 
@@ -80,9 +80,11 @@ The raw SQL never joins these tables. Review state is attached after the query b
 
 `klikk_business_intelligence/urls.py`: `path('audit/receipts/', include('apps.receipts.urls'))`, placed **before** `path('audit/', …)` so it isn't shadowed. Behind nginx the public prefix is `/backend`, so the production URL is `https://console.8-bit.space/backend/audit/receipts/`.
 
-**Auth, stated plainly.** The project's DRF default is `AllowAny`. The two **read** endpoints and the **export** inherit that and are reachable without a token (known project-wide issue, being fixed separately — see the security note in §7). The two **write** endpoints are `@permission_classes([IsAuthenticated])`; the console sends a simplejwt Bearer token (`rest_framework_simplejwt.authentication.JWTAuthentication` is first in `DEFAULT_AUTHENTICATION_CLASSES`; `TokenAuthentication` and `SessionAuthentication` are also enabled project-wide and would satisfy the check too).
+**Auth, stated plainly.** The project's DRF default is `AllowAny`, so every endpoint here opts out of it explicitly: **all five require an authenticated user and return 401 otherwise.** The four DRF views carry `@permission_classes([IsAuthenticated])`. The export is a plain Django view (§3.5) and therefore has no permission classes at all, so it carries `@drf_login_required` instead — a decorator in `views.py` that instantiates `DEFAULT_AUTHENTICATION_CLASSES`, runs them against the raw request, and on failure returns `401 {"detail": "Authentication credentials were not provided."}` with `WWW-Authenticate: Bearer realm="api"`. It is applied outside `@require_GET` so an anonymous caller never reaches the view body, and only ever on a GET, where session auth's CSRF enforcement is a no-op.
 
-### 3.1 `GET /audit/receipts/` — list
+The console sends a simplejwt Bearer token on every call including the export (`rest_framework_simplejwt.authentication.JWTAuthentication` is first in `DEFAULT_AUTHENTICATION_CLASSES`; `TokenAuthentication` and `SessionAuthentication` are also enabled project-wide and satisfy the check too). The signed slip viewer (§7) is the one deliberate exception and stays public — a browser `<img>` / `<iframe>` cannot carry a Bearer token, and exported spreadsheets link to it; its guard is the HMAC in `?s=`.
+
+### 3.1 `GET /audit/receipts/` — list — **auth required**
 
 All filters are optional and combine with AND. Unparseable values are **ignored** (not 400) — a bad `fy` or `date_from` silently drops that filter.
 
@@ -155,7 +157,7 @@ Response (shape from `_shape_row` + `attach_review_state`; values from a real ro
 
 Notes on the shape: money fields are **strings** quantised to 2dp (`"13.50"`), `null` when absent; `journal` is `null` when no journal resolved (§5); `review` is always present (defaults when no `SlipReview` row exists); `fy` is derived server-side from `slip_ts` in SLIP_TZ. `sum_total` above is illustrative — it is `coalesce(sum(TOTAL_SQL), 0)` over the filter.
 
-### 3.2 `GET /audit/receipts/<sha256>/` — detail
+### 3.2 `GET /audit/receipts/<sha256>/` — detail — **auth required**
 
 Same row as the list plus `ocr` (full jsonb object), `items` (`[{description, amount}]`, normalised from `ocr.items`; `[]` when absent) and `comments` (`[{id, text, author, created_at}]` oldest first). 404 `{"detail": "slip not found"}` for an unknown sha256.
 
@@ -177,13 +179,13 @@ Authorization: Bearer <jwt>
 
 Body `{"text": "…"}` (trimmed, required → 400 `text is required`). Returns 201 `{"id": 12, "text": "…", "author": "mc", "created_at": "…"}`.
 
-### 3.5 `GET /audit/receipts/export/?…&format=csv|xlsx`
+### 3.5 `GET /audit/receipts/export/?…&format=csv|xlsx` — **auth required**
 
 Same filter and `ordering` params as the list; **no pagination** — every matching row. Default `format=csv`; anything other than `csv`/`xlsx` → 400. Filename `receipts-YYYY-MM-DD.csv|xlsx` via `Content-Disposition: attachment`. XLSX uses `openpyxl` (in `requirements.txt`); if the import fails the view degrades to CSV and sets `X-Export-Note: openpyxl unavailable; degraded to csv`.
 
 Columns, in order: `date` (= `slip_ts`), `supplier`, `total`, `category`, `xero_status`, `status_group`, `journal_number`, `synced`, `to_process`, `decision`, `note`, `filename`, `sha256`, **`view_url`**.
 
-**Why it is a plain Django view.** `receipts_export_view` is `@require_GET`, not `@api_view`, on purpose: DRF content negotiation treats `?format=` as a renderer override and would 404 on `csv`/`xlsx` before the view ran. Consequence: it does not use DRF authentication/permission classes at all — it is unauthenticated by construction, not by inheriting `AllowAny` (see §7 security note).
+**Why it is a plain Django view.** `receipts_export_view` is `@require_GET`, not `@api_view`, on purpose: DRF content negotiation treats `?format=` as a renderer override and would 404 on `csv`/`xlsx` before the view ran. Consequence: it cannot use DRF permission classes, so auth is explicit — `@drf_login_required`, outermost (§3). Auth is checked **before** the `format` validation, so an anonymous caller gets the same 401 for `format=csv`, `format=xlsx` and `format=exe` and cannot probe the endpoint.
 
 ---
 
@@ -201,9 +203,23 @@ The portal mirrors the rule in `src/utils/receipts.js` (`fyForDate`, `FY_START_M
 
 `JOURNAL_LATERAL_SQL` attaches at most one `journal` object per slip:
 
-- **`journal_number` is not unique on its own — numbers collide across Xero tenants.** Journal #697 exists in both `Klikk (Pty) Ltd` and `Dippenaar Family` (2 lines each, today). So the join is org-scoped: `xero_data_xerojournals j join xero_core_xerotenant t on t.tenant_id = j.organisation_id and t.tenant_name = s.xero_org`. A slip with a `journal_number` but a blank `xero_org` will never resolve a journal.
-- **Aggregated to exactly one row per slip** (`left join lateral … group by j.journal_number`) so the list never fans out. The "main" line (`description`, `account_code`, `account_name`, `contact_name`) is the first line ordered by `coalesce(a.type = 'BANK', false), j.debit desc, j.id` — i.e. the largest debit on a non-BANK account, the expense side of the receipt. `debit`/`credit`/`amount` are sums over all lines (`amount = sum(debit)`); `date = min(date)`.
-- **Data-completeness caveat — upstream, not a query bug.** 139 slips carry a `journal_number` (139 distinct numbers), but only **32** of those numbers currently exist in `xero_data_xerojournals` at all, and **31 slips** resolve to a journal through the org-scoped join. The other ~108 matched slips show `journal: null` ("Unmatched" in the console's Xero panel) even though `xero_status` says MATCHED and `xero_detail` names the journal. That is the Xero journal mirror being incomplete for those numbers; fixing it is a Xero-sync job, not a receipts change.
+`journal_number` **is not a key on its own.** It is unique only within `(organisation_id, journal_type)`, and it collides on both axes:
+
+- **Across tenants.** Journal #697 exists in both `Klikk (Pty) Ltd` and `Dippenaar Family` (2 lines each, today).
+- **Across journal types in the same tenant.** The mirror holds four `journal_type` values — `journal` (142,437 rows), `transaction` (65,859), `system_journal` (56,067), `manual_journal` (7,377) — and ~1,225 same-org `journal_number` values appear under more than one of them. Joining on number + org alone therefore aggregates two unrelated transactions into a single summary: `amount`/`debit`/`credit` become their sum and `description`/`account` come from whichever carried the larger debit. That was **BUG-4**, fixed here.
+
+So the join is scoped on **three** things:
+
+1. `j.journal_number = s.journal_number`
+2. `j.journal_type = 'journal'` (`services.JOURNAL_TYPE`). The Slippies auto-recon writes `journal_number` from the Xero **Journals** feed. Verified against production 19 Aug 2026: of the 139 slips carrying a `journal_number`, **30 resolve under `journal`** — 28 of them tying to the slip's OCR total *to the cent* and to within 3 days of the slip date — **1 under `manual_journal`** (#216150: 8 lines, R1,000 against a R2,515 slip, dated 19 months earlier — a false match, now correctly dropped) and **0 under `transaction`** (transaction rows are invoice/bank-derived and live in a different number space; Klikk's `journal` numbers top out at 46,902 while `transaction` runs to 999,995).
+3. `j.organisation_id` = the tenant named by `s.xero_org`, or `services.KLIKK_TENANT_ID` (`41ebfa0e-…`) when `xero_org` is blank/NULL. An `xero_org` that names *no* known tenant resolves to NULL and therefore to **no** journal — never to another tenant's lines. (Today all 325 blank-`xero_org` slips also have a NULL `journal_number`, so the Klikk default is a forward guard rather than live behaviour.)
+
+**Aggregated to exactly one row per slip** (`left join lateral … group by j.journal_number`) so the list never fans out. The summary is built from the **debit side only** (`filter (where j.debit > 0)`): `amount = sum(debit) filter (debit > 0)`, and the "main" line (`description`, `account_code`, `account_name`, `contact_name`) is the first debit line ordered by `coalesce(a.type = 'BANK', false), j.debit desc, j.id` — the largest debit on a non-BANK account, i.e. the expense side of the receipt. A journal with no debit line at all falls back to all lines rather than returning nulls. `debit` and `credit` remain sums over **all** lines (the journal's own totals; credits are stored negative); `date = min(date)`.
+
+**Two data caveats — both upstream, neither a query bug.**
+
+- *Incomplete mirror.* 139 slips carry a `journal_number` but only 31 of those numbers exist in `xero_data_xerojournals` at all; after the type discriminator, **30 slips resolve**. The other ~109 matched slips show `journal: null` ("Unmatched" in the console's Xero panel) even though `xero_status` says MATCHED and `xero_detail` names the journal. 106 of them carry a number ≥ 50,000, which is outside Klikk's `journal` number range entirely — those came from somewhere other than the Journals feed. Fixing that is a Xero-sync / recon job, not a receipts change.
+- *Stale matches survive the fix.* Two of the 30 resolve to a journal that is clearly not the receipt: #697 → a 2019 journal of R5,500 against a 2026 R13.50 Office Crew slip, and #29040 → a 2023 journal of R130,864 against a R224 slip. The type discriminator cannot catch these — the recon simply recorded a number that means something else. A date/amount plausibility guard on the join would catch them; it is **not** implemented, and it is a decision for MC rather than a silent code change, because it would also hide genuine matches whose journal date drifts from the slip date.
 
 ---
 
@@ -232,11 +248,15 @@ Closing the loop is manual today: once a slip is captured, the reviewer either f
 
 **Trade-off, deliberate:** links are unguessable (32 hex chars of HMAC keyed on `SECRET_KEY`) but **never expire** — there is no timestamp in the signature — so a `view_url` pasted into a spreadsheet in August still works in the year-end audit. The cost is that a leaked link is a permanent read on that one receipt. Rotating `SECRET_KEY` invalidates every link ever issued.
 
-### Security note — action required before deploy
+### Security note — the reads are gated (done)
 
-The backend's read endpoints are reachable **unauthenticated on the public internet**: `GET https://console.8-bit.space/backend/audit/checks/` returns 200 with no token today (verified 19 Aug 2026). Once `feature/receipts` deploys, `GET /audit/receipts/` and `GET /audit/receipts/export/` will likewise be open and will hand out a valid `view_url` for **every receipt in the register** to any caller. That collapses the unguessability the signed viewer relies on: an attacker doesn't need to guess the HMAC, they just ask the list for it. The list also exposes supplier, total, payment method (sometimes with partial card numbers in `payment_method`), and the detail endpoint exposes the full OCR `raw_text`.
+The reason all five receipts endpoints require auth (§3) is this section. Every list, detail and export row carries a `view_url`, so an open list endpoint would hand out a valid, non-expiring signed link for **every receipt in the register** to any anonymous caller — collapsing the unguessability the viewer relies on. An attacker would not need to guess the HMAC; they would ask the list for it. The list also exposes supplier, total and `payment_method` (sometimes carrying partial card numbers), and the detail endpoint exposes the full OCR `raw_text`.
 
-Recommendation: before deploy, gate the receipts **read** endpoints (`receipts_list_view`, `receipt_detail_view`) behind `IsAuthenticated`, and either gate `receipts_export_view` the same way (it is a plain Django view, so that means an explicit auth check — e.g. DRF `JWTAuthentication().authenticate(request)` or wrapping it — not just `@permission_classes`) or, at minimum, strip `view_url` from unauthenticated responses. The console already sends the Bearer token on every call (`src/api/receipts.js` goes through `apiClient`, including the export), so gating the reads breaks nothing in the UI; the only thing that would stop working is an unauthenticated `curl`. This page does not make that change — it is a code change for the implementing branch.
+The gate closes that: `receipts_list_view` / `receipt_detail_view` via `IsAuthenticated`, `receipts_export_view` via `@drf_login_required`. The console is unaffected — `src/api/receipts.js` goes through `apiClient`, which attaches the Bearer token and refreshes it on 401, on the export as well as the reads. The only thing that stopped working is an unauthenticated `curl`.
+
+The viewer itself stays public **by design**: the modal renders it in a plain `<img>` / `<iframe>` and exported spreadsheets link to it, neither of which can send a token. Its guard is the HMAC. The residual exposure is therefore one receipt per leaked link, not the whole register.
+
+**Still open, project-wide and outside this feature:** other backend read endpoints remain anonymous — `GET https://console.8-bit.space/backend/audit/checks/` returned 200 with no token on 19 Aug 2026. That is a separate piece of work.
 
 ---
 
@@ -269,8 +289,9 @@ Portal worktree: route `audit/receipts` (name `audit-receipts`) in `src/router/r
 
 ## 10. Operational notes
 
-- **Migration `receipts/0001_initial` is NOT yet applied** to the live database. It creates `receipts_slipreview` and `receipts_slipcomment` only; it does not touch `whatsapp.klikk_slips` or anything else.
-- Deploy recipe: merge `feature/receipts` in both repos → `manage.py migrate receipts` → rebuild/restart `klikk-financials-v4` (backend) and `klikk-financials-console` (portal).
+- Migration `receipts/0001_initial` creates `receipts_slipreview` and `receipts_slipcomment` only; it does not touch `whatsapp.klikk_slips` or anything else. It was applied on deploy (19 Aug 2026) by the backend image's entrypoint.
+- Deploy recipe: merge `feature/receipts` in both repos → `docker compose up -d --build klikk-financials` (the entrypoint runs `migrate`) → `docker compose up -d --build klikk-financials-console`.
+- Post-deploy checks: `GET /backend/audit/receipts/` returns **401** anonymously; a signed `/backend/audit/slip/<sha>/?s=…` still returns **200** anonymously; the console serves the `audit/receipts` route.
 - **Warning:** the backend image's ENTRYPOINT (`scripts/docker-entrypoint.sh`) runs `python manage.py migrate --noinput` on **every** container start against the live DB. Any `docker run` / `docker compose run` of that image without `--entrypoint python` (or similar override) will apply this migration as a side effect. Do not start the image casually from a worktree that contains the unapplied migration.
 - `SLIP_VIEW_BASE_URL` must match the public prefix nginx serves the backend under (default `https://console.8-bit.space/backend`); if it is wrong every `view_url` in every export is dead.
 - The feature depends on `openpyxl` for XLSX (already in `requirements.txt`); CSV needs nothing extra.
