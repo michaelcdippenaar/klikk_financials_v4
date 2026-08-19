@@ -2,18 +2,31 @@
 REST surface for the Audit → Receipts review workflow over the WhatsApp
 Slippies register (``whatsapp.klikk_slips``), consumed by the console.
 
-GET   /audit/receipts/                         list (filters, ordering, pagination, whole-filter totals)
-GET   /audit/receipts/<sha256>/                one slip + full ocr + items + comments
+GET   /audit/receipts/                         [JWT] list (filters, ordering, pagination, whole-filter totals)
+GET   /audit/receipts/<sha256>/                [JWT] one slip + full ocr + items + comments
 PATCH /audit/receipts/<sha256>/review/         [JWT] upsert {to_process, decision, note}
 POST  /audit/receipts/<sha256>/comments/       [JWT] add {text}
-GET   /audit/receipts/export/?format=csv|xlsx  every matching row, no pagination
+GET   /audit/receipts/export/?format=csv|xlsx  [JWT] every matching row, no pagination
 
-Reads keep the project default (AllowAny); writes require an authenticated
-user. The register itself is read-only raw SQL (see ``services``); the only
-tables written are ``receipts_slipreview`` / ``receipts_slipcomment``.
+**Every** endpoint requires an authenticated user (401 otherwise). The project's
+DRF default is ``AllowAny``, so each view opts in explicitly: the four DRF views
+via ``@permission_classes([IsAuthenticated])`` and the export — a plain Django
+view, see ``receipts_export_view`` — via ``@drf_login_required``. Gating the
+reads matters because every row carries a ``view_url``: a signed, non-expiring
+link to the receipt image (``apps.audit.slip_view``). An open list endpoint
+would hand out a valid link for every receipt in the register to any caller,
+collapsing the unguessability the signed viewer relies on.
+
+The signed viewer itself stays deliberately public — the console's modal loads
+it in a plain ``<img>`` / ``<iframe>``, which cannot carry a Bearer token, and
+exported spreadsheets link to it. Its guard is the HMAC in ``?s=``.
+
+The register itself is read-only raw SQL (see ``services``); the only tables
+written are ``receipts_slipreview`` / ``receipts_slipcomment``.
 """
 import csv
 import datetime as dt
+import functools
 import io
 import math
 
@@ -21,8 +34,11 @@ from django.http import HttpResponse, JsonResponse
 from django.views.decorators.http import require_GET
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
+from rest_framework.exceptions import APIException
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.request import Request as DRFRequest
 from rest_framework.response import Response
+from rest_framework.settings import api_settings
 
 from .models import DECISION_VALUES, SlipComment, SlipReview
 from .services import (
@@ -57,7 +73,43 @@ def _username(request) -> str:
     return (getattr(user, 'get_username', lambda: '')() or '')[:150] if user and user.is_authenticated else ''
 
 
+def drf_login_required(view):
+    """
+    ``IsAuthenticated`` for a plain (non-DRF) Django view.
+
+    Runs the project's ``DEFAULT_AUTHENTICATION_CLASSES`` (simplejwt Bearer first,
+    then DRF Token, then session) against the incoming request and 401s if none of
+    them yields an authenticated user. Used by the export, which cannot be an
+    ``@api_view``: DRF content negotiation reads ``?format=`` as a renderer
+    override and would 404 on ``csv`` / ``xlsx`` before the view ever ran.
+
+    Sets ``request.user`` on success so the view body sees the same user a DRF
+    view would. Only ever applied to GET endpoints — session auth's CSRF
+    enforcement is a no-op on safe methods.
+    """
+    @functools.wraps(view)
+    def wrapper(request, *args, **kwargs):
+        drf_request = DRFRequest(
+            request,
+            authenticators=[cls() for cls in api_settings.DEFAULT_AUTHENTICATION_CLASSES],
+        )
+        try:
+            user = drf_request.user
+        except APIException:
+            user = None  # malformed / expired / revoked credentials -> same 401 as none at all
+        if user is None or not user.is_authenticated:
+            resp = JsonResponse({'detail': 'Authentication credentials were not provided.'},
+                                status=status.HTTP_401_UNAUTHORIZED)
+            resp['WWW-Authenticate'] = 'Bearer realm="api"'
+            return resp
+        request.user = user
+        return view(request, *args, **kwargs)
+
+    return wrapper
+
+
 @api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def receipts_list_view(request):
     params = request.query_params
     page = _int(params.get('page'), 1, 1)
@@ -78,6 +130,7 @@ def receipts_list_view(request):
 
 
 @api_view(['GET'])
+@permission_classes([IsAuthenticated])
 def receipt_detail_view(request, sha256):
     row = query_slip(sha256)
     if row is None:
@@ -166,10 +219,13 @@ def _csv_response(headers, rows, note: str | None = None) -> HttpResponse:
     return resp
 
 
+@drf_login_required
 @require_GET
 def receipts_export_view(request):
     # Plain Django view (not @api_view): DRF content negotiation treats ?format= as a
-    # renderer override and would 404 on csv/xlsx before the view ran.
+    # renderer override and would 404 on csv/xlsx before the view ran. Auth is therefore
+    # explicit (@drf_login_required, outermost so an anonymous caller never reaches here)
+    # rather than inherited from a permission class.
     fmt = (request.GET.get('format') or 'csv').strip().lower()
     if fmt not in ('csv', 'xlsx'):
         return JsonResponse({'detail': 'format must be csv or xlsx'}, status=status.HTTP_400_BAD_REQUEST)
