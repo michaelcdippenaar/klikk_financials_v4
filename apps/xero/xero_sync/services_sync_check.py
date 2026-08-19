@@ -7,7 +7,7 @@ from datetime import timedelta
 from django.utils import timezone
 
 from django.db import models
-from apps.xero.xero_core.exceptions import DailyLimitReached
+from apps.xero.xero_core.exceptions import DailyLimitReached, TenantReauthRequired
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_sync.models import XeroLastUpdate
 from apps.xero.xero_sync.services import update_xero_models
@@ -53,7 +53,20 @@ def check_and_retry_out_of_sync(tenant_id=None, max_retry_age_hours=24):
         except XeroTenant.DoesNotExist:
             logger.error(f"Tenant {tenant_id} not found")
             return results
-    
+        # A tenant with a dead refresh token can never come back in sync, so its
+        # XeroLastUpdate rows get staler forever and this hourly job would retry
+        # it every hour indefinitely (59 failed refreshes overnight, 2026-08-19).
+        if tenant.reauth_required:
+            logger.warning(
+                f"Skipping out-of-sync retries for tenant {tenant.tenant_name} "
+                f"({tenant_id}): awaiting Xero re-authorization"
+            )
+            results['skipped_reauth'] = 1
+            return results
+
+    # Same rule for the all-tenants sweep: never touch a flagged tenant.
+    query = query.exclude(organisation__reauth_required=True)
+
     out_of_sync_items = query.select_related('organisation')
     
     results['checked'] = out_of_sync_items.count()
@@ -157,6 +170,19 @@ def check_and_retry_out_of_sync(tenant_id=None, max_retry_age_hours=24):
             
             results['retried'] += 1
 
+        except TenantReauthRequired as e:
+            # Belt and braces — the queryset already excludes flagged tenants,
+            # but if a token dies mid-run stop hitting Xero for this tenant now.
+            detail['status'] = 'skipped'
+            detail['error'] = str(e)
+            results['skipped'] += 1
+            results['aborted'] = 'xero-reauth-required'
+            results['details'].append(detail)
+            logger.warning(
+                f"Tenant {tenant_id} needs Xero re-authorization; "
+                f"aborting out-of-sync retries for this tenant"
+            )
+            break
         except DailyLimitReached as e:
             # The tenant's daily Xero budget is exhausted — every remaining retry
             # for this tenant would fail the same way. Abort cleanly; the next
@@ -194,8 +220,11 @@ def run_background_sync_check():
     This should be called periodically (e.g., every hour).
     """
     logger.info("Starting background sync check for all tenants")
-    
-    tenants = XeroTenant.objects.all()
+
+    # Tenants awaiting re-authorization are dropped here (one WARNING naming
+    # them, not one failed token refresh per tenant per hour).
+    from apps.xero.xero_core.services import syncable_tenants
+    tenants = syncable_tenants(context='background sync check')
     all_results = {
         'tenants_checked': 0,
         'total_checked': 0,

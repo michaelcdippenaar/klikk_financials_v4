@@ -36,7 +36,9 @@ class Command(BaseCommand):
         full = opts.get('full', False)
 
         if opts.get('all_tenants'):
-            tenants = XeroTenant.objects.all()
+            # Skip tenants awaiting Xero re-authorization (dead refresh token).
+            from apps.xero.xero_core.services import syncable_tenants
+            tenants = syncable_tenants(context='sync_xero_invoices')
         else:
             try:
                 tenants = [XeroTenant.objects.get(tenant_id=opts['tenant_id'])]

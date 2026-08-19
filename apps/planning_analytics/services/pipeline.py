@@ -5,10 +5,13 @@ Orchestrate the full Planning Analytics pipeline:
   3. Process Journals + Build Trail Balance (optionally with P&L YTD)
   4. Execute TM1 TI processes
 """
+import logging
 import time
 from django.db import connection
 from apps.planning_analytics.services.tm1_client import execute_process, _resolve_credentials
-from apps.xero.xero_core.exceptions import DailyLimitReached
+from apps.xero.xero_core.exceptions import DailyLimitReached, TenantReauthRequired
+
+logger = logging.getLogger(__name__)
 
 
 def _load_tm1_processes_from_db():
@@ -81,6 +84,25 @@ def run_pipeline(
     results = []
     touched_transaction_ids = None
     affected_periods = None
+
+    # Skip tenants whose Xero refresh token is dead: every step below would
+    # fail identically and burn API budget. Cleared automatically when the
+    # tenant is re-authorized in the console.
+    from apps.xero.xero_core.services import tenant_reauth_required
+    if tenant_reauth_required(tenant_id):
+        logger.warning(
+            'Pipeline skipped for tenant %s: awaiting Xero re-authorization', tenant_id
+        )
+        return {
+            'steps': [{
+                'step': 'xero_reauth_check',
+                'success': False,
+                'message': 'Tenant needs Xero re-authorization; pipeline skipped.',
+                'elapsed_s': 0,
+            }],
+            'aborted': 'xero-reauth-required',
+        }
+
     lock_acquired = _try_acquire_pipeline_lock(tenant_id)
     if not lock_acquired:
         return {
@@ -102,6 +124,15 @@ def run_pipeline(
         results.append(step)
         return {'steps': results, 'aborted': 'xero-daily-limit'}
 
+    def _reauth_abort(step, exc, t0):
+        # Refresh token died mid-run — no further Xero call can succeed until a
+        # human re-authorizes, so stop rather than retry every remaining step.
+        step['message'] = f'Xero re-authorization required: {exc}'
+        step['reauth_required'] = True
+        step['elapsed_s'] = round(time.time() - t0, 1)
+        results.append(step)
+        return {'steps': results, 'aborted': 'xero-reauth-required'}
+
     try:
         # Step 1 - Update Metadata (accounts, contacts, tracking categories)
         step = {'step': 'update_metadata', 'success': False}
@@ -114,6 +145,8 @@ def run_pipeline(
             step['stats'] = meta_result.get('stats')
         except DailyLimitReached as exc:
             return _daily_limit_abort(step, exc, t0)
+        except TenantReauthRequired as exc:
+            return _reauth_abort(step, exc, t0)
         except Exception as exc:
             step['message'] = str(exc)
         step['elapsed_s'] = round(time.time() - t0, 1)
@@ -135,6 +168,8 @@ def run_pipeline(
             step['stats'] = sync_result.get('stats')
         except DailyLimitReached as exc:
             return _daily_limit_abort(step, exc, t0)
+        except TenantReauthRequired as exc:
+            return _reauth_abort(step, exc, t0)
         except Exception as exc:
             step['message'] = str(exc)
         step['elapsed_s'] = round(time.time() - t0, 1)
@@ -158,6 +193,8 @@ def run_pipeline(
             step['stats'] = result.get('stats')
         except DailyLimitReached as exc:
             return _daily_limit_abort(step, exc, t0)
+        except TenantReauthRequired as exc:
+            return _reauth_abort(step, exc, t0)
         except Exception as exc:
             step['message'] = str(exc)
         step['elapsed_s'] = round(time.time() - t0, 1)

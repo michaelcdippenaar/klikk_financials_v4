@@ -16,6 +16,22 @@ class XeroTenant(models.Model):
         null=True, blank=True,
         help_text='Month when fiscal year starts (1-12). Fetched from Xero Organisation. Default 7 (July) if not set.'
     )
+    # --- Re-authorization state -------------------------------------------
+    # Set when Xero rejects the refresh token (400 invalid_grant). Nothing the
+    # app can do fixes that, so every scheduled/bulk caller must SKIP the
+    # tenant until a human re-runs the OAuth consent flow (which clears it).
+    reauth_required = models.BooleanField(
+        default=False,
+        help_text='Xero refresh token is dead; skip all scheduled syncs until re-authorized in the console.'
+    )
+    reauth_reason = models.TextField(
+        blank=True, default='',
+        help_text='Why re-authorization is needed (last token-refresh error from Xero).'
+    )
+    reauth_flagged_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When reauth_required was first set (cleared on successful re-authorization).'
+    )
 
     def get_fiscal_year_start_month(self):
         """Return fiscal year start month (1-12). Uses Xero value if set, else default 7."""

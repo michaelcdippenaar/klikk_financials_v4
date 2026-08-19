@@ -51,7 +51,9 @@ class Command(BaseCommand):
             except XeroTenant.DoesNotExist:
                 raise CommandError(f'Tenant not found: {tenant_id}')
         else:
-            tenants = list(XeroTenant.objects.all())
+            # Skip tenants awaiting Xero re-authorization (dead refresh token).
+            from apps.xero.xero_core.services import syncable_tenants
+            tenants = syncable_tenants(context='sync_aged_receivables')
             if not tenants:
                 self.stdout.write(self.style.WARNING('No tenants found.'))
                 return

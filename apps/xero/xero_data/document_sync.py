@@ -209,6 +209,14 @@ def sync_documents_for_tenant(tenant_id, user=None, transaction_ids=None, source
     except XeroTenant.DoesNotExist:
         return _result(False, f'Tenant {tenant_id} not found')
 
+    # Dead Xero refresh token — no attachment fetch can succeed; skip cleanly
+    # instead of burning API budget on guaranteed-401 calls.
+    if tenant.reauth_required:
+        logger.warning(
+            'Document sync skipped for tenant %s: awaiting Xero re-authorization', tenant_id
+        )
+        return _result(False, f'Tenant {tenant_id} needs Xero re-authorization; sync skipped')
+
     credentials = _get_credentials_for_tenant(tenant_id, user)
     if not credentials.scope:
         credentials.scope = []

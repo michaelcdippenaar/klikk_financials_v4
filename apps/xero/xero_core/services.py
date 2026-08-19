@@ -17,7 +17,7 @@ from xero_python.api_client.oauth2 import OAuth2Token
 from xero_python.api_client.serializer import serialize
 from xero_python.exceptions import HTTPStatusException, RateLimitException
 
-from apps.xero.xero_core.exceptions import DailyLimitReached
+from apps.xero.xero_core.exceptions import DailyLimitReached, TenantReauthRequired
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_auth.models import XeroClientCredentials, XeroAuthSettings, XeroTenantToken
 
@@ -85,6 +85,66 @@ def raise_if_daily_limit(source):
             f"Retry-After={delay}s); aborting instead of sleeping",
             retry_after=delay,
         ) from cause
+
+
+def mark_tenant_reauth_required(tenant_id, reason):
+    """Persist "this tenant needs a human to re-authorize" and log it once.
+
+    Called when Xero rejects the refresh token (400 invalid_grant). Idempotent:
+    re-flagging an already-flagged tenant refreshes the reason but does not
+    re-log at WARNING, so a dead tenant produces one warning, not one per hour.
+    """
+    updated = XeroTenant.objects.filter(
+        tenant_id=tenant_id, reauth_required=False
+    ).update(
+        reauth_required=True,
+        reauth_reason=reason,
+        reauth_flagged_at=timezone.now(),
+    )
+    if updated:
+        logger.warning(
+            "Xero tenant %s flagged reauth_required (scheduled syncs will skip it "
+            "until it is re-authorized in the console): %s",
+            tenant_id, reason,
+        )
+    else:
+        XeroTenant.objects.filter(tenant_id=tenant_id).update(reauth_reason=reason)
+
+
+def clear_tenant_reauth_required(tenant_id):
+    """Clear the flag after a successful OAuth re-authorization."""
+    cleared = XeroTenant.objects.filter(
+        tenant_id=tenant_id, reauth_required=True
+    ).update(reauth_required=False, reauth_reason='', reauth_flagged_at=None)
+    if cleared:
+        logger.info("Xero tenant %s re-authorized; reauth_required cleared", tenant_id)
+
+
+def tenant_reauth_required(tenant_id):
+    """True if this tenant is awaiting re-authorization (skip all Xero calls)."""
+    return XeroTenant.objects.filter(
+        tenant_id=tenant_id, reauth_required=True
+    ).exists()
+
+
+def syncable_tenants(queryset=None, context=''):
+    """Tenants that may be called against Xero, excluding ones awaiting re-auth.
+
+    Logs ONE warning per run naming what was skipped — the point of the flag is
+    to stop the every-hour "Failed to refresh token" noise, so callers must not
+    log per tenant per attempt.
+    """
+    queryset = XeroTenant.objects.all() if queryset is None else queryset
+    tenants = list(queryset)
+    blocked = [t for t in tenants if t.reauth_required]
+    if blocked:
+        logger.warning(
+            "%sSkipping %d Xero tenant(s) awaiting re-authorization: %s",
+            f"{context}: " if context else '',
+            len(blocked),
+            ', '.join(f"{t.tenant_name} ({t.tenant_id})" for t in blocked),
+        )
+    return [t for t in tenants if not t.reauth_required]
 
 
 class TenantTokenData:
@@ -174,6 +234,16 @@ class XeroApiClient:
         self._install_http_guards()
         self.tenant_token = None
         if tenant_id:
+            # Hard stop before any network call: a tenant whose refresh token
+            # Xero already rejected cannot be recovered by retrying, and every
+            # attempt costs API budget + a log line. This single guard covers
+            # every caller that builds a client (pipeline, scheduler, commands).
+            if tenant_reauth_required(tenant_id):
+                raise TenantReauthRequired(
+                    f"Xero tenant {tenant_id} needs re-authorization "
+                    f"(refresh token rejected by Xero); skipping all API calls.",
+                    tenant_id=tenant_id,
+                )
             self.tenant_token = self.get_tenant_token()
             self.configure_api_client(self.tenant_token)
 
@@ -283,6 +353,10 @@ class XeroApiClient:
         # Refresh token if expired during initialization
         try:
             self.refresh_token_if_expired(tenant_token)
+        except TenantReauthRequired:
+            # Dead refresh token — must stay a TenantReauthRequired so callers
+            # can tell "skip this tenant" apart from a transient failure.
+            raise
         except ValueError as e:
             # Re-raise with context
             raise
@@ -446,6 +520,34 @@ class XeroApiClient:
                 extra=error_details
             )
                 
+            # A dead refresh token (Xero answers 400 invalid_grant, sometimes
+            # 401) can NEVER be recovered by retrying — only a human re-running
+            # the OAuth consent flow fixes it. Flag the tenant so every
+            # scheduled caller skips it instead of retrying hourly forever.
+            #
+            # Deliberately NOT triggered by invalid_client: that means the app's
+            # client_id/secret is wrong, which is a credentials problem affecting
+            # every tenant, not this one — flagging tenants would hide it.
+            response_json = error_details.get('response_json') or {}
+            oauth_error = (response_json.get('error') or '').strip()
+            body_text = (error_details.get('response_body') or '')
+            if not oauth_error and 'invalid_grant' in body_text:
+                oauth_error = 'invalid_grant'
+            token_dead = oauth_error == 'invalid_grant' or (
+                error_details.get('status_code') == 400 and oauth_error != 'invalid_client'
+            )
+            if token_dead:
+                reason = (
+                    f"Xero token refresh rejected (HTTP {error_details.get('status_code')}"
+                    f"{f' {oauth_error}' if oauth_error else ''}). "
+                    f"Re-authorize this tenant in Setup -> Credentials -> Xero."
+                )
+                mark_tenant_reauth_required(tenant_id_display, reason)
+                raise TenantReauthRequired(
+                    f"Xero tenant {tenant_id_display} needs re-authorization: {reason}",
+                    tenant_id=tenant_id_display,
+                ) from e
+
             # Raise a more descriptive error
             error_msg = f"Token refresh failed for tenant {tenant_id_display}"
             if error_details.get('response_json') and 'error' in error_details['response_json']:

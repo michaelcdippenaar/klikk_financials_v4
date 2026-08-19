@@ -21,5 +21,20 @@ class DailyLimitReached(XeroCoreException):
         # Seconds until the daily counter resets, from Xero's Retry-After header (may be None).
         self.retry_after = retry_after
 
+
+class TenantReauthRequired(XeroCoreException):
+    """The tenant's Xero refresh token is dead — only a human re-authorization fixes it.
+
+    Xero returns 400 invalid_grant once a refresh token is revoked/expired/rotated
+    away. Retrying burns the daily API budget and floods the logs forever (the
+    hourly out-of-sync job retried two dead tenants 59x overnight, 2026-08-19),
+    because nothing the app does can mint a new token. Callers must SKIP the
+    tenant until someone re-runs the OAuth consent flow in the console.
+    """
+
+    def __init__(self, message, tenant_id=None):
+        super().__init__(message)
+        self.tenant_id = tenant_id
+
 # Add custom exceptions here
 

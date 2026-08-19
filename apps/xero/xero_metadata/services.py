@@ -3,7 +3,7 @@ Xero metadata services - handles updating accounts, contacts, and tracking categ
 """
 import time
 import logging
-from apps.xero.xero_core.exceptions import DailyLimitReached
+from apps.xero.xero_core.exceptions import DailyLimitReached, TenantReauthRequired
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_core.services import XeroApiClient, XeroAccountingApi
 from apps.xero.xero_auth.models import XeroClientCredentials
@@ -29,6 +29,14 @@ def update_metadata(tenant_id, user=None):
         tenant = XeroTenant.objects.get(tenant_id=tenant_id)
     except XeroTenant.DoesNotExist:
         raise ValueError(f"Tenant {tenant_id} not found")
+
+    # Dead refresh token: no metadata call can succeed and each attempt costs
+    # API budget, so bail before building a client.
+    if tenant.reauth_required:
+        raise TenantReauthRequired(
+            f"Xero tenant {tenant_id} needs re-authorization; skipping metadata update.",
+            tenant_id=tenant_id,
+        )
     
     # Get user from tenant's credentials if not provided
     if not user:
@@ -77,8 +85,8 @@ def update_metadata(tenant_id, user=None):
                 XeroLastUpdate.objects.update_or_create_timestamp(name, tenant)
                 print(f"[METADATA] ✓ {name} finished")
                 logger.info(f"Successfully updated {name} for tenant {tenant_id}")
-            except DailyLimitReached:
-                raise  # abort the whole update — further Xero calls cannot succeed today
+            except (DailyLimitReached, TenantReauthRequired):
+                raise  # abort the whole update — further Xero calls cannot succeed
             except Exception as e:
                 error_msg = f"Failed to update {name}: {str(e)}"
                 print(f"[METADATA] ✗ {name} failed: {str(e)}")
@@ -100,7 +108,7 @@ def update_metadata(tenant_id, user=None):
             }
         }
         
-    except DailyLimitReached:
+    except (DailyLimitReached, TenantReauthRequired):
         raise
     except Exception as e:
         duration = time.time() - start_time

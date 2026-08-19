@@ -216,6 +216,12 @@ class XeroCallbackView(APIView):
                     'expires_at': expires_at
                 }
             )
+            # A successful consent round-trip means the tenant has a live
+            # refresh token again — clear any re-authorization flag so the
+            # scheduled jobs start including it on the next run.
+            from apps.xero.xero_core.services import clear_tenant_reauth_required
+            clear_tenant_reauth_required(tenant_id)
+
             created_tenants.append(tenant_id)
 
         logger.info(f"Stored tokens for tenants: {created_tenants}")
@@ -279,15 +285,25 @@ class XeroConnectionStatusView(APIView):
                     'connected_at': connected_at,
                     'token_expired': is_expired,
                     'has_refresh_token': bool(token_info.get('refresh_token')),
+                    # Dead refresh token: scheduled syncs skip this tenant until
+                    # someone re-runs the OAuth consent flow.
+                    'reauth_required': tenant.reauth_required,
+                    'reauth_reason': tenant.reauth_reason or '',
+                    'reauth_flagged_at': (
+                        tenant.reauth_flagged_at.isoformat() if tenant.reauth_flagged_at else None
+                    ),
                 })
             except XeroTenant.DoesNotExist:
                 continue
 
+        reauth_needed = [t['tenant_id'] for t in connected_tenants if t['reauth_required']]
         return Response({
             'connected': len(connected_tenants) > 0,
             'has_credentials': True,
             'tenants': connected_tenants,
             'credentials_client_id': credentials.client_id[:8] + '...' if credentials.client_id else None,
+            'reauth_required_tenants': reauth_needed,
+            'reauth_required_count': len(reauth_needed),
         })
 
 
