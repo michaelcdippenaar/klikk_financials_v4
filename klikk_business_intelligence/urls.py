@@ -48,6 +48,7 @@ urlpatterns = [
     # Planning Analytics
     path('api/planning-analytics/', include('apps.planning_analytics.urls')),
     path('api/ai-agent/', include('apps.ai_agent.urls')),
+    path('api/pricelist/', include('apps.pricelist.urls')),  # Equipment rate card + quote builder
 
     # Year-end audit check registry (read-only; raw SQL over audit.checks)
     path('audit/', include('apps.audit.urls')),

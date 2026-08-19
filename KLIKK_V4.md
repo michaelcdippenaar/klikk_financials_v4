@@ -94,6 +94,12 @@ The Xero apps form a data pipeline that syncs accounting data from Xero, process
 |-----|---------|
 | `ai_agent` | RAG-powered chat agent with vectorised knowledge, TM1 proxy, and tool use |
 
+### Pricing
+
+| App | Purpose |
+|-----|---------|
+| `pricelist` | Equipment rate card — effective-dated hire prices, customer-specific rates, quote builder, Xero asset links |
+
 ---
 
 ## Database Schema & Relationships

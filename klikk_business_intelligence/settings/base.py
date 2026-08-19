@@ -71,6 +71,7 @@ INSTALLED_APPS = [
     'apps.ai_agent',
     'apps.personal_expenses',  # Personal-expenses classification + reporting
     'apps.audit',  # Year-end audit registry (audit.checks / check_runs / check_results)
+    'apps.pricelist',  # Equipment rate card + effective-dated prices + quote builder
 ]
 
 MIDDLEWARE = [
