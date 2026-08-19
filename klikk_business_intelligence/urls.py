@@ -49,6 +49,9 @@ urlpatterns = [
     path('api/planning-analytics/', include('apps.planning_analytics.urls')),
     path('api/ai-agent/', include('apps.ai_agent.urls')),
 
+    # Audit -> Receipts review (raw SQL over whatsapp.klikk_slips + review tables); must precede audit/
+    path('audit/receipts/', include('apps.receipts.urls')),
+
     # Year-end audit check registry (read-only; raw SQL over audit.checks)
     path('audit/', include('apps.audit.urls')),
 

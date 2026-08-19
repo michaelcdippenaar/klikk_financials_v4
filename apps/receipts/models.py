@@ -1,0 +1,49 @@
+"""
+Review state for the WhatsApp Slippies receipt register (``whatsapp.klikk_slips``).
+
+``klikk_slips`` itself is maintained by an external sync and is read here only
+through raw SQL (see ``services``). These two tables are the only thing this app
+writes; ``sha256`` is a loose key into ``klikk_slips`` — no FK, because the
+register is not a Django model and must never be altered.
+"""
+from django.db import models
+
+
+DECISION_CHOICES = (
+    ('', 'Undecided'),
+    ('CAPTURE', 'Capture in Xero'),
+    ('MEAL_SKIP', 'Meal — skip'),
+    ('PERSONAL', 'Personal'),
+    ('DUPLICATE', 'Duplicate'),
+    ('ALREADY_IN_XERO', 'Already in Xero'),
+)
+DECISION_VALUES = tuple(value for value, _ in DECISION_CHOICES)
+
+
+class SlipReview(models.Model):
+    sha256 = models.CharField(max_length=64, primary_key=True)
+    to_process = models.BooleanField(default=False)
+    decision = models.CharField(max_length=20, blank=True, default='', choices=DECISION_CHOICES)
+    note = models.TextField(blank=True, default='')
+    updated_by = models.CharField(max_length=150, blank=True, default='')
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Slip review'
+
+    def __str__(self):
+        return f'{self.sha256[:12]} {self.decision or "-"}'
+
+
+class SlipComment(models.Model):
+    sha256 = models.CharField(max_length=64, db_index=True)
+    text = models.TextField()
+    author = models.CharField(max_length=150, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['created_at']
+        verbose_name = 'Slip comment'
+
+    def __str__(self):
+        return f'{self.sha256[:12]} by {self.author or "?"}'

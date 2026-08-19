@@ -18,7 +18,8 @@ def slip_signature(sha256: str) -> str:
     return hmac.new(settings.SECRET_KEY.encode(), sha256.encode(), hashlib.sha256).hexdigest()[:32]
 
 
-def slip_url(sha256: str, base: str = "https://console.8-bit.space/backend") -> str:
+def slip_url(sha256: str, base: str | None = None) -> str:
+    base = base or getattr(settings, "SLIP_VIEW_BASE_URL", "https://console.8-bit.space/backend")
     return f"{base}/audit/slip/{sha256}/?s={slip_signature(sha256)}"
 
 
