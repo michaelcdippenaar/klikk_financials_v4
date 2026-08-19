@@ -38,6 +38,23 @@ for u in "journals/search/?limit=1" "journals/filters/" \
 done
 ```
 
+## Comments on a cube cell
+
+Right-click a cell on a cube sheet → New Comment, then **Sync comments**. The
+comment is pinned to that intersection in `app.cube_comments` — measure, row
+path, column path and the filter context that produced the number — so an agent
+reading it later knows exactly which figure it refers to. `GET
+.../pivot/comments/?status=open` is the agent's to-do queue; POST to
+`.../comments/<id>/status/` marks one actioned or dismissed.
+
+Filters are part of the anchor on purpose: the same row and column under a
+different `journal_type` or date window is a different number, and a comment
+about one must not silently reattach to the other. Re-posting the same cell
+edits the existing comment rather than accumulating duplicates; an emptied
+comment retracts it.
+
+This writes to OUR Postgres only. Nothing here goes near Xero.
+
 ## Credentials
 
 The add-in authenticates with a **DRF authtoken** (`Authorization: Token <key>`)

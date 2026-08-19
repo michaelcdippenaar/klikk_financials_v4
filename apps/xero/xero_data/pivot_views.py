@@ -57,6 +57,35 @@ def _label_quarter(r):
     return '%04d-Q%d' % (y, q) if y and q else BLANK
 
 
+def _fy_of(y, m, start_month):
+    """Financial year label, named for the calendar year the year ENDS in.
+
+    Each tenant has its own fiscal_year_start_month -- Klikk July, Tremly March,
+    Dippenaar Family January -- so this cannot be a constant. A cube spanning
+    entities will therefore put different date ranges under the same FY label;
+    filter to one entity when that matters.
+    """
+    if not y or not m:
+        return None
+    s = start_month or 1
+    return y + 1 if (s > 1 and m >= s) else y
+
+
+def _label_fin_year(r):
+    fy = _fy_of(r.get('d_year'), r.get('d_month'),
+                r.get('organisation__fiscal_year_start_month'))
+    return 'FY%d' % fy if fy else BLANK
+
+
+def _label_fin_period(r):
+    y, m = r.get('d_year'), r.get('d_month')
+    s = r.get('organisation__fiscal_year_start_month') or 1
+    fy = _fy_of(y, m, s)
+    if not fy:
+        return BLANK
+    return 'FY%d P%02d' % (fy, ((m - s) % 12) + 1)
+
+
 def _label_report(r):
     # Xero's Class splits the two statements: REVENUE/EXPENSE are the income
     # statement, everything else is the balance sheet.
@@ -84,6 +113,8 @@ DIMENSIONS = {
     'supplier':           ('Supplier / contact',  {'d_supplier': Coalesce('contact__name', 'transaction_source__contact__name', Value(''), output_field=CharField())}, _plain('d_supplier')),
     'journal_type':       ('Journal type',        {'journal_type': None},                       _plain('journal_type')),
     'source_type':        ('Source type',         {'transaction_source__transaction_source': None}, _plain('transaction_source__transaction_source')),
+    'fin_year':           ('Financial year',      {'d_year': ExtractYear('date'), 'd_month': ExtractMonth('date'), 'organisation__fiscal_year_start_month': None}, _label_fin_year),
+    'fin_period':         ('Financial period',    {'d_year': ExtractYear('date'), 'd_month': ExtractMonth('date'), 'organisation__fiscal_year_start_month': None}, _label_fin_period),
     'year':               ('Year',                {'d_year': ExtractYear('date')},              _plain('d_year')),
     'quarter':            ('Quarter',             {'d_year': ExtractYear('date'), 'd_quarter': ExtractQuarter('date')}, _label_quarter),
     'month':              ('Month',               {'d_year': ExtractYear('date'), 'd_month': ExtractMonth('date')},     _label_month),

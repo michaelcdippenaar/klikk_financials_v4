@@ -147,7 +147,8 @@
         <button class="btn" id="btnCount">Count</button>
       </div>
       <div class="row">
-        <button class="btn" id="btnPivot" disabled>Add Excel PivotTable to this sheet</button>
+        <button class="btn" id="btnReload" disabled>Reload this sheet</button>
+        <button class="btn" id="btnPivot" disabled>Add PivotTable</button>
       </div>
       <div class="count" id="countLine">&nbsp;</div>
       <p class="hint">A native PivotTable aggregates only the rows on the sheet.
@@ -178,6 +179,20 @@
       <p class="hint">Aggregated in Postgres over every matching journal line —
         the row limit above does not apply.</p>
       <p class="msg" id="cubeMsg"></p>
+    </section>
+
+    <!-- ── Comments ───────────────────────────────────────────── -->
+    <section class="panel" id="commentPanel" hidden>
+      <h2>Comments</h2>
+      <p class="hint">Right-click any cell on a cube sheet → New Comment. Sync
+        pins it to that intersection in Postgres, where an agent can read it and
+        raise to-dos. Syncing also pulls comments made elsewhere back onto the sheet.</p>
+      <label for="commentAuthor">Your name</label>
+      <input type="text" id="commentAuthor" spellcheck="false" placeholder="e.g. MC">
+      <div class="row">
+        <button class="btn btn--primary" id="btnSyncComments" disabled>Sync comments</button>
+      </div>
+      <p class="msg" id="commentMsg"></p>
     </section>
 
     <!-- ── Refresh ────────────────────────────────────────────── -->

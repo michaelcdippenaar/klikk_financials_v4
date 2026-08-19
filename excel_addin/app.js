@@ -19,6 +19,7 @@
     { key: 'date',                    label: 'Date',       fmt: 'date',  width: 11 },
     { key: 'journal_number',          label: 'Jrnl #',     fmt: 'int',   width: 8  },
     { key: 'journal_type',            label: 'Type',       fmt: null,    width: 13 },
+    { key: 'fin_year',                label: 'Fin year',   fmt: null,    width: 10 },
     { key: 'tenant_name',             label: 'Entity',     fmt: null,    width: 16 },
     { key: 'report',                  label: 'Report',     fmt: null,    width: 16 },
     { key: 'account_class',           label: 'Acct class', fmt: null,    width: 12 },
@@ -74,7 +75,8 @@
       'typeHint', 'dateFrom', 'dateTo', 'account', 'accountList', 'contact', 'reference',
       'contactList', 'description', 'amount', 'q', 'maxRows', 'countLine', 'btnLoad', 'btnCount',
       'detailPanel', 'btnPivot', 'cubePanel', 'measure', 'row1', 'row2', 'row3',
-      'col1', 'col2', 'suppress', 'btnCube', 'cubeMsg',
+      'col1', 'col2', 'suppress', 'btnCube', 'cubeMsg', 'btnReload',
+      'commentPanel', 'commentAuthor', 'btnSyncComments', 'commentMsg',
       'refreshPanel', 'sheetInfo', 'btnRefresh', 'btnRestore', 'progressPanel',
       'progressMsg', 'progressFill', 'btnCancel', 'errorMsg'
     ].forEach(function (id) { el[id] = document.getElementById(id); });
@@ -120,6 +122,8 @@
     el.btnCount.addEventListener('click', function () { run(showCount); });
     el.btnCube.addEventListener('click', function () { run(buildCube); });
     el.btnPivot.addEventListener('click', function () { run(addNativePivot); });
+    el.btnReload.addEventListener('click', function () { run(reloadThisSheet); });
+    el.btnSyncComments.addEventListener('click', function () { run(syncComments); });
     el.btnRefresh.addEventListener('click', function () { run(refreshActiveSheet); });
     el.btnRestore.addEventListener('click', restoreFiltersFromSheet);
     el.btnCancel.addEventListener('click', function () { cancelFlag.cancelled = true; });
@@ -213,6 +217,7 @@
     el.queryPanel.hidden = !ok;
     el.detailPanel.hidden = !ok;
     el.cubePanel.hidden = !ok;
+    el.commentPanel.hidden = !ok;
     el.refreshPanel.hidden = !ok;
   }
 
@@ -290,6 +295,26 @@
     if (!res.ok) {
       throw new Error('Server returned ' + res.status + ' ' + res.statusText + '.');
     }
+    return res.json();
+  }
+
+  async function apiPost(path, body) {
+    var res;
+    try {
+      res = await fetch(settings.baseUrl + path, {
+        method: 'POST',
+        headers: {
+          Authorization: 'Token ' + settings.token,
+          'Content-Type': 'application/json',
+          Accept: 'application/json'
+        },
+        body: JSON.stringify(body)
+      });
+    } catch (e) {
+      throw new Error('Cannot reach ' + settings.baseUrl + '.');
+    }
+    if (res.status === 401 || res.status === 403) throw new Error('Token rejected (' + res.status + ').');
+    if (!res.ok) throw new Error('Server returned ' + res.status + ' ' + res.statusText + '.');
     return res.json();
   }
 
@@ -411,15 +436,23 @@
     var sheetName = '';
 
     // 1. Prepare the sheet (create or clear) and lay down the header.
+    var keepTable = null;
+    var prevRows = 0;
+
     await Excel.run(async function (ctx) {
       var sheet;
       if (targetId) {
         sheet = ctx.workbook.worksheets.getItem(targetId);
         var tables = sheet.tables;
         tables.load('items/name');
+        var used = sheet.getUsedRange(true);
+        used.load('rowCount');
         await ctx.sync();
-        tables.items.forEach(function (t) { t.delete(); });
-        sheet.getRange().clear(Excel.ClearApplyTo.all);
+        prevRows = used.rowCount || 0;
+        // Reuse the existing table rather than dropping it, so a PivotTable
+        // built on this sheet keeps its source and refreshes with the data.
+        keepTable = tables.items.length ? tables.items[0].name : null;
+        if (!keepTable) sheet.getRange().clear(Excel.ClearApplyTo.all);
       } else {
         sheet = ctx.workbook.worksheets.add(await uniqueSheetName(ctx));
       }
@@ -451,9 +484,13 @@
       var rowCount = matrix.length + 1;
       var body = sheet.getRangeByIndexes(0, 0, rowCount, header.length);
 
-      if (matrix.length > 0) {
+      if (matrix.length > 0 && keepTable) {
+        sheet.tables.getItem(keepTable).resize(body);
+      } else if (matrix.length > 0) {
         var table = sheet.tables.add(body, true);
-        table.name = 'Klikk_' + Date.now();
+        // Named from the sheet, not the clock: stable across refreshes so a
+        // PivotTable pointed at it stays pointed at it.
+        table.name = 'K_' + sheetName.replace(/[^A-Za-z0-9]/g, '_');
         table.style = 'TableStyleLight8';
       } else {
         sheet.getRangeByIndexes(0, 0, 1, header.length).format.font.bold = true;
@@ -466,6 +503,12 @@
         else if (c.fmt === 'int') col.numberFormat = [['0']];
         sheet.getRangeByIndexes(0, i, 1, 1).format.columnWidth = c.width * 7.5;
       });
+
+      // A shorter result must not leave last refresh's rows stranded below.
+      if (prevRows > rowCount) {
+        sheet.getRangeByIndexes(rowCount, 0, prevRows - rowCount, header.length)
+          .clear(Excel.ClearApplyTo.all);
+      }
 
       sheet.freezePanes.freezeRows(1);
       await ctx.sync();
@@ -535,6 +578,8 @@
       el.btnRefresh.disabled = true;
       el.btnRestore.disabled = true;
       el.btnPivot.disabled = true;
+      el.btnReload.disabled = true;
+      el.btnSyncComments.disabled = true;
       return;
     }
     var when = new Date(b.loadedAt);
@@ -551,6 +596,8 @@
     el.btnRefresh.disabled = false;
     el.btnRestore.disabled = false;
     el.btnPivot.disabled = b.kind !== 'detail';
+    el.btnReload.disabled = false;
+    el.btnSyncComments.disabled = b.kind !== 'cube';
   }
 
   function restoreFiltersFromSheet() {
@@ -864,6 +911,157 @@
     el.countLine.textContent = 'PivotTable created — drag fields in Excel to rearrange it.';
   }
 
+  /* Re-run the pane's CURRENT filters into the sheet already in front, instead
+     of spawning another tab. Refresh replays the sheet's stored query; this
+     replaces it with what is in the pane now. */
+  async function reloadThisSheet() {
+    var b = activeSheet.binding;
+    if (!b) throw new Error('Open a Klikk sheet first, then reload it.');
+    var qy = readQuery();
+
+    if (b.kind === 'cube') {
+      var spec = readCubeSpec();
+      var bad = validateCube(spec);
+      if (bad) throw new Error(bad);
+      progress(0, 1, 'Aggregating…');
+      var cube = await fetchCube(qy, spec);
+      if (cancelFlag.cancelled) return;
+      await renderCube(activeSheet.id, cube, qy, spec);
+      await inspectActiveSheet();
+      el.cubeMsg.textContent = 'Reloaded ' + activeSheet.name + ' — '
+        + fmtNum(cube.leaf_count) + ' leaf rows.';
+      el.cubeMsg.className = 'msg msg--ok';
+      return;
+    }
+
+    progress(0, 1, 'Querying…');
+    var got = await fetchRows(qy);
+    if (cancelFlag.cancelled) return;
+    await renderRows(activeSheet.id, got.rows, qy);
+    await inspectActiveSheet();
+    el.countLine.innerHTML = 'Reloaded — <strong>' + fmtNum(got.rows.length) + '</strong> rows.';
+  }
+
+  /* ── comments pinned to a cube intersection ────────────────── */
+
+  var COMMENT_API = '/xero/data/journals/pivot/comments/';
+
+  function cellToIntersection(cube, rowIdx, colIdx) {
+    var r = cube.rows[rowIdx];
+    if (!r) return null;
+    var nCols = cube.cols.length;
+    var colPath, value;
+    if (colIdx < 0) return null;
+    if (colIdx < nCols) {
+      colPath = cube.cols[colIdx];
+      value = r.cells[colIdx];
+    } else if (colIdx === nCols) {
+      colPath = 'Total';
+      value = r.cells.reduce(function (a, b) { return a + b; }, 0);
+    } else {
+      return null;
+    }
+    return {
+      row_dims: cube.row_dims.slice(0, r.keys.length).map(function (d) { return d.key; }),
+      row_path: r.keys,
+      col_dims: cube.col_dims.map(function (d) { return d.key; }),
+      col_path: colPath,
+      cell_value: value
+    };
+  }
+
+  function anchorId(x) {
+    return x.row_path.join('\u001f') + '\u001e' + x.col_path;
+  }
+
+  async function syncComments() {
+    var b = activeSheet.binding;
+    if (!b || b.kind !== 'cube') throw new Error('Open a cube sheet first.');
+    if (!Office.context.requirements.isSetSupported('ExcelApi', '1.10')) {
+      throw new Error('This Excel build has no comment API (needs ExcelApi 1.10).');
+    }
+
+    el.commentMsg.textContent = 'Rebuilding the cube to locate cells…';
+    el.commentMsg.className = 'msg';
+
+    // Re-derive the layout from the server rather than storing thousands of row
+    // keys in the workbook; the sheet is a pure function of the spec anyway.
+    var cube = await fetchCube(b.query, b.spec);
+    var nRowDims = cube.row_dims.length;
+    var FIRST_DATA_ROW = 4;
+    var sheetId = activeSheet.id;
+
+    var found = [];
+    await Excel.run(async function (ctx) {
+      var sheet = ctx.workbook.worksheets.getItem(sheetId);
+      var comments = sheet.comments;
+      comments.load('items/content');
+      await ctx.sync();
+      var locs = comments.items.map(function (c) {
+        var rng = c.getLocation();
+        rng.load('rowIndex,columnIndex');
+        return rng;
+      });
+      await ctx.sync();
+      comments.items.forEach(function (c, i) {
+        found.push({ content: c.content, r: locs[i].rowIndex, c: locs[i].columnIndex });
+      });
+    });
+
+    var author = (el.commentAuthor.value || '').trim();
+    var posted = 0, skipped = 0;
+    var onSheet = {};
+
+    for (var i = 0; i < found.length; i++) {
+      var f = found[i];
+      var x = cellToIntersection(cube, f.r - FIRST_DATA_ROW, f.c - nRowDims);
+      if (!x) { skipped += 1; continue; }
+      onSheet[anchorId(x)] = true;
+      await apiPost(COMMENT_API, {
+        measure: b.spec.measure,
+        row_dims: x.row_dims, row_path: x.row_path,
+        col_dims: x.col_dims, col_path: x.col_path,
+        filters: toParams(b.query),
+        cell_value: x.cell_value,
+        comment: f.content,
+        author: author
+      });
+      posted += 1;
+    }
+
+    // Pull anything commented elsewhere back onto the sheet.
+    var server = await apiGet(COMMENT_API, { status: 'all', limit: 2000 });
+    var pulled = 0;
+    var toAdd = [];
+    (server.results || []).forEach(function (c) {
+      if (c.measure !== b.spec.measure) return;
+      var id = c.row_path.join('\u001f') + '\u001e' + c.col_path;
+      if (onSheet[id]) return;
+      for (var ri = 0; ri < cube.rows.length; ri++) {
+        if (cube.rows[ri].keys.join('\u001f') !== c.row_path.join('\u001f')) continue;
+        var ci = c.col_path === 'Total' ? cube.cols.length : cube.cols.indexOf(c.col_path);
+        if (ci < 0) return;
+        toAdd.push({ r: ri + FIRST_DATA_ROW, c: ci + nRowDims, text: c.comment });
+        return;
+      }
+    });
+
+    if (toAdd.length) {
+      await Excel.run(async function (ctx) {
+        var sheet = ctx.workbook.worksheets.getItem(sheetId);
+        toAdd.forEach(function (a) {
+          try { sheet.comments.add(sheet.getRangeByIndexes(a.r, a.c, 1, 1), a.text); } catch (e) { /* already there */ }
+        });
+        await ctx.sync();
+      });
+      pulled = toAdd.length;
+    }
+
+    el.commentMsg.textContent = posted + ' sent to Postgres, ' + pulled + ' pulled back'
+      + (skipped ? ', ' + skipped + ' outside the data area ignored' : '') + '.';
+    el.commentMsg.className = 'msg msg--ok';
+  }
+
   /* ── plumbing ──────────────────────────────────────────── */
 
   async function run(fn) {
@@ -893,6 +1091,8 @@
     el.btnRefresh.disabled = !on || !activeSheet.binding;
     el.btnRestore.disabled = !on || !activeSheet.binding;
     el.btnPivot.disabled = !on || !activeSheet.binding || activeSheet.binding.kind !== 'detail';
+    el.btnReload.disabled = !on || !activeSheet.binding;
+    el.btnSyncComments.disabled = !on || !activeSheet.binding || activeSheet.binding.kind !== 'cube';
   }
 
   function progress(done, total, msg) {

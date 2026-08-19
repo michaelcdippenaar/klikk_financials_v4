@@ -25,6 +25,17 @@ from apps.xero.xero_data.aged_reports_service import sync_aged_payables, sync_ag
 logger = logging.getLogger(__name__)
 
 
+def _fin_year_label(journal):
+    """FY named for the year it ends in. Per tenant: each organisation carries
+    its own fiscal_year_start_month (Klikk 7, Tremly 3, Dippenaar Family 1)."""
+    if not journal.date:
+        return ''
+    org = journal.organisation
+    start = (getattr(org, 'fiscal_year_start_month', None) or 1) if org else 1
+    y, m = journal.date.year, journal.date.month
+    return 'FY%d' % (y + 1 if (start > 1 and m >= start) else y)
+
+
 class XeroJournalSearchView(APIView):
     """
     Read-only journal search for agent and reporting workflows.
@@ -155,6 +166,7 @@ class XeroJournalSearchView(APIView):
                 'date': journal.date.date().isoformat() if journal.date else None,
                 'journal_number': journal.journal_number,
                 'journal_type': journal.journal_type,
+                'fin_year': _fin_year_label(journal),
                 'report': (
                     ('Income Statement' if account_obj.grouping in ('REVENUE', 'EXPENSE')
                      else 'Balance Sheet') if account_obj and account_obj.grouping else ''
