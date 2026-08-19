@@ -70,6 +70,7 @@ INSTALLED_APPS = [
     'apps.planning_analytics',
     'apps.ai_agent',
     'apps.personal_expenses',  # Personal-expenses classification + reporting
+    'apps.audit',  # Year-end audit registry (audit.checks / check_runs / check_results)
 ]
 
 MIDDLEWARE = [

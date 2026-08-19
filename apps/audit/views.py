@@ -1,154 +1,171 @@
 """
-Read-only views for the year-end audit check registry.
+REST surface for the year-end audit registry — consumed by the klikk-financials
+MCP server (klikk_portal/mcp/stock-market/server.mjs) and usable directly.
 
-The registry lives in Postgres as `audit.checks` — one row per executable
-check (see Klikk-YearEnd-Audit-Procedures.md §2). It is built and maintained
-outside Django (plain SQL migrations owned by the audit tooling), so these
-views deliberately use RAW SQL and define NO Django model and NO migration:
-the table can appear, gain columns, or be rebuilt without this app caring.
+GET  /audit/checks/?category=BAL&include_sql=1   list_audit_checks
+POST /audit/checks/                              add_audit_check (validates SQL via EXPLAIN, SELECT-only)
+GET  /audit/checks/<code>/                       one check incl. sql_text
+POST /audit/checks/<code>/run/   {fy}            run_audit_check
+POST /audit/run/                 {fy}            run_yearend_audit
+GET  /audit/history/<code>/?limit=20&fy=2026     audit_history
+GET  /audit/runs/?limit=20                       recent runs
 
-If the table does not exist yet the endpoint returns an empty list with
-`registry_ready: false` so the console can fall back to the static list of
-planned checks instead of erroring.
-
-STRICTLY READ-ONLY. Nothing in this module writes to any database.
+Everything except POST /checks/ is read-only on business data; the registry
+itself (audit.checks / check_runs / check_results) is the only thing written.
+Xero is never touched.
 """
-import logging
-
-from django.db import connection
-from rest_framework.permissions import AllowAny
+from django.db import IntegrityError
+from rest_framework import status
+from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from rest_framework.views import APIView
 
-logger = logging.getLogger(__name__)
-
-
-# Columns we know how to serialise. We intersect this with the columns the
-# table actually has, so a schema still being built (or later extended) does
-# not break the endpoint.
-KNOWN_COLUMNS = [
-    'id',
-    'code',
-    'title',
-    'category',
-    'severity',
-    'description',
-    'rationale',
-    'sql_text',
-    'expected',
-    'owner_action',
-    'active',
-    'created_at',
-    'source',
-]
+from .models import AuditCheck, AuditCheckRun
+from .services import (
+    EXPECTED_VALUES, SEVERITY_VALUES, KLIKK_TENANT_ID, SqlGuardError, check_to_dict, fiscal_year_for_today,
+    history_for, run_audit, run_check, validate_sql,
+)
 
 
-class AuditChecksView(APIView):
-    """
-    GET /audit/checks/ — the year-end audit check registry, read-only.
+def _int(value, default, lo=None, hi=None):
+    try:
+        v = int(value)
+    except (TypeError, ValueError):
+        return default
+    if lo is not None:
+        v = max(lo, v)
+    if hi is not None:
+        v = min(hi, v)
+    return v
 
-    Mirrors the permission pattern of the neighbouring read-only status
-    endpoints (e.g. /xero/sync/process-status/).
 
-    Optional query params:
-        category  — exact category match (case-insensitive)
-        active    — 'true' / 'false' to filter on the active flag
+def _fy(request_data):
+    fy = _int(request_data.get('fy'), None, 2015, 2100)
+    return fy if fy else fiscal_year_for_today()
 
-    Response:
-        {
-          "registry_ready": true|false,
-          "count": <int>,
-          "categories": ["Data readiness", ...],
-          "checks": [ { code, title, category, severity, description,
-                        rationale, sql_text, expected, owner_action,
-                        active, created_at, source }, ... ]
-        }
 
-    When `registry_ready` is false the table has not been created yet and
-    `checks` is empty — the console then shows the static planned-check list.
-    """
+@api_view(['GET', 'POST'])
+def checks_view(request):
+    if request.method == 'GET':
+        qs = AuditCheck.objects.all().order_by('code')
+        category = (request.query_params.get('category') or '').strip().upper()
+        if category:
+            qs = qs.filter(category=category)
+        if request.query_params.get('active') in ('1', 'true', 'True'):
+            qs = qs.filter(active=True)
+        # sql_text is included by default (the console's Audit Procedures page shows it);
+        # pass include_sql=0 for a lighter payload (the MCP list tool does).
+        include_sql = request.query_params.get('include_sql', '1') not in ('0', 'false', 'False')
+        checks = [check_to_dict(c, include_sql=include_sql) for c in qs]
+        categories = sorted({c['category'] for c in checks})
+        # registry_ready/categories keep the contract the console (klikk_portal AuditProcedures.vue) relies on.
+        return Response({'registry_ready': True, 'count': len(checks), 'categories': categories, 'checks': checks})
 
-    permission_classes = [AllowAny]  # matches sibling read-only views
+    # POST — add a check
+    data = request.data or {}
+    required = ('code', 'title', 'category', 'severity', 'description', 'sql_text', 'expected')
+    missing = [k for k in required if not str(data.get(k, '')).strip()]
+    if missing:
+        return Response({'detail': f'missing required field(s): {", ".join(missing)}'}, status=status.HTTP_400_BAD_REQUEST)
+    code = str(data['code']).strip().upper()
+    severity = str(data['severity']).strip().lower()
+    expected = str(data['expected']).strip().lower()
+    if severity not in SEVERITY_VALUES:
+        return Response({'detail': f'severity must be one of {SEVERITY_VALUES}'}, status=status.HTTP_400_BAD_REQUEST)
+    if expected not in EXPECTED_VALUES:
+        return Response({'detail': f'expected must be one of {EXPECTED_VALUES}'}, status=status.HTTP_400_BAD_REQUEST)
+    sql_text = str(data['sql_text']).strip()
+    try:
+        validate_sql(sql_text, explain=True)
+    except SqlGuardError as exc:
+        return Response({'detail': f'sql_text rejected: {exc}'}, status=status.HTTP_400_BAD_REQUEST)
+    if AuditCheck.objects.filter(code=code).exists() and not data.get('replace'):
+        return Response({'detail': f'check {code} already exists (pass replace=true to update it)'},
+                        status=status.HTTP_409_CONFLICT)
+    try:
+        obj, created = AuditCheck.objects.update_or_create(
+            code=code,
+            defaults={
+                'title': str(data['title']).strip(), 'category': str(data['category']).strip().upper(),
+                'severity': severity, 'description': str(data['description']).strip(),
+                'rationale': str(data.get('rationale', '')).strip(), 'sql_text': sql_text, 'expected': expected,
+                'owner_action': str(data.get('owner_action', '')).strip(), 'active': bool(data.get('active', True)),
+                'source': str(data.get('source', 'mcp:add_audit_check')).strip(),
+            },
+        )
+    except IntegrityError as exc:
+        return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    # Smoke-run it for the current FY so the caller sees it works end-to-end.
+    smoke = run_check(obj, fy=_fy(data), tenant_id=KLIKK_TENANT_ID)
+    return Response({'created': created, 'check': check_to_dict(obj, include_sql=True), 'smoke_run': smoke},
+                    status=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
-    def get(self, request):
-        category = request.query_params.get('category')
-        active = request.query_params.get('active')
 
-        try:
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT to_regclass('audit.checks')")
-                exists = cursor.fetchone()[0]
-                if not exists:
-                    return Response({
-                        'registry_ready': False,
-                        'count': 0,
-                        'categories': [],
-                        'checks': [],
-                        'detail': 'audit.checks does not exist yet.',
-                    })
+@api_view(['GET'])
+def check_detail_view(request, code):
+    try:
+        check = AuditCheck.objects.get(code=code.upper())
+    except AuditCheck.DoesNotExist:
+        return Response({'detail': f'unknown check {code}'}, status=status.HTTP_404_NOT_FOUND)
+    return Response(check_to_dict(check, include_sql=True))
 
-                cursor.execute(
-                    """
-                    SELECT column_name
-                    FROM information_schema.columns
-                    WHERE table_schema = 'audit' AND table_name = 'checks'
-                    """
-                )
-                present = {row[0] for row in cursor.fetchall()}
-                columns = [c for c in KNOWN_COLUMNS if c in present]
-                if not columns:
-                    return Response({
-                        'registry_ready': False,
-                        'count': 0,
-                        'categories': [],
-                        'checks': [],
-                        'detail': 'audit.checks exists but has no recognised columns.',
-                    })
 
-                where, params = [], []
-                if category and 'category' in present:
-                    where.append('lower(category) = lower(%s)')
-                    params.append(category)
-                if active is not None and 'active' in present:
-                    where.append('active = %s')
-                    params.append(str(active).lower() in ('1', 'true', 'yes'))
+@api_view(['POST'])
+def run_check_view(request, code):
+    try:
+        check = AuditCheck.objects.get(code=code.upper())
+    except AuditCheck.DoesNotExist:
+        return Response({'detail': f'unknown check {code}'}, status=status.HTTP_404_NOT_FOUND)
+    data = request.data or {}
+    fy = _fy(data)
+    tenant_id = str(data.get('tenant_id') or KLIKK_TENANT_ID)
+    out = run_audit(fy=fy, tenant_id=tenant_id, codes=[check.code],
+                    triggered_by=str(data.get('triggered_by') or 'api:run_audit_check'))
+    result = out['results'][0] if out['results'] else None
+    return Response({'run_id': out['summary']['run_id'], 'fy': fy, 'fy_start': out['summary']['fy_start'],
+                     'fy_end': out['summary']['fy_end'], 'check': check_to_dict(check), 'result': result})
 
-                select_list = ', '.join('"%s"' % c for c in columns)
-                sql = 'SELECT %s FROM audit.checks' % select_list
-                if where:
-                    sql += ' WHERE ' + ' AND '.join(where)
-                order = []
-                if 'category' in present:
-                    order.append('category')
-                if 'code' in present:
-                    order.append('code')
-                if order:
-                    sql += ' ORDER BY ' + ', '.join(order)
 
-                cursor.execute(sql, params)
-                rows = cursor.fetchall()
-        except Exception:
-            logger.exception('Failed to read audit.checks registry')
-            return Response({
-                'registry_ready': False,
-                'count': 0,
-                'categories': [],
-                'checks': [],
-                'detail': 'Could not read the audit registry.',
-            })
+@api_view(['POST'])
+def run_audit_view(request):
+    data = request.data or {}
+    fy = _fy(data)
+    tenant_id = str(data.get('tenant_id') or KLIKK_TENANT_ID)
+    codes = data.get('codes') or None
+    if isinstance(codes, str):
+        codes = [c.strip() for c in codes.split(',') if c.strip()]
+    out = run_audit(fy=fy, tenant_id=tenant_id, codes=codes,
+                    triggered_by=str(data.get('triggered_by') or 'api:run_yearend_audit'))
+    include_samples = bool(data.get('include_samples', True))
+    sample_limit = _int(data.get('sample_limit'), 10, 0, 50)
+    results = []
+    for r in out['results']:
+        r2 = dict(r)
+        if not include_samples:
+            r2.pop('sample_rows', None)
+        else:
+            r2['sample_rows'] = (r.get('sample_rows') or [])[:sample_limit]
+        results.append(r2)
+    return Response({'summary': out['summary'], 'results': results})
 
-        checks = []
-        for row in rows:
-            item = {}
-            for key, value in zip(columns, row):
-                item[key] = value.isoformat() if hasattr(value, 'isoformat') else value
-            checks.append(item)
 
-        categories = sorted({c['category'] for c in checks if c.get('category')})
+@api_view(['GET'])
+def history_view(request, code):
+    if not AuditCheck.objects.filter(code=code.upper()).exists():
+        return Response({'detail': f'unknown check {code}'}, status=status.HTTP_404_NOT_FOUND)
+    limit = _int(request.query_params.get('limit'), 20, 1, 200)
+    fy = _int(request.query_params.get('fy'), None, 2015, 2100)
+    return Response({'code': code.upper(), 'count': None, 'history': history_for(code, limit=limit, fy=fy)})
 
-        return Response({
-            'registry_ready': True,
-            'count': len(checks),
-            'categories': categories,
-            'checks': checks,
-        })
+
+@api_view(['GET'])
+def runs_view(request):
+    limit = _int(request.query_params.get('limit'), 20, 1, 200)
+    runs = AuditCheckRun.objects.all().order_by('-run_id')[:limit]
+    return Response({'runs': [
+        {'run_id': r.run_id, 'fy': r.fy, 'tenant_id': r.tenant_id,
+         'started_at': r.started_at.isoformat() if r.started_at else None,
+         'finished_at': r.finished_at.isoformat() if r.finished_at else None,
+         'triggered_by': r.triggered_by,
+         'counts': (r.summary or {}).get('counts'), 'checks_run': (r.summary or {}).get('checks_run')}
+        for r in runs
+    ]})
