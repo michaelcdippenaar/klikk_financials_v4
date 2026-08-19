@@ -5,6 +5,7 @@ Examples:
   python manage.py sync_xero_quotes --tenant-id <UUID> --modified-since 2026-01-01
   python manage.py sync_xero_quotes --tenant-id <UUID> --full
   python manage.py sync_xero_quotes --all-tenants
+  python manage.py sync_xero_quotes --tenant-id <UUID> --max-api-calls 150
 """
 import json
 from datetime import datetime
@@ -25,6 +26,8 @@ class Command(BaseCommand):
                             help='ISO date (YYYY-MM-DD) — only sync quotes updated since')
         parser.add_argument('--full', action='store_true',
                             help='Ignore modified-since; full backfill')
+        parser.add_argument('--max-api-calls', type=int, default=None,
+                            help='Hard cap on Xero API calls for this run (budget guard).')
 
     def handle(self, *args, **opts):
         tenant_id = opts.get('tenant_id')
@@ -41,6 +44,7 @@ class Command(BaseCommand):
                 raise CommandError(f'Bad --modified-since: {exc}')
 
         full = opts.get('full', False)
+        max_api_calls = opts.get('max_api_calls')
 
         if all_tenants:
             # Skip tenants awaiting Xero re-authorization (dead refresh token).
@@ -54,5 +58,6 @@ class Command(BaseCommand):
 
         for tenant in tenants:
             self.stdout.write(f'Syncing quotes for {tenant.tenant_name} ({tenant.tenant_id})...')
-            stats = sync_xero_quotes(tenant, modified_since=modified_since, full=full)
+            stats = sync_xero_quotes(tenant, modified_since=modified_since, full=full,
+                                     max_api_calls=max_api_calls)
             self.stdout.write(self.style.SUCCESS(json.dumps(stats, indent=2, default=str)))

@@ -11,6 +11,12 @@ needs a per-quote detail call) — single pass, no detail round-trip.
 
 Rate limit: 60/min budget. We sleep 1.1s every 50 calls — defensive against
 multi-tenant sweeps; trivial overhead on single-tenant runs.
+
+Daily budget: the Klikk tenant is capped at 1,000 Xero calls/day and the
+nightly pipeline must stay well under that (2026-08-18 budget blowout).
+`sync_xero_invoices(max_api_calls=N)` is a hard cap on list pages requested
+in one run — the page generator owns the counter and refuses to request
+another page once the cap is reached; rows already fetched are still upserted.
 """
 import logging
 import time
@@ -114,10 +120,31 @@ def _get_api(tenant: XeroTenant):
 
 
 def _iter_invoice_pages(api, tenant_id, modified_since=None, statuses=None,
-                       invoice_type=None):
-    """Yield invoice dicts page by page. Stops on short page."""
+                       invoice_type=None, stats=None, max_api_calls=None):
+    """Yield invoice dicts page by page. Stops on short page.
+
+    The generator owns the page loop, so it also owns the API-call counter
+    (`stats['api_calls']`, +1 per page actually requested), the rate-limit
+    pause, and the budget guard. Counting here — rather than inferring pages
+    from the consumer's row count — keeps the count honest and guarantees
+    no page is requested after the budget is spent.
+
+    When `max_api_calls` is set and reached while more pages remain, sets
+    `stats['budget_exhausted'] = True` and returns; rows from pages already
+    fetched have all been yielded and are not discarded.
+    """
+    if stats is None:
+        stats = {'api_calls': 0}
     page = 1
     while True:
+        if max_api_calls is not None and stats['api_calls'] >= max_api_calls:
+            stats['budget_exhausted'] = True
+            logger.warning(
+                'Invoices sync: API budget exhausted (%d/%d calls) before '
+                'page %d — stopping; rows already fetched are kept',
+                stats['api_calls'], max_api_calls, page,
+            )
+            return
         kwargs = {'page': page}
         if modified_since:
             kwargs['if_modified_since'] = modified_since
@@ -126,6 +153,9 @@ def _iter_invoice_pages(api, tenant_id, modified_since=None, statuses=None,
         if invoice_type:
             # Use Xero's `where` query param: e.g. Type=="ACCREC"
             kwargs['where'] = f'Type=="{invoice_type}"'
+        # Count the attempt, not the success: a call that 429s/401s still
+        # spent budget against Xero's daily cap.
+        stats['api_calls'] += 1
         raw = api.get_invoices(tenant_id, **kwargs)
         ser = serialize_model(raw)
         invoices = ser.get('Invoices', []) or []
@@ -136,6 +166,9 @@ def _iter_invoice_pages(api, tenant_id, modified_since=None, statuses=None,
         if len(invoices) < 100:
             return
         page += 1
+        if (page - 1) % _RATE_LIMIT_BATCH == 0:
+            logger.info('Invoices sync: pausing after %d pages', page - 1)
+            time.sleep(_RATE_LIMIT_SLEEP)
 
 
 def _resolve_contact(tenant: XeroTenant, contact_dict):
@@ -257,7 +290,8 @@ def sync_xero_invoices(tenant: XeroTenant,
                        modified_since: datetime | None = None,
                        statuses: list | None = None,
                        invoice_type: str | None = None,
-                       full: bool = False) -> dict:
+                       full: bool = False,
+                       max_api_calls: int | None = None) -> dict:
     """
     Sync invoices for one tenant.
 
@@ -266,31 +300,41 @@ def sync_xero_invoices(tenant: XeroTenant,
         statuses: optional list of XeroInvoiceStatus values to filter
         invoice_type: optional 'ACCREC' or 'ACCPAY'
         full: ignore modified_since
+        max_api_calls: hard cap on Xero list-page calls for this run.
+            None (default) = unlimited, i.e. the pre-existing behaviour for
+            the console view and the management command. When set, no page
+            is requested once the cap is reached; rows already fetched are
+            still upserted. Exists so the nightly pipeline can run this
+            inside a fixed per-tenant budget (Klikk tenant: 1,000 calls/day).
 
-    Returns stats dict.
+    Returns stats dict. Always contains 'budget_exhausted' (bool) — True only
+    when the cap stopped paging while more pages remained — so callers can
+    branch on it directly.
+
+    On success records XeroLastUpdate['invoice_store'] so the console can
+    show an honest "last run" for this store. Skipped when the list call
+    itself failed — a failed run must not claim freshness.
     """
     stats = {
         'created': 0, 'updated': 0, 'line_items_total': 0,
         'errors': 0, 'invoice_count': 0, 'api_calls': 0,
+        'budget_exhausted': False,
     }
 
     if full:
         modified_since = None
     api = _get_api(tenant)
 
+    list_call_failed = False
     try:
-        page_idx = 0
+        # The generator owns the page loop and therefore the api_calls
+        # counter, the rate-limit pause, and the budget guard (see its docstring).
         for inv in _iter_invoice_pages(api, tenant.tenant_id,
                                        modified_since=modified_since,
                                        statuses=statuses,
-                                       invoice_type=invoice_type):
-            # Each page costs 1 API call; track by counting transitions.
-            if stats['invoice_count'] % 100 == 0:
-                stats['api_calls'] += 1
-                page_idx += 1
-                if page_idx > 1 and page_idx % _RATE_LIMIT_BATCH == 0:
-                    logger.info('Invoices sync: pausing after %d pages', page_idx)
-                    time.sleep(_RATE_LIMIT_SLEEP)
+                                       invoice_type=invoice_type,
+                                       stats=stats,
+                                       max_api_calls=max_api_calls):
             stats['invoice_count'] += 1
 
             try:
@@ -309,6 +353,19 @@ def sync_xero_invoices(tenant: XeroTenant,
         logger.exception('Invoices list call failed for tenant %s', tenant.tenant_id)
         stats['errors'] += 1
         stats['error_message'] = str(exc)
+        list_call_failed = True
+
+    if not list_call_failed:
+        # Honest "last run" stamp for the console Processes page.
+        #
+        # The key is 'invoice_store', NOT 'invoices'. 'invoices' is the
+        # transactions-sync If-Modified-Since cursor owned by XeroApiClient
+        # (apps/xero/xero_core/services.py); writing it here would advance that
+        # cursor without the transactions sync having run, and it would then
+        # silently skip data. Individual row upsert failures do not block the
+        # stamp — the run itself completed; only a failed list call does.
+        from apps.xero.xero_sync.models import XeroLastUpdate
+        XeroLastUpdate.objects.update_or_create_timestamp('invoice_store', tenant)
 
     stats['completed_at'] = datetime.now(dt_timezone.utc).isoformat()
     logger.info('Invoices sync for tenant %s: %s', tenant.tenant_id, stats)

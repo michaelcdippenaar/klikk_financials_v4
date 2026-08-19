@@ -13,7 +13,11 @@ from apps.xero.xero_sync.services import update_xero_models
 
 
 class XeroUpdateModelsView(APIView):
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    # Gated 2026-08-20: this triggers live Xero API calls. Left AllowAny,
+    # any anonymous internet caller could burn the tenant's 1,000/day budget
+    # (SECURITY-NOTE.md §3). The console sends its JWT; the MCP server uses
+    # the shared service token, which DRF authenticates ahead of JWT.
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         tenant_id = request.data.get('tenant_id')
@@ -59,6 +63,11 @@ class XeroApiCallStatsView(APIView):
     """
     Get Xero API call statistics for Admin Console display.
     Query params: tenant_id (optional) - filter by tenant
+
+    Response is get_api_call_stats() verbatim: cap + quota (Xero's own
+    X-DayLimit-Remaining, the number to show) and by_process /
+    total_today (locally logged calls -- the under-counting fallback for
+    when quota.day_remaining is None).
     """
     permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
 
@@ -82,6 +91,19 @@ class XeroProcessStatusView(APIView):
 
     so the page reflects reality on load.
 
+    Two stages deliberately do NOT read the end_point that shares their name:
+      - 'journals' reads 'process_journals', not 'journals'. The 'journals'
+        end_point is a dead legacy cursor — nothing has written it since
+        November 2025 — so reading it showed a months-old date as if it were
+        the last run. process_xero_data() now stamps 'process_journals'.
+      - 'invoices' reads 'invoice_store', not 'invoices'. The 'invoices'
+        end_point is the transactions-sync If-Modified-Since cursor written
+        by XeroApiClient (xero_core), not the invoice store sync this card
+        triggers. sync_xero_invoices() now stamps 'invoice_store'.
+    Until the next nightly run writes those two end_points the stages report
+    state 'idle' / last_success_at null — that is honest and self-heals; do
+    not backfill them.
+
     Query params: tenant_id (optional) — filter by tenant.
 
     Response:
@@ -103,8 +125,8 @@ class XeroProcessStatusView(APIView):
         'data':          ['bank_transactions', 'payments', 'credit_notes',
                           'prepayments', 'overpayments', 'bank_transfers',
                           'manual_journals', 'journals'],
-        'invoices':      ['invoices'],
-        'journals':      ['journals'],
+        'invoices':      ['invoice_store'],
+        'journals':      ['process_journals'],
         'trail-balance': ['trail_balance'],
     }
 

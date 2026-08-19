@@ -216,6 +216,10 @@ SIMPLE_JWT = {
 # Xero Scheduler Configuration
 XERO_SCHEDULER_ENABLED = False  # Set to False to disable scheduler
 
+# Xero per-tenant daily API call cap. Klikk's tenant is capped at 1,000/day
+# (fixed window, resets ~14:26 UTC), not the 5,000 default in Xero's docs.
+XERO_DAILY_CALL_CAP = int(os.environ.get('XERO_DAILY_CALL_CAP', '1000'))
+
 # Investec Private Banking API (SA PB Account Information)
 # Credentials: set INVESTEC_CLIENT_ID, INVESTEC_CLIENT_SECRET, INVESTEC_API_KEY (x-api-key) in env or .env
 # Optional: INVESTEC_BASE_URL (default production; use https://openapisandbox.investec.com for sandbox)

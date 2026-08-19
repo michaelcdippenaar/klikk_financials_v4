@@ -9,7 +9,7 @@ API views for Trial Balance report operations including:
 - Adding income statement entries
 """
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -45,7 +45,12 @@ class ValidateBalanceSheetCompleteView(APIView):
     - export_line_items: Export line items to CSV
     - add_income_statement: Add income statement to report
     """
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    # Gated 2026-08-20: pulls a live report from Xero, so any anonymous
+    # internet caller could burn the tenant's 1,000/day budget
+    # (SECURITY-NOTE.md §3). Missed in the first gating pass and caught by the
+    # anti-regression sweep in xero_sync/test_trigger_auth.py. Console sends
+    # its JWT; MCP uses the shared service token.
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         try:

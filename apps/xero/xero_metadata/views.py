@@ -6,7 +6,7 @@ from django.contrib.auth.decorators import login_required
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_metadata.models import XeroAccount
@@ -42,7 +42,11 @@ class XeroUpdateMetadataView(APIView):
     """
     API endpoint to trigger metadata updates (accounts, contacts, tracking categories).
     """
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    # Gated 2026-08-20: this triggers live Xero API calls. Left AllowAny,
+    # any anonymous internet caller could burn the tenant's 1,000/day budget
+    # (SECURITY-NOTE.md §3). The console sends its JWT; the MCP server uses
+    # the shared service token, which DRF authenticates ahead of JWT.
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         tenant_id = request.data.get('tenant_id')

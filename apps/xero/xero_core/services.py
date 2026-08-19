@@ -9,7 +9,7 @@ import requests
 import urllib3
 
 from django.conf import settings
-from django.db import connection
+from django.db import connection, transaction
 from django.utils import timezone
 from xero_python.accounting import AccountingApi
 from xero_python.api_client import ApiClient, Configuration
@@ -18,7 +18,7 @@ from xero_python.api_client.serializer import serialize
 from xero_python.exceptions import HTTPStatusException, RateLimitException
 
 from apps.xero.xero_core.exceptions import DailyLimitReached, TenantReauthRequired
-from apps.xero.xero_core.models import XeroTenant
+from apps.xero.xero_core.models import XeroApiQuota, XeroTenant
 from apps.xero.xero_auth.models import XeroClientCredentials, XeroAuthSettings, XeroTenantToken
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,16 @@ MAX_RETRY_AFTER_SLEEP = 120
 # Advisory-lock namespace (int4) for single-flight Xero token refresh: "XERO".
 _XERO_REFRESH_LOCK_CLASSID = 0x5845524F
 
+# Minimum seconds between XeroApiQuota upserts from one client instance. A bulk
+# sync makes thousands of requests; persisting the allowance headers on every
+# one would turn a read-mostly job into thousands of row writes (plus WAL and
+# autovacuum churn) for a number the portal widget only polls every few
+# seconds anyway. ~15s of display lag is fine; write amplification is the thing
+# being avoided. The throttle is bypassed when it matters most: near daily
+# exhaustion (<= QUOTA_PERSIST_NEAR_EXHAUSTION remaining) and on any 429.
+QUOTA_PERSIST_INTERVAL_SECONDS = 15
+QUOTA_PERSIST_NEAR_EXHAUSTION = 100
+
 
 def _headers_from(source):
     """Best-effort headers mapping from an exception, REST response, or dict."""
@@ -53,6 +63,40 @@ def _headers_from(source):
     if headers is None and isinstance(source, dict):
         headers = source
     return headers or {}
+
+
+def _header_int(headers, *names):
+    """First of `names` present in `headers`, as an int; None if absent or unparseable.
+
+    Two deliberate choices, both learned from the allowance headers:
+
+    * Presence is tested with `is not None`, never truthiness. `0` is the single
+      most important value these headers ever carry (budget exhausted), and an
+      `or`-chain silently discards it -- a dict source carrying int 0 would read
+      as "no header" and the exhausted-budget signal would be lost.
+    * Each name is parsed independently, so one unparseable header cannot
+      discard a sibling that parsed fine.
+
+    Tolerates any mapping-ish source (dict, urllib3 HTTPHeaderDict, or a list of
+    2-tuples) because _headers_from() returns whatever the caller exposed.
+    """
+    if headers is None:
+        return None
+    get = getattr(headers, 'get', None)
+    if get is None:
+        try:
+            get = dict(headers).get
+        except Exception:
+            return None
+    for name in names:
+        value = get(name)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def retry_after_seconds(source, default=65):
@@ -241,6 +285,8 @@ class XeroApiClient:
         self.request_count = 0
         self.day_limit_remaining = None
         self.min_limit_remaining = None
+        # Throttle state for persisting the allowance to XeroApiQuota.
+        self._quota_last_written_at = None
         self._install_http_guards()
         self.tenant_token = None
         if tenant_id:
@@ -319,14 +365,54 @@ class XeroApiClient:
         """
         try:
             headers = _headers_from(source)
-            day = headers.get('x-daylimit-remaining') or headers.get('X-DayLimit-Remaining')
-            minute = headers.get('x-minlimit-remaining') or headers.get('X-MinLimit-Remaining')
-            if day is not None:
-                self.day_limit_remaining = int(day)
-            if minute is not None:
-                self.min_limit_remaining = int(minute)
-        except (TypeError, ValueError):
-            pass
+            day = _header_int(headers, 'x-daylimit-remaining', 'X-DayLimit-Remaining')
+            minute = _header_int(headers, 'x-minlimit-remaining', 'X-MinLimit-Remaining')
+        except Exception:
+            # This rides on EVERY Xero response, so it must never abort the call
+            # it is attached to. _headers_from() hands back whatever the source
+            # exposed, which is not always a mapping -- catch broadly rather
+            # than guessing which exception type leaks out.
+            return
+        if day is not None:
+            self.day_limit_remaining = day
+        if minute is not None:
+            self.min_limit_remaining = minute
+        self._persist_quota(day, minute, getattr(source, 'status', None))
+
+    def _persist_quota(self, day, minute, status):
+        """Best-effort, throttled upsert of the allowance into XeroApiQuota.
+
+        Telemetry must never break the API call it rides on: anything that
+        goes wrong here is swallowed (debug log at most), and the write runs
+        in its own savepoint so a failure cannot poison a caller-owned
+        transaction.atomic() block that the guard is executing inside of.
+        """
+        if not self.tenant_id or (day is None and minute is None):
+            return
+        now = timezone.now()
+        last = self._quota_last_written_at
+        due = (
+            last is None
+            or (now - last).total_seconds() >= QUOTA_PERSIST_INTERVAL_SECONDS
+            or (day is not None and day <= QUOTA_PERSIST_NEAR_EXHAUSTION)
+            or status == 429
+        )
+        if not due:
+            return
+        try:
+            with transaction.atomic():
+                XeroApiQuota.objects.update_or_create(
+                    tenant_id=self.tenant_id,
+                    defaults={
+                        'day_remaining': day if day is not None else self.day_limit_remaining,
+                        'min_remaining': minute if minute is not None else self.min_limit_remaining,
+                        'last_status': status if isinstance(status, int) else None,
+                        'seen_at': now,
+                    },
+                )
+            self._quota_last_written_at = now
+        except Exception as e:
+            logger.debug('XeroApiQuota persist skipped for tenant %s: %s', self.tenant_id, e)
 
     def get_tenant_token(self):
         """Get tenant token data from credentials.tenant_tokens or XeroTenantToken model."""

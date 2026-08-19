@@ -2,7 +2,7 @@
 Reconciliation view: single process to get P&L and Balance Sheet, compare to trail balance, per financial year.
 """
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -22,7 +22,11 @@ class ReconcileReportsView(APIView):
         fiscal_year_start_month: optional, uses tenant's value from Xero Organisation when not provided
         tolerance: optional, default 0.01
     """
-    permission_classes = [AllowAny]  # TODO: IsAuthenticated for production
+    # Gated 2026-08-20: BOTH get() and post() call _run(), which pulls the
+    # P&L and Balance Sheet reports from Xero -- so the GET is a trigger,
+    # not a read, and burns the tenant's 1,000/day budget (SECURITY-NOTE.md
+    # §3). Console sends its JWT; MCP uses the shared service token.
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         return self._run(request)

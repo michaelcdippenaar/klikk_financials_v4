@@ -18,6 +18,15 @@ Rate limiting:
 Incremental cursor:
   We persist nothing yet — caller passes `modified_since` (a datetime). A
   follow-up can wire this to `XeroLastUpdate` once Quotes is in production.
+
+Daily budget:
+  The Klikk tenant is capped at 1,000 Xero calls/day and the nightly pipeline
+  must stay well under that (2026-08-18 budget blowout). The per-quote detail
+  call is what makes this sync expensive — a full backfill of N quotes costs
+  N + ceil(N/100) calls. `sync_xero_quotes(max_api_calls=N)` is a hard cap on
+  calls per run: list pages are counted honestly (+1 per page), and detail
+  fetching stops the moment the cap is reached. Whatever was fetched before
+  that is upserted; the remainder is left for the next run.
 """
 import logging
 import time
@@ -127,13 +136,34 @@ def _get_api(tenant: XeroTenant):
     return accounting.api_client
 
 
-def _iter_quote_pages(api, tenant_id, modified_since=None):
-    """Yield list-shape Quote dicts page by page. Stops when a page is short."""
+def _iter_quote_pages(api, tenant_id, modified_since=None, stats=None,
+                      max_api_calls=None):
+    """Yield list-shape Quote dicts page by page. Stops when a page is short.
+
+    The generator owns the page loop, so it owns the honest page counter
+    (`stats['api_calls']` +1 per page actually requested — not the old
+    per-quote 1/100 float estimate) and the budget guard: if `max_api_calls`
+    is already reached before a further page is needed, it sets
+    `stats['budget_exhausted'] = True` and returns what it has.
+    """
+    if stats is None:
+        stats = {'api_calls': 0}
     page = 1
     while True:
+        if max_api_calls is not None and stats['api_calls'] >= max_api_calls:
+            stats['budget_exhausted'] = True
+            logger.warning(
+                'Quotes sync: API budget exhausted (%d/%d calls) before list '
+                'page %d — stopping list pass',
+                stats['api_calls'], max_api_calls, page,
+            )
+            return
         kwargs = {'page': page}
         if modified_since:
             kwargs['if_modified_since'] = modified_since
+        # Count the attempt, not the success: a call that 429s/401s still
+        # spent budget against Xero's daily cap.
+        stats['api_calls'] += 1
         raw = api.get_quotes(tenant_id, **kwargs)
         ser = serialize_model(raw)
         quotes = ser.get('Quotes', []) or []
@@ -265,9 +295,22 @@ def _replace_line_items(quote: XeroQuote, detail: dict, tenant: XeroTenant):
 # ---------------------------------------------------------------------------
 
 def sync_xero_quotes(tenant: XeroTenant, modified_since: datetime | None = None,
-                     full: bool = False) -> dict:
+                     full: bool = False,
+                     max_api_calls: int | None = None) -> dict:
     """
     Incremental (or full) sync of Quotes for one tenant.
+
+    Args:
+        modified_since: only sync quotes updated since (Xero If-Modified-Since)
+        full: ignore modified_since
+        max_api_calls: hard cap on Xero API calls (list pages + per-quote
+            detail calls) for this run. None (default) = unlimited, i.e. the
+            pre-existing behaviour for the console view and the management
+            command. When set, no further detail call (or list page) is
+            issued once the cap is reached; quotes already fetched are still
+            upserted and the rest are left for the next run. Exists so the
+            nightly pipeline can run this inside a fixed per-tenant budget
+            (Klikk tenant: 1,000 calls/day).
 
     Returns:
         {
@@ -275,29 +318,35 @@ def sync_xero_quotes(tenant: XeroTenant, modified_since: datetime | None = None,
           'updated': int,
           'line_items_total': int,
           'errors': int,
-          'quote_count': int,
-          'api_calls': int,
+          'quote_count': int,         # quotes listed (not necessarily fetched)
+          'api_calls': int,           # honest count: pages + detail calls
+          'budget_exhausted': bool,   # always present; True only if the cap
+                                      # stopped work with quotes still unfetched
+          'quotes_unfetched': int,    # present only when budget_exhausted
           'completed_at': ISO-8601 str,
         }
     """
     stats = {
         'created': 0, 'updated': 0, 'line_items_total': 0,
         'errors': 0, 'quote_count': 0, 'api_calls': 0,
+        'budget_exhausted': False,
     }
 
     if full:
         modified_since = None
     api = _get_api(tenant)
 
-    # First pass: collect quote IDs from the list endpoint.
+    # First pass: collect quote IDs from the list endpoint. The generator
+    # counts pages (+1 per page requested) and honours the budget itself.
     quote_ids: list[str] = []
     try:
         for summary in _iter_quote_pages(api, tenant.tenant_id,
-                                         modified_since=modified_since):
+                                         modified_since=modified_since,
+                                         stats=stats,
+                                         max_api_calls=max_api_calls):
             qid = summary.get('QuoteID')
             if qid:
                 quote_ids.append(qid)
-            stats['api_calls'] += 1 / 100  # rough: 100 quotes/page = 1 API call
     except Exception as exc:
         logger.exception('Quotes list call failed for tenant %s', tenant.tenant_id)
         stats['errors'] += 1
@@ -306,20 +355,33 @@ def sync_xero_quotes(tenant: XeroTenant, modified_since: datetime | None = None,
         return stats
 
     stats['quote_count'] = len(quote_ids)
-    # API call counter: rough estimate. Round up.
-    stats['api_calls'] = int(stats['api_calls']) + 1
 
     if not quote_ids:
         stats['completed_at'] = datetime.now(dt_timezone.utc).isoformat()
         return stats
 
-    # Second pass: per-quote detail call for full line items.
+    # Second pass: per-quote detail call for full line items. This is the
+    # expensive step — one call per quote — so the budget is checked before
+    # every call, and we stop cleanly (keeping what we have) when it is spent.
     for idx, qid in enumerate(quote_ids, start=1):
+        if max_api_calls is not None and stats['api_calls'] >= max_api_calls:
+            unfetched = len(quote_ids) - (idx - 1)
+            stats['budget_exhausted'] = True
+            stats['quotes_unfetched'] = unfetched
+            logger.warning(
+                'Quotes sync: API budget exhausted (%d/%d calls) — %d of %d '
+                'quotes left unfetched for tenant %s; synced rows are kept',
+                stats['api_calls'], max_api_calls, unfetched, len(quote_ids),
+                tenant.tenant_id,
+            )
+            break
+
         if idx > 1 and (idx - 1) % _RATE_LIMIT_BATCH == 0:
             logger.info('Quotes sync: pausing after %d API calls', idx - 1)
             time.sleep(_RATE_LIMIT_SLEEP)
 
         try:
+            stats['api_calls'] += 1  # count the attempt (see list pass)
             raw = api.get_quote(tenant.tenant_id, qid)
             ser = serialize_model(raw)
             details = (ser.get('Quotes') or [ser]) if isinstance(ser, dict) else []
@@ -327,7 +389,6 @@ def sync_xero_quotes(tenant: XeroTenant, modified_since: datetime | None = None,
                 stats['errors'] += 1
                 continue
             detail = details[0]
-            stats['api_calls'] += 1
         except Exception as exc:
             logger.error('Quote detail fetch failed for %s: %s', qid, exc)
             stats['errors'] += 1

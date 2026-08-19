@@ -52,3 +52,48 @@ class XeroTenant(models.Model):
         if tracking_category_id == self.tracking_category_2_id:
             return 2
         return None
+
+
+class XeroApiQuota(models.Model):
+    """Last-seen per-tenant API allowance, straight from Xero's own headers.
+
+    Every Xero response carries X-DayLimit-Remaining / X-MinLimit-Remaining.
+    That is the ONLY trustworthy budget signal: the daily window resets at an
+    unpublished per-tenant instant and the cap is per-tenant (Klikk's is
+    1,000/day, not the documented 5,000), so any locally computed count
+    (XeroApiCallLog) under-reports — probes, backfills and one-shot scripts
+    never log, and the portal ended up showing 0 / 5,000 while Xero had
+    already counted dozens of calls. XeroApiClient._record_limit_headers()
+    persists what it sees here so the portal can display Xero's number.
+
+    Best-effort telemetry: writes are throttled per client instance (see
+    QUOTA_PERSIST_INTERVAL_SECONDS in services.py) and never raise, so the
+    row may lag a few seconds behind reality and may be missing entirely for a
+    tenant that has not made a call since this table was added. Consumers must
+    treat an absent row as unknown, not zero.
+
+    tenant_id is deliberately NOT a FK to XeroTenant: the guard must be able
+    to record headers even while a tenant row is missing or being created, and
+    it must never fail on an FK constraint mid-API-call.
+    """
+    tenant_id = models.CharField(max_length=100, primary_key=True)
+    day_remaining = models.IntegerField(
+        null=True, blank=True,
+        help_text='X-DayLimit-Remaining from the most recently recorded Xero response.'
+    )
+    min_remaining = models.IntegerField(
+        null=True, blank=True,
+        help_text='X-MinLimit-Remaining from the most recently recorded Xero response.'
+    )
+    last_status = models.IntegerField(
+        null=True, blank=True,
+        help_text='HTTP status of the response the headers came from (e.g. 200, 429).'
+    )
+    seen_at = models.DateTimeField(help_text='When these headers were observed.')
+
+    class Meta:
+        verbose_name = 'Xero API quota'
+        verbose_name_plural = 'Xero API quotas'
+
+    def __str__(self):
+        return f'{self.tenant_id}: day={self.day_remaining} min={self.min_remaining} @ {self.seen_at}'

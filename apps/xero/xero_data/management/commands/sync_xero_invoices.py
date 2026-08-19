@@ -19,6 +19,8 @@ class Command(BaseCommand):
         parser.add_argument('--statuses', nargs='+',
                             help='e.g. AUTHORISED PAID — defaults to all')
         parser.add_argument('--full', action='store_true')
+        parser.add_argument('--max-api-calls', type=int, default=None,
+                            help='Hard cap on Xero API calls for this run (budget guard).')
 
     def handle(self, *args, **opts):
         if not (opts.get('tenant_id') or opts.get('all_tenants')):
@@ -34,6 +36,7 @@ class Command(BaseCommand):
         invoice_type = opts.get('type')
         statuses = opts.get('statuses')
         full = opts.get('full', False)
+        max_api_calls = opts.get('max_api_calls')
 
         if opts.get('all_tenants'):
             # Skip tenants awaiting Xero re-authorization (dead refresh token).
@@ -50,5 +53,6 @@ class Command(BaseCommand):
             stats = sync_xero_invoices(
                 tenant, modified_since=modified_since,
                 statuses=statuses, invoice_type=invoice_type, full=full,
+                max_api_calls=max_api_calls,
             )
             self.stdout.write(self.style.SUCCESS(json.dumps(stats, indent=2, default=str)))

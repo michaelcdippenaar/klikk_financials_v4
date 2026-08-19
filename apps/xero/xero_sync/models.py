@@ -66,6 +66,14 @@ class XeroLastUpdate(models.Model):
         ('credit_notes', 'Credit Notes'),
         ('prepayments', 'Prepayments'),
         ('overpayments', 'Overpayments'),
+        # XeroInvoice/XeroInvoiceLineItem store sync. Deliberately a SEPARATE
+        # key from 'invoices', which is the transactions-sync If-Modified-Since
+        # cursor written by XeroApiClient -- reusing that key would corrupt the
+        # cursor and make the transactions sync skip invoices.
+        ('invoice_store', 'Invoice Store Sync'),
+        # Local journal-reprocess step (no Xero endpoint is called). Recorded so
+        # the sync console can show a real "last run" timestamp for it.
+        ('process_journals', 'Process Journals'),
     ]
     
     name = models.CharField(max_length=200, blank=True, null=True, unique=True, help_text="Optional unique name/identifier for this update record")
@@ -171,6 +179,17 @@ class XeroApiCallLog(models.Model):
         ('trail-balance', 'Build Trail Balance'),
         ('pnl-by-tracking', 'Import P&L by Tracking'),
         ('reconcile', 'Reconcile Reports'),
+        # xero_data.views already logs 'invoices'; get_api_call_stats() iterates
+        # PROCESS_CHOICES, so any process missing from this list is silently
+        # dropped from the daily total (the "0 / 5,000" under-count).
+        ('invoices', 'Sync Invoices'),
+        ('quotes', 'Sync Quotes'),
+        ('documents', 'Document Sync'),
+        # xero_data.views logs these two as well (aged_reports_service pulls a
+        # Xero report per run), so they were being dropped from the total for
+        # the same reason 'invoices' was.
+        ('aged-payables', 'Sync Aged Payables'),
+        ('aged-receivables', 'Sync Aged Receivables'),
     ]
 
     process = models.CharField(max_length=50, choices=PROCESS_CHOICES)

@@ -424,7 +424,16 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
         print(f"[PROCESS] ✓ Transaction journals reprocessed: {txn_stats.get('journal_entries_created', 0)} created")
         stats['transaction_journals_reprocessed'] = True
         logger.info(f'Journals processed for tenant {tenant_id}')
-        
+
+        # Honest "last run" stamp for the console's Process Journals card.
+        # This step has no Xero endpoint of its own, so without this the console
+        # falls back to the legacy XeroLastUpdate['journals'] cursor (last written
+        # 2025-11-25) and shows a months-old date as if it were the last run.
+        # 'process_journals' is a display-only stamp — it is NOT a sync cursor
+        # and nothing in the Xero client reads it.
+        from apps.xero.xero_sync.models import XeroLastUpdate
+        XeroLastUpdate.objects.update_or_create_timestamp('process_journals', tenant)
+
         # Step 2: Create trail balance from processed journals
         logger.info(f'Start Creating Trail Balance for tenant {tenant_id}')
         print(f"[PROCESS] Starting trail balance creation for tenant {tenant_id}")
