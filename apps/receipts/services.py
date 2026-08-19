@@ -44,6 +44,7 @@ FY_LABEL_RE = re.compile(r'^FY(\d{2}|\d{4})$', re.IGNORECASE)
 STATUS_GROUPS = ('MATCHED', 'PENDING', 'NOT IN XERO', 'SKIPPED')
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200
+MAX_IDS = 2000  # ceiling for the ids-only list mode (see query_slip_ids)
 
 TOTAL_SQL = "case when s.ocr->>'total' ~ '^[0-9]+(\\.[0-9]+)?$' then (s.ocr->>'total')::numeric end"
 STATUS_GROUP_SQL = (
@@ -336,10 +337,33 @@ def query_slip(sha256: str) -> dict[str, Any] | None:
     return row
 
 
+def query_slip_ids(where: str, args: list[Any], ordering: str, *, limit: int) -> list[str]:
+    """The sha256s the filter matches, in ``ordering`` order — nothing else.
+
+    Deliberately NOT built on ``_base_select()`` / ``JOURNAL_LATERAL_SQL`` and deliberately not
+    followed by ``attach_review_state()``: the entire point of the ids-only mode is one cheap scan
+    of the register. Because there is no lateral, there are no lateral placeholders — do NOT
+    "fix" this by prepending ``JOURNAL_ARGS``; the WHERE args bind first, the limit last.
+    """
+    sql = f'select s.sha256 from whatsapp.klikk_slips s where {where} order by {ordering} limit %s'
+    with connection.cursor() as cur:
+        cur.execute(sql, [*args, limit])
+        return [row[0] for row in cur.fetchall()]
+
+
 def slip_exists(sha256: str) -> bool:
     with connection.cursor() as cur:
         cur.execute('select 1 from whatsapp.klikk_slips where sha256 = %s', [sha256])
         return cur.fetchone() is not None
+
+
+def existing_sha256s(sha256s: list[str]) -> set[str]:
+    """The subset of ``sha256s`` present in the register. Empty input never hits the DB."""
+    if not sha256s:
+        return set()
+    with connection.cursor() as cur:
+        cur.execute('select sha256 from whatsapp.klikk_slips where sha256 = any(%s)', [list(sha256s)])
+        return {row[0] for row in cur.fetchall()}
 
 
 # --------------------------------------------------------------------------- #

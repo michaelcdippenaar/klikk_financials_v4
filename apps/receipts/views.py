@@ -3,13 +3,15 @@ REST surface for the Audit → Receipts review workflow over the WhatsApp
 Slippies register (``whatsapp.klikk_slips``), consumed by the console.
 
 GET   /audit/receipts/                         [JWT] list (filters, ordering, pagination, whole-filter totals)
+GET   /audit/receipts/?ids_only=1              [JWT] matching sha256s only — no rows, no pagination
 GET   /audit/receipts/<sha256>/                [JWT] one slip + full ocr + items + comments
 PATCH /audit/receipts/<sha256>/review/         [JWT] upsert {to_process, decision, note}
 POST  /audit/receipts/<sha256>/comments/       [JWT] add {text}
+POST  /audit/receipts/bulk/                    [JWT] apply review fields and/or a comment to many sha256s
 GET   /audit/receipts/export/?format=csv|xlsx  [JWT] every matching row, no pagination
 
 **Every** endpoint requires an authenticated user (401 otherwise). The project's
-DRF default is ``AllowAny``, so each view opts in explicitly: the four DRF views
+DRF default is ``AllowAny``, so each view opts in explicitly: the five DRF views
 via ``@permission_classes([IsAuthenticated])`` and the export — a plain Django
 view, see ``receipts_export_view`` — via ``@drf_login_required``. Gating the
 reads matters because every row carries a ``view_url``: a signed, non-expiring
@@ -30,6 +32,7 @@ import functools
 import io
 import math
 
+from django.db import transaction
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.http import require_GET
 from rest_framework import status
@@ -42,11 +45,14 @@ from rest_framework.settings import api_settings
 
 from .models import DECISION_VALUES, SlipComment, SlipReview
 from .services import (
-    DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, _bool, attach_review_state, build_filters, comment_to_dict, query_slip,
-    query_slips, query_totals, resolve_ordering, review_to_dict, slip_exists,
+    DEFAULT_PAGE_SIZE, MAX_IDS, MAX_PAGE_SIZE, _bool, attach_review_state, build_filters, comment_to_dict,
+    existing_sha256s, query_slip, query_slip_ids, query_slips, query_totals, resolve_ordering, review_to_dict,
+    slip_exists,
 )
 
 _BODY_NOT_OBJECT = 'request body must be a JSON object'
+
+BULK_MAX = 500  # sha256s per bulk request, counted AFTER de-duplication
 
 EXPORT_COLUMNS = [
     ('slip_ts', 'date'), ('supplier', 'supplier'), ('total', 'total'), ('category', 'category'),
@@ -112,13 +118,20 @@ def drf_login_required(view):
 @permission_classes([IsAuthenticated])
 def receipts_list_view(request):
     params = request.query_params
+    where, args = build_filters(params)
+    ordering = resolve_ordering(params.get('ordering'))
+    totals = query_totals(where, args)
+    if _bool(params.get('ids_only')):
+        # Select-all support for the bulk endpoint: the sha256s the CURRENT filter matches, in the
+        # current ordering — same build_filters/resolve_ordering as the row mode, but one cheap scan
+        # (see query_slip_ids) and no pagination; page/page_size are ignored. Fetching MAX_IDS + 1
+        # lets `truncated` distinguish "exactly MAX_IDS" from "more than MAX_IDS".
+        ids = query_slip_ids(where, args, ordering, limit=MAX_IDS + 1)
+        return Response({'count': totals['count'], 'sha256s': ids[:MAX_IDS], 'truncated': len(ids) > MAX_IDS})
     page = _int(params.get('page'), 1, 1)
     page_size = _int(params.get('page_size'), DEFAULT_PAGE_SIZE, 1, MAX_PAGE_SIZE)
-    where, args = build_filters(params)
-    totals = query_totals(where, args)
     num_pages = max(1, math.ceil(totals['count'] / page_size))
-    rows = query_slips(where, args, resolve_ordering(params.get('ordering')),
-                       limit=page_size, offset=(page - 1) * page_size)
+    rows = query_slips(where, args, ordering, limit=page_size, offset=(page - 1) * page_size)
     return Response({
         'count': totals['count'],
         'page': page,
@@ -190,6 +203,87 @@ def receipt_comments_view(request, sha256):
         return Response({'detail': 'text is required'}, status=status.HTTP_400_BAD_REQUEST)
     comment = SlipComment.objects.create(sha256=sha256, text=text, author=_username(request))
     return Response(comment_to_dict(comment), status=status.HTTP_201_CREATED)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def receipts_bulk_view(request):
+    """Apply review fields and/or one comment to up to ``BULK_MAX`` sha256s in a single request."""
+    data = request.data
+    if not isinstance(data, dict):
+        return Response({'detail': _BODY_NOT_OBJECT}, status=status.HTTP_400_BAD_REQUEST)
+
+    bad_sha256s = Response({'detail': 'sha256s must be a non-empty list of sha256 strings'},
+                           status=status.HTTP_400_BAD_REQUEST)
+    raw_shas = data.get('sha256s')
+    if not isinstance(raw_shas, list):
+        return bad_sha256s
+    shas, seen = [], set()
+    for x in raw_shas:
+        if not isinstance(x, str):
+            return bad_sha256s
+        sha = str(x).strip()
+        if not sha:
+            return bad_sha256s
+        if sha not in seen:  # de-duplicate preserving order, so `unknown` mirrors the input
+            seen.add(sha)
+            shas.append(sha)
+    if not shas:
+        return bad_sha256s
+    # The cap applies AFTER de-duplication — 600 copies of one sha256 is one action, not a 400.
+    if len(shas) > BULK_MAX:
+        return Response({'detail': f'sha256s is limited to {BULK_MAX} per request'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    fields = {}
+    if 'set_to_process' in data:
+        raw = data['set_to_process']
+        # Same coercion as receipt_review_view / services._bool, for the same reason: a client must
+        # never get a 200 while 'TRUE' / 'Yes' / 'ON' was silently stored as False. None stays False.
+        flag = _bool(raw)
+        if flag is None and raw is not None:
+            return Response({'detail': 'set_to_process must be a boolean (true/false, 1/0, yes/no, on/off)'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        fields['to_process'] = bool(flag)
+    if 'decision' in data:
+        decision = str(data['decision'] or '').strip().upper()
+        if decision not in DECISION_VALUES:
+            return Response({'detail': f'decision must be one of {list(DECISION_VALUES)}'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        fields['decision'] = decision
+    if 'note' in data:
+        fields['note'] = str(data['note'] or '')
+    comment = None
+    if 'comment' in data:
+        comment = str(data['comment'] or '').strip()
+        if not comment:
+            return Response({'detail': 'comment must not be empty'}, status=status.HTTP_400_BAD_REQUEST)
+    if not fields and comment is None:
+        # Key PRESENCE decides, not truthiness — {"note": ""} is a legitimate "clear the note".
+        return Response({'detail': 'nothing to do (expected set_to_process, decision, note and/or comment)'},
+                        status=status.HTTP_400_BAD_REQUEST)
+
+    # Unknown sha256s are reported, never fatal: the console may act on a stale ids_only snapshot,
+    # and failing the whole batch over rows that vanished helps nobody. All-unknown is still a 200.
+    known = existing_sha256s(shas)
+    unknown = [s for s in shas if s not in known]
+    targets = [s for s in shas if s in known]
+    username = _username(request)
+    updated = commented = 0
+    with transaction.atomic():
+        if fields:
+            # update_or_create per row: upsert semantics matter more than the round-trips here,
+            # and BULK_MAX keeps the ceiling at 500.
+            defaults = {**fields, 'updated_by': username}
+            for sha in targets:
+                SlipReview.objects.update_or_create(sha256=sha, defaults=defaults)
+                updated += 1
+        if comment is not None:
+            SlipComment.objects.bulk_create(
+                [SlipComment(sha256=sha, text=comment, author=username) for sha in targets]
+            )
+            commented = len(targets)
+    return Response({'updated': updated, 'commented': commented, 'unknown': unknown})
 
 
 def _export_rows(params):
