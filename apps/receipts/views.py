@@ -52,6 +52,21 @@ from .services import (
 
 _BODY_NOT_OBJECT = 'request body must be a JSON object'
 
+
+def _nul_error(field: str, *values: str):
+    """
+    400 if any of ``values`` contains NUL (0x00), else None.
+
+    JSON permits ``\\u0000`` but a Postgres ``text`` column cannot store it: psycopg raises
+    while binding the parameter, so an unguarded write turns pure client input into a raw
+    500 (found by the adversarial bulk suite). Reads scrub instead — see ``services.strip_nul``;
+    on a write, silently dropping bytes out of the caller's note would be worse than a 400.
+    """
+    if any('\x00' in v for v in values):
+        return Response({'detail': f'{field} must not contain NUL (0x00) characters'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    return None
+
 BULK_MAX = 500  # sha256s per bulk request, counted AFTER de-duplication
 
 EXPORT_COLUMNS = [
@@ -185,6 +200,9 @@ def receipt_review_view(request, sha256):
     if not fields:
         return Response({'detail': 'nothing to update (expected to_process, decision and/or note)'},
                         status=status.HTTP_400_BAD_REQUEST)
+    bad_nul = _nul_error('note', fields.get('note', ''))
+    if bad_nul is not None:
+        return bad_nul
     fields['updated_by'] = _username(request)
     review, _created = SlipReview.objects.update_or_create(sha256=sha256, defaults=fields)
     return Response(review_to_dict(review))
@@ -201,6 +219,9 @@ def receipt_comments_view(request, sha256):
     text = str(data.get('text') or '').strip()
     if not text:
         return Response({'detail': 'text is required'}, status=status.HTTP_400_BAD_REQUEST)
+    bad_nul = _nul_error('text', text)
+    if bad_nul is not None:
+        return bad_nul
     comment = SlipComment.objects.create(sha256=sha256, text=text, author=_username(request))
     return Response(comment_to_dict(comment), status=status.HTTP_201_CREATED)
 
@@ -223,7 +244,10 @@ def receipts_bulk_view(request):
         if not isinstance(x, str):
             return bad_sha256s
         sha = str(x).strip()
-        if not sha:
+        # A real sha256 is hex, so NUL here is always a broken client — and left alone it
+        # reaches psycopg's array binding in existing_sha256s() and 500s the whole batch,
+        # taking the legitimate sha256s in the same request down with it.
+        if not sha or '\x00' in sha:
             return bad_sha256s
         if sha not in seen:  # de-duplicate preserving order, so `unknown` mirrors the input
             seen.add(sha)
@@ -262,6 +286,9 @@ def receipts_bulk_view(request):
         # Key PRESENCE decides, not truthiness — {"note": ""} is a legitimate "clear the note".
         return Response({'detail': 'nothing to do (expected set_to_process, decision, note and/or comment)'},
                         status=status.HTTP_400_BAD_REQUEST)
+    bad_nul = _nul_error('note/comment', fields.get('note', ''), comment or '')
+    if bad_nul is not None:
+        return bad_nul
 
     # Unknown sha256s are reported, never fatal: the console may act on a stale ids_only snapshot,
     # and failing the whole batch over rows that vanished helps nobody. All-unknown is still a 200.

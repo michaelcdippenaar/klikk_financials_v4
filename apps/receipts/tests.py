@@ -19,6 +19,7 @@ import datetime as dt
 import io
 import json
 from decimal import Decimal
+from unittest import mock
 from urllib.parse import parse_qs, urlparse
 
 from django.contrib.auth import get_user_model
@@ -33,7 +34,7 @@ from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_data.models import XeroJournals
 from apps.xero.xero_metadata.models import XeroAccount, XeroContacts
 
-from .models import SlipComment, SlipReview
+from .models import DECISION_VALUES, SlipComment, SlipReview
 from .services import KLIKK_TENANT_ID, SLIP_TZ, fy_label, fy_range
 
 UTC = dt.timezone.utc
@@ -1577,3 +1578,665 @@ class JournalTypeAndOrgScopeTests(ReceiptsFixtureMixin, TestCase):
         self.assertEqual(by_sha[self.NAMES['l_orphan_jn']]['journal_number'], '555')
         # no number at all -> empty cell
         self.assertEqual(by_sha[self.NAMES['c_fy25_pend']]['journal_number'], '')
+
+
+# --------------------------------------------------------------------------- #
+# 12. Bulk endpoint — auth gate + request shape (POST /audit/receipts/bulk/)
+# --------------------------------------------------------------------------- #
+def register_snapshot():
+    """Every column of every register row, normalised for bytewise comparison."""
+    with connection.cursor() as cur:
+        cur.execute(
+            'select sha256, slip_ts, filename, source, mime_ext, byte_size, file_bytes, xero_status, '
+            'xero_detail, imported_at, synced_to_xero, ocr::text, search_tsv::text, journal_number, xero_org '
+            'from whatsapp.klikk_slips order by sha256'
+        )
+        return [tuple(bytes(v) if isinstance(v, memoryview) else v for v in row) for row in cur.fetchall()]
+
+
+class BulkMixin(ReceiptsFixtureMixin):
+    def bulk_url(self):
+        return reverse('receipts:bulk')
+
+    def bulk(self, payload, client=None):
+        return (client or self.client).post(self.bulk_url(), payload, format='json')
+
+    def raw_client(self):
+        client = APIClient(raise_request_exception=False)
+        client.credentials(**self.client._credentials)
+        return client
+
+    def assert_nothing_written(self):
+        self.assertFalse(SlipReview.objects.exists(), 'a rejected bulk call wrote a SlipReview')
+        self.assertFalse(SlipComment.objects.exists(), 'a rejected bulk call wrote a SlipComment')
+
+
+class BulkAuthAndShapeTests(BulkMixin, TestCase):
+    def test_anonymous_post_is_401_and_writes_nothing(self):
+        payload = {'sha256s': [self.NAMES['a_fy26']], 'decision': 'CAPTURE', 'comment': 'anon'}
+        resp = self.anon.post(self.bulk_url(), payload, format='json')
+        self.assertEqual(resp.status_code, 401, resp.content[:300])
+        self.assertNotIn('updated', resp.content.decode('utf-8', 'replace'))
+        self.assert_nothing_written()
+
+    def test_malformed_or_expired_bearer_is_401_and_writes_nothing(self):
+        payload = {'sha256s': [self.NAMES['a_fy26']], 'note': 'x'}
+        for garbage in ('not.a.jwt', 'a' * 40, 'ey.ey.ey', ''):
+            client = APIClient()
+            client.credentials(HTTP_AUTHORIZATION=f'Bearer {garbage}')
+            self.assertEqual(client.post(self.bulk_url(), payload, format='json').status_code, 401, repr(garbage))
+        token = AccessToken.for_user(self.user)
+        token.set_exp(lifetime=-dt.timedelta(seconds=1))  # already expired when serialised
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        self.assertEqual(client.post(self.bulk_url(), payload, format='json').status_code, 401, 'expired token')
+        self.assert_nothing_written()
+
+    def test_token_for_deleted_or_deactivated_user_is_401(self):
+        ghost = User.objects.create_user(username='ghost', email='ghost@example.com', password='pw-irrelevant')
+        token = str(AccessToken.for_user(ghost))
+        ghost.delete()
+        payload = {'sha256s': [self.NAMES['a_fy26']], 'note': 'x'}
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        self.assertEqual(client.post(self.bulk_url(), payload, format='json').status_code, 401,
+                         'a token for a since-deleted user must be rejected')
+        frozen = User.objects.create_user(username='frozen', email='frozen@example.com',
+                                          password='pw-irrelevant', is_active=False)
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {AccessToken.for_user(frozen)}')
+        self.assertEqual(client.post(self.bulk_url(), payload, format='json').status_code, 401,
+                         'a token for a deactivated user must be rejected')
+        self.assert_nothing_written()
+
+    def test_get_bulk_is_405_and_never_the_detail_of_a_slip_named_bulk(self):
+        # THE URLCONF-ORDER CANARY: '<str:sha256>/' sits one line below 'bulk/' in urls.py. Insert a
+        # register row literally keyed 'bulk'; if anyone reorders the URLconf, GET /audit/receipts/bulk/
+        # resolves that slip (200 + signed view_url) instead of 405ing — this is the test that screams.
+        insert_slip('bulk', slip_ts=ts(2025, 6, 1), filename='bulk-trap.jpg',
+                    ocr={'supplier': 'BulkTrap Supplier', 'total': '666.00'})
+        resp = self.client.get(self.bulk_url())
+        self.assertEqual(resp.status_code, 405, 'GET bulk/ must be method-not-allowed, not a slip detail')
+        text = resp.content.decode('utf-8', 'replace')
+        for marker in ('BulkTrap', 'view_url', 'xero_status', '666.00', '/audit/slip/'):
+            self.assertNotIn(marker, text, f'GET bulk/ was routed to receipt_detail_view (leaked {marker!r})')
+        # POSTing FOR the slip named 'bulk' proves the POST reached the bulk view through the same URL.
+        resp = self.bulk({'sha256s': ['bulk'], 'note': 'trap'})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self.assertEqual(resp.json(), {'updated': 1, 'commented': 0, 'unknown': []})
+        # anonymous GET is gated before method routing; other methods are 405 and never write
+        self.assertEqual(self.anon.get(self.bulk_url()).status_code, 401)
+        self.assertEqual(self.client.put(self.bulk_url(), {'sha256s': ['bulk'], 'note': 'x'}, format='json').status_code, 405)
+        self.assertEqual(self.client.patch(self.bulk_url(), {'sha256s': ['bulk'], 'note': 'x'}, format='json').status_code, 405)
+        self.assertEqual(self.client.delete(self.bulk_url()).status_code, 405)
+        self.assertEqual(SlipReview.objects.count(), 1, 'only the POST may write')
+
+    def test_non_object_json_bodies_are_400_never_500(self):
+        client = self.raw_client()
+        for raw in ('[]', '["sha256s"]', '"sha256s"', '42', 'null', 'true', '{bad json', ''):
+            resp = client.generic('POST', self.bulk_url(), data=raw, content_type='application/json')
+            self.assertEqual(resp.status_code, 400, f'body={raw!r} -> {resp.status_code}: {resp.content[:200]}')
+        self.assert_nothing_written()
+
+    def test_sha256s_shape_garbage_is_400_and_writes_nothing(self):
+        a = self.NAMES['a_fy26']
+        bad = [
+            {'note': 'x'},                          # sha256s missing entirely
+            {'sha256s': None, 'note': 'x'},
+            {'sha256s': 'abc', 'note': 'x'},        # a string, not a list
+            {'sha256s': 123, 'note': 'x'},
+            {'sha256s': {'0': a}, 'note': 'x'},
+            {'sha256s': [], 'note': 'x'},
+            {'sha256s': [''], 'note': 'x'},
+            {'sha256s': ['   '], 'note': 'x'},
+            {'sha256s': ['\t\n'], 'note': 'x'},
+            {'sha256s': [None], 'note': 'x'},
+            {'sha256s': [123], 'note': 'x'},
+            {'sha256s': [True], 'note': 'x'},       # bool is not a sha string
+            {'sha256s': [[a]], 'note': 'x'},        # nested list
+            {'sha256s': [a, ''], 'note': 'x'},      # one bad entry poisons the whole batch
+            {'sha256s': [a, None], 'note': 'x'},
+            {'sha256s': [a, 42], 'note': 'x'},
+        ]
+        for payload in bad:
+            resp = self.bulk(payload)
+            self.assertEqual(resp.status_code, 400, (payload, resp.content[:200]))
+        self.assert_nothing_written()
+
+    def test_form_encoded_body_is_400_not_500(self):
+        resp = self.client.post(self.bulk_url(), data=f'sha256s={self.NAMES["a_fy26"]}&note=x',
+                                content_type='application/x-www-form-urlencoded')
+        self.assertEqual(resp.status_code, 400, resp.content[:300])
+        self.assert_nothing_written()
+
+
+# --------------------------------------------------------------------------- #
+# 13. Bulk endpoint — the 500 cap is counted AFTER de-duplication
+# --------------------------------------------------------------------------- #
+class BulkCapAndDedupTests(BulkMixin, TestCase):
+    def test_exactly_500_distinct_sha256s_are_accepted(self):
+        known = [self.NAMES['a_fy26'], self.NAMES['b_fy26_auto'], self.NAMES['c_fy25_pend']]
+        unknown = [sha(20000 + i) for i in range(497)]
+        resp = self.bulk({'sha256s': known + unknown, 'note': 'cap check'})
+        self.assertEqual(resp.status_code, 200, f'exactly 500 distinct must be accepted: {resp.content[:300]}')
+        body = resp.json()
+        self.assertEqual(body['updated'], 3)
+        self.assertEqual(body['unknown'], unknown)
+        self.assertEqual(SlipReview.objects.count(), 3)
+
+    def test_501_distinct_sha256s_are_400_and_write_nothing(self):
+        shas_ = [sha(21000 + i) for i in range(500)] + [self.NAMES['a_fy26']]
+        resp = self.bulk({'sha256s': shas_, 'note': 'x'})
+        self.assertEqual(resp.status_code, 400, resp.content[:300])
+        self.assertIn('500', resp.json().get('detail', ''))
+        self.assert_nothing_written()
+
+    def test_600_entries_deduplicating_to_3_are_accepted_cap_is_post_dedup(self):
+        a, b = self.NAMES['a_fy26'], self.NAMES['b_fy26_auto']
+        u = sha(22000)
+        raw = [a, b, u] * 200  # 600 entries, 3 distinct
+        self.assertEqual(len(raw), 600)
+        resp = self.bulk({'sha256s': raw, 'note': 'dedup first'})
+        self.assertEqual(resp.status_code, 200,
+                         f'600 entries -> 3 distinct must be accepted (cap counts AFTER de-dup): {resp.content[:300]}')
+        body = resp.json()
+        self.assertEqual(body['updated'], 2)
+        self.assertEqual(body['unknown'], [u], 'unknown must be de-duplicated too')
+        self.assertEqual(SlipReview.objects.count(), 2)
+        # whitespace-padded variants of one sha de-duplicate with the clean one (750 raw entries, 1 distinct)
+        resp = self.bulk({'sha256s': [f'  {a}  ', a, f'{a} '] * 250, 'note': 'padded'})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self.assertEqual(resp.json()['updated'], 1)
+        self.assertEqual(resp.json()['unknown'], [])
+
+    def test_duplicate_sha256s_produce_exactly_one_comment_per_distinct_receipt(self):
+        a, b = self.NAMES['a_fy26'], self.NAMES['b_fy26_auto']
+        resp = self.bulk({'sha256s': [a, a, b, a, b, b, a], 'comment': 'dup guard'})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self.assertEqual(resp.json()['commented'], 2)
+        self.assertEqual(SlipComment.objects.count(), 2,
+                         'one comment per INPUT ENTRY was written instead of one per distinct receipt')
+        self.assertEqual(SlipComment.objects.filter(sha256=a).count(), 1)
+        self.assertEqual(SlipComment.objects.filter(sha256=b).count(), 1)
+
+
+# --------------------------------------------------------------------------- #
+# 14. Bulk endpoint — actions (key presence, coercion, upsert semantics)
+# --------------------------------------------------------------------------- #
+class BulkActionTests(BulkMixin, TestCase):
+    def test_no_action_key_is_400_nothing_to_do(self):
+        a = self.NAMES['a_fy26']
+        resp = self.bulk({'sha256s': [a]})
+        self.assertEqual(resp.status_code, 400, resp.content[:300])
+        self.assertIn('nothing to do', resp.json()['detail'])
+        # the per-slip endpoints' field spellings are NOT bulk actions
+        for payload in ({'sha256s': [a], 'to_process': True},      # bulk spells it set_to_process
+                        {'sha256s': [a], 'text': 'a comment'},     # the comments endpoint's spelling
+                        {'sha256s': [a], 'Decision': 'CAPTURE'}):  # keys are case-sensitive
+            resp = self.bulk(payload)
+            self.assertEqual(resp.status_code, 400, (payload, resp.content[:200]))
+        self.assert_nothing_written()
+
+    def test_note_empty_string_clears_a_previous_note(self):
+        # Key PRESENCE decides, not truthiness: {"note": ""} is a legitimate clear.
+        a = self.NAMES['a_fy26']
+        SlipReview.objects.create(sha256=a, to_process=True, decision='CAPTURE', note='old note', updated_by='before')
+        resp = self.bulk({'sha256s': [a], 'note': ''})
+        self.assertEqual(resp.status_code, 200, f'note="" must be accepted as a clear: {resp.content[:300]}')
+        self.assertEqual(resp.json()['updated'], 1)
+        rv = SlipReview.objects.get(sha256=a)
+        self.assertEqual(rv.note, '', 'the note was not cleared')
+        self.assertEqual(rv.decision, 'CAPTURE', 'clearing the note must not touch the decision')
+        self.assertTrue(rv.to_process, 'clearing the note must not touch to_process')
+        self.assertEqual(rv.updated_by, 'reviewer')
+
+    def test_set_to_process_coercion_stores_the_right_value(self):
+        # A 200 must never mean "silently stored False" — assert the STORED value every time.
+        a = self.NAMES['a_fy26']
+        for raw in (True, 'true', 'TRUE', 'True', 1, '1', 'yes', 'Yes', 'on', 'ON'):
+            SlipReview.objects.all().delete()
+            resp = self.bulk({'sha256s': [a], 'set_to_process': raw})
+            self.assertEqual(resp.status_code, 200, (raw, resp.content[:200]))
+            self.assertEqual(resp.json()['updated'], 1, raw)
+            self.assertTrue(SlipReview.objects.get(sha256=a).to_process,
+                            f'set_to_process={raw!r}: 200 returned but False stored — the silent-False bug')
+        for raw in (False, 'false', 'FALSE', 0, '0', 'no', 'No', 'off', 'OFF'):
+            SlipReview.objects.update_or_create(sha256=a, defaults={'to_process': True})
+            resp = self.bulk({'sha256s': [a], 'set_to_process': raw})
+            self.assertEqual(resp.status_code, 200, (raw, resp.content[:200]))
+            self.assertFalse(SlipReview.objects.get(sha256=a).to_process, f'set_to_process={raw!r} must store False')
+
+    def test_set_to_process_unrecognised_values_are_400_and_never_silently_false(self):
+        a = self.NAMES['a_fy26']
+        SlipReview.objects.create(sha256=a, to_process=True)
+        for raw in ('banana', [], {}, 'yess', '2', 2, 'null', [1], {'v': True}, 'true false'):
+            resp = self.bulk({'sha256s': [a], 'set_to_process': raw})
+            self.assertEqual(resp.status_code, 400, (raw, resp.content[:200]))
+        rv = SlipReview.objects.get(sha256=a)
+        self.assertTrue(rv.to_process, 'a rejected set_to_process value silently flipped the stored flag')
+        self.assertEqual(SlipReview.objects.count(), 1)
+
+    def test_set_to_process_json_null_is_an_explicit_clear_to_false(self):
+        a = self.NAMES['a_fy26']
+        SlipReview.objects.create(sha256=a, to_process=True)
+        resp = self.bulk({'sha256s': [a], 'set_to_process': None})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self.assertFalse(SlipReview.objects.get(sha256=a).to_process, 'set_to_process: null must clear to False')
+
+    def test_decision_every_enum_value_lowercase_clear_and_invalid(self):
+        a, b = self.NAMES['a_fy26'], self.NAMES['d_fy26_nix']
+        enum = ('CAPTURE', 'MEAL_SKIP', 'PERSONAL', 'DUPLICATE', 'ALREADY_IN_XERO')
+        self.assertEqual(set(enum) | {''}, set(DECISION_VALUES), 'the decision enum drifted from the contract')
+        for d in enum:
+            resp = self.bulk({'sha256s': [a, b], 'decision': d})
+            self.assertEqual(resp.status_code, 200, (d, resp.content[:200]))
+            self.assertEqual(resp.json()['updated'], 2, d)
+            self.assertEqual(SlipReview.objects.get(sha256=a).decision, d)
+            self.assertEqual(SlipReview.objects.get(sha256=b).decision, d)
+        resp = self.bulk({'sha256s': [a], 'decision': 'capture'})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self.assertEqual(SlipReview.objects.get(sha256=a).decision, 'CAPTURE', 'lower-case decision must be upper-cased')
+        resp = self.bulk({'sha256s': [a], 'decision': ''})
+        self.assertEqual(resp.status_code, 200, 'decision="" is a legitimate clear')
+        self.assertEqual(SlipReview.objects.get(sha256=a).decision, '')
+        self.assertEqual(SlipReview.objects.get(sha256=b).decision, 'ALREADY_IN_XERO', "clearing a must not touch b's decision")
+        for d in ('NOPE', 'CAPTURE;DROP', 'MEAL SKIP', 'MEAL-SKIP', 7, ['CAPTURE'], {'d': 'CAPTURE'}):
+            resp = self.bulk({'sha256s': [b], 'decision': d})
+            self.assertEqual(resp.status_code, 400, (d, resp.content[:200]))
+        self.assertEqual(SlipReview.objects.get(sha256=b).decision, 'ALREADY_IN_XERO',
+                         'an invalid decision must not clobber the stored one')
+
+    def test_combined_actions_apply_every_field_to_every_target(self):
+        targets = [self.NAMES['a_fy26'], self.NAMES['j_ts_null'], self.NAMES['i_ocr_null']]
+        resp = self.bulk({'sha256s': targets, 'set_to_process': 'true', 'decision': 'personal',
+                          'note': 'bulk note', 'comment': 'bulk comment'})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self.assertEqual(resp.json(), {'updated': 3, 'commented': 3, 'unknown': []})
+        for s in targets:
+            rv = SlipReview.objects.get(sha256=s)
+            self.assertTrue(rv.to_process, s)
+            self.assertEqual(rv.decision, 'PERSONAL', s)
+            self.assertEqual(rv.note, 'bulk note', s)
+            self.assertEqual(rv.updated_by, 'reviewer', s)
+            c = SlipComment.objects.get(sha256=s)
+            self.assertEqual(c.text, 'bulk comment', s)
+            self.assertEqual(c.author, 'reviewer', s)
+        self.assertEqual(SlipComment.objects.count(), 3)
+        rows = {r['sha256']: r for r in self.list_(page_size=200)['results']}
+        self.assertEqual(rows[targets[0]]['review']['decision'], 'PERSONAL')
+        self.assertEqual(rows[targets[0]]['comment_count'], 1)
+
+    def test_comment_only_call_creates_no_review_rows(self):
+        targets = [self.NAMES['a_fy26'], self.NAMES['b_fy26_auto']]
+        resp = self.bulk({'sha256s': targets, 'comment': 'just a comment'})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self.assertEqual(resp.json()['updated'], 0, 'comment-only must not count review upserts')
+        self.assertEqual(resp.json()['commented'], 2)
+        self.assertFalse(SlipReview.objects.exists(),
+                         'a comment-only bulk call materialised SlipReview rows — that is a real bug')
+        self.assertEqual(SlipComment.objects.count(), 2)
+
+    def test_review_only_call_creates_no_comments(self):
+        targets = [self.NAMES['a_fy26'], self.NAMES['b_fy26_auto']]
+        resp = self.bulk({'sha256s': targets, 'set_to_process': True, 'decision': 'CAPTURE', 'note': 'n'})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self.assertEqual(resp.json()['updated'], 2)
+        self.assertEqual(resp.json()['commented'], 0)
+        self.assertFalse(SlipComment.objects.exists(), 'a review-only bulk call wrote comments')
+
+    def test_updated_by_and_author_are_the_jwt_user_not_a_default(self):
+        booker = User.objects.create_user(username='bookkeeper', email='bookkeeper@example.com',
+                                          password='pw-irrelevant')
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {RefreshToken.for_user(booker).access_token}')
+        a = self.NAMES['a_fy26']
+        resp = self.bulk({'sha256s': [a], 'note': 'from the bookkeeper', 'comment': 'bk comment'}, client=client)
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self.assertEqual(SlipReview.objects.get(sha256=a).updated_by, 'bookkeeper',
+                         'updated_by must be the calling JWT user, not a default or another user')
+        self.assertEqual(SlipComment.objects.get(sha256=a).author, 'bookkeeper')
+
+    def test_upsert_replaces_only_the_sent_fields_and_never_duplicates(self):
+        a, b = self.NAMES['a_fy26'], self.NAMES['b_fy26_auto']
+        SlipReview.objects.create(sha256=a, to_process=True, decision='MEAL_SKIP', note='keep me', updated_by='earlier')
+        SlipReview.objects.create(sha256=b, to_process=False, decision='', note='keep me too', updated_by='earlier')
+        resp = self.bulk({'sha256s': [a, b], 'decision': 'DUPLICATE'})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self.assertEqual(resp.json()['updated'], 2)
+        self.assertEqual(SlipReview.objects.count(), 2, 'bulk upsert duplicated review rows')
+        ra, rb = SlipReview.objects.get(sha256=a), SlipReview.objects.get(sha256=b)
+        self.assertEqual(ra.decision, 'DUPLICATE')
+        self.assertEqual(rb.decision, 'DUPLICATE')
+        self.assertEqual(ra.note, 'keep me', 'a field NOT in the request was clobbered by the upsert')
+        self.assertEqual(rb.note, 'keep me too')
+        self.assertTrue(ra.to_process, 'to_process was not in the request and must be untouched')
+        self.assertFalse(rb.to_process)
+        self.assertEqual(ra.updated_by, 'reviewer', 'updated_by must move to the caller on every upsert')
+
+    def test_blank_comment_is_400_even_with_valid_siblings_and_writes_nothing(self):
+        a = self.NAMES['a_fy26']
+        for c in ('', '   ', '\n\t', None):
+            resp = self.bulk({'sha256s': [a], 'note': 'valid', 'comment': c})
+            self.assertEqual(resp.status_code, 400, (c, resp.content[:200]))
+        self.assert_nothing_written()
+
+
+# --------------------------------------------------------------------------- #
+# 15. Bulk endpoint — unknown sha256s (the register is the source of truth)
+# --------------------------------------------------------------------------- #
+class BulkUnknownShaTests(BulkMixin, TestCase):
+    def test_mixed_known_and_unknown_processes_known_reports_unknown_in_input_order(self):
+        a, b = self.NAMES['a_fy26'], self.NAMES['b_fy26_auto']
+        u1, u2, u3 = sha(7001), sha(7002), sha(7003)
+        resp = self.bulk({'sha256s': [u1, a, u2, b, u3], 'note': 'mixed', 'comment': 'mixed c'})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        body = resp.json()
+        self.assertEqual(body['unknown'], [u1, u2, u3], 'unknown must mirror INPUT order')
+        self.assertEqual(body['updated'], 2)
+        self.assertEqual(body['commented'], 2)
+        self.assertEqual(set(SlipReview.objects.values_list('sha256', flat=True)), {a, b},
+                         'only register-backed sha256s may be written')
+        self.assertEqual(set(SlipComment.objects.values_list('sha256', flat=True)), {a, b})
+        self.assertEqual(SlipReview.objects.get(sha256=a).note, 'mixed')
+
+    def test_every_sha_unknown_is_200_not_404(self):
+        unknowns = [sha(7101), sha(7102)]
+        resp = self.bulk({'sha256s': unknowns, 'set_to_process': True, 'decision': 'CAPTURE',
+                          'note': 'n', 'comment': 'c'})
+        self.assertEqual(resp.status_code, 200, f'all-unknown must be 200, never 404: {resp.content[:300]}')
+        self.assertEqual(resp.json(), {'updated': 0, 'commented': 0, 'unknown': unknowns})
+        self.assert_nothing_written()
+
+    def test_review_row_orphaned_from_the_register_is_unknown(self):
+        # A slip the sync deleted: SlipReview row exists, register row does not. The register is
+        # the source of truth — the sha must be reported unknown and the orphan left untouched.
+        ghost = sha(7201)
+        SlipReview.objects.create(sha256=ghost, decision='CAPTURE', note='orphan', updated_by='sync-victim')
+        resp = self.bulk({'sha256s': [ghost], 'note': 'resurrect?', 'comment': 'hello?'})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self.assertEqual(resp.json(), {'updated': 0, 'commented': 0, 'unknown': [ghost]},
+                         'a SlipReview row alone must not make a sha known')
+        orphan = SlipReview.objects.get(sha256=ghost)
+        self.assertEqual(orphan.note, 'orphan', 'the orphaned review row was modified')
+        self.assertEqual(orphan.updated_by, 'sync-victim')
+        self.assertFalse(SlipComment.objects.exists())
+
+    def test_hostile_unknown_values_are_reported_not_500(self):
+        a = self.NAMES['a_fy26']
+        hostiles = ["'; drop table whatsapp.klikk_slips; --", '%_%', 'ωμέγα-slip', 'z' * 300,
+                    self.NAMES['j_ts_null'].upper(),  # case variant of a KNOWN sha — keys are case-sensitive
+                    'Robert"); DROP TABLE receipts_slipreview;--']
+        resp = self.bulk({'sha256s': hostiles + [a], 'note': 'hostile'})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        body = resp.json()
+        self.assertEqual(body['unknown'], hostiles, 'hostile strings must round-trip as unknown, in order')
+        self.assertEqual(body['updated'], 1)
+        self.assertEqual(self.list_()['count'], 12, 'the register did not survive the hostile input')
+        self.assertEqual(SlipReview.objects.count(), 1)
+
+    def test_nul_byte_sha_entry_is_never_a_5xx(self):
+        # JSON legally carries \x00; Postgres text cannot. The contract says unknown ids are
+        # reported back with a 200 — a driver-level NUL explosion (500) from pure client input is
+        # a bug (a 400 would also be acceptable). No DB assertions after the request on purpose.
+        client = self.raw_client()
+        resp = client.post(self.bulk_url(), {'sha256s': ['abc\x00def', self.NAMES['a_fy26']], 'note': 'nul'},
+                           format='json')
+        self.assertLess(resp.status_code, 500,
+                        f'NUL byte in a sha256s entry blew up the endpoint: {resp.status_code} {resp.content[:300]}')
+
+    def test_nul_byte_in_note_or_comment_is_never_a_5xx(self):
+        client = self.raw_client()
+        a = self.NAMES['a_fy26']
+        resp = client.post(self.bulk_url(), {'sha256s': [a], 'note': 'x\x00y'}, format='json')
+        self.assertLess(resp.status_code, 500, f'NUL in note: {resp.status_code} {resp.content[:300]}')
+        resp = client.post(self.bulk_url(), {'sha256s': [a], 'comment': 'x\x00y'}, format='json')
+        self.assertLess(resp.status_code, 500, f'NUL in comment: {resp.status_code} {resp.content[:300]}')
+
+
+# --------------------------------------------------------------------------- #
+# 16. Bulk endpoint — register isolation (never writes whatsapp.klikk_slips)
+# --------------------------------------------------------------------------- #
+class BulkRegisterIsolationTests(BulkMixin, TestCase):
+    def test_bulk_never_writes_to_the_register(self):
+        before = register_snapshot()
+        self.assertEqual(len(before), 12)
+        a, b = self.NAMES['a_fy26'], self.NAMES['b_fy26_auto']
+        # a full write, a clear, an all-unknown call and a rejected call
+        self.assertEqual(self.bulk({'sha256s': [a, b], 'set_to_process': True, 'decision': 'CAPTURE',
+                                    'note': 'isolation', 'comment': 'isolation'}).status_code, 200)
+        self.assertEqual(self.bulk({'sha256s': [a], 'note': '', 'decision': ''}).status_code, 200)
+        self.assertEqual(self.bulk({'sha256s': [sha(7301)], 'note': 'ghost'}).status_code, 200)
+        self.assertEqual(self.bulk({'sha256s': [a], 'decision': 'NOPE'}).status_code, 400)
+        after = register_snapshot()
+        self.assertEqual(before, after,
+                         'bulk mutated whatsapp.klikk_slips — the register must be byte-identical')
+        # belt-and-braces on the columns the recon depends on
+        self.assertEqual([r[10] for r in after], [r[10] for r in before], 'synced_to_xero changed')
+        self.assertEqual([r[7] for r in after], [r[7] for r in before], 'xero_status changed')
+        self.assertEqual([r[6] for r in after], [r[6] for r in before], 'file_bytes changed')
+
+
+# --------------------------------------------------------------------------- #
+# 17. ids_only list mode (GET /audit/receipts/?ids_only=1)
+# --------------------------------------------------------------------------- #
+class IdsOnlyTests(ReceiptsFixtureMixin, TestCase):
+    def ids(self, **params):
+        resp = self.client.get(reverse('receipts:list'), {'ids_only': '1', **params})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        return resp.json()
+
+    def all_row_shas(self, **params):
+        """Page the ROW mode to exhaustion (deliberately tiny pages) and return the sha order."""
+        out, page = [], 1
+        while True:
+            data = self.list_(page=page, page_size=3, **params)
+            out += self.shas(data)
+            if page >= data['num_pages']:
+                return out
+            page += 1
+
+    def test_shape_count_and_no_row_data_leaks(self):
+        resp = self.client.get(reverse('receipts:list'), {'ids_only': '1'})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        data = resp.json()
+        self.assertEqual(set(data), {'count', 'sha256s', 'truncated'}, 'ids mode must carry NOTHING else')
+        self.assertEqual(data['count'], 12)
+        self.assertFalse(data['truncated'])
+        self.assertEqual(len(data['sha256s']), 12)
+        self.assertEqual(set(data['sha256s']), set(self.NAMES.values()))
+        text = resp.content.decode('utf-8', 'replace')
+        for marker in ('results', 'view_url', 'file_bytes', 'ocr', 'journal', 'supplier', 'total',
+                       'review', 'filename', '/audit/slip/', 'Builders', 'page_size'):
+            self.assertNotIn(marker, text, f'ids_only leaked {marker!r}')
+        self.assertFalse(body_has_blob(text), 'ids_only leaked file bytes')
+        self.assertNotIn(slip_signature(self.NAMES['c_fy25_pend']), text,
+                         'ids_only leaked a signed-viewer signature')
+
+    def test_ids_only_requires_auth(self):
+        resp = self.anon.get(reverse('receipts:list'), {'ids_only': '1'})
+        self.assertEqual(resp.status_code, 401)
+        text = resp.content.decode('utf-8', 'replace')
+        for s in self.NAMES.values():
+            self.assertNotIn(s, text, 'anonymous ids_only 401 leaked sha256s')
+
+    def test_ids_only_matches_row_mode_for_every_filter(self):
+        SlipReview.objects.create(sha256=self.NAMES['a_fy26'], to_process=True, decision='CAPTURE')
+        SlipReview.objects.create(sha256=self.NAMES['d_fy26_nix'], to_process=True)
+        SlipReview.objects.create(sha256=self.NAMES['f_ocr_abc'], decision='PERSONAL')
+        filter_sets = [
+            {}, {'status': 'MATCHED'}, {'status': 'PENDING'}, {'status': 'SKIPPED'},
+            {'to_process': 'true'}, {'to_process': 'false'},
+            {'decision': 'NONE'}, {'decision': 'UNDECIDED'}, {'decision': 'CAPTURE'}, {'decision': 'PERSONAL'},
+            {'fy': 'FY26'}, {'fy': 'FY25'}, {'fy': 'not-a-year'},
+            {'date_from': '2026-04-01', 'date_to': '2026-04-04'},
+            {'date_from': '2025-07-01'}, {'date_to': '2025-12-31'},
+            {'q': 'Builders'}, {'q': 'jonnys mozambican'},
+            {'synced': 'true'}, {'category': 'Hardware'}, {'min_total': '100'}, {'max_total': '40'},
+            {'fy': 'FY26', 'status': 'PENDING'}, {'q': 'Builders', 'status': 'SKIPPED'},
+            {'to_process': 'true', 'decision': 'UNDECIDED'},
+        ]
+        for params in filter_sets:
+            expected = self.all_row_shas(**params)
+            data = self.ids(**params)
+            self.assertEqual(data['sha256s'], expected,
+                             f'ids_only disagrees with paging the row mode to exhaustion for {params!r}')
+            self.assertEqual(data['count'], len(expected), f'count vs ids length for {params!r}')
+            self.assertFalse(data['truncated'], params)
+
+    def test_ids_only_honours_ordering(self):
+        num_asc = [self.NAMES[n] for n in ('j_ts_null', 'c_fy25_pend', 'l_orphan_jn', 'd_fy26_nix',
+                                           'a_fy26', 'k_fy27', 'b_fy26_auto')]
+        self.assertEqual(self.ids(ordering='total')['sha256s'][:7], num_asc,
+                         'ids_only ordering=total must sort by the numeric total ascending')
+        self.assertEqual(self.ids(ordering='-total')['sha256s'][:7], list(reversed(num_asc)))
+        for o in ('slip_ts', '-slip_ts', 'total', '-total', 'supplier', '-supplier',
+                  'xero_status', '-xero_status'):
+            row_order = self.shas(self.list_(ordering=o, page_size=200))
+            self.assertEqual(self.ids(ordering=o)['sha256s'], row_order, f'ordering={o!r}')
+        # junk ordering falls back to the default, same as the row mode
+        self.assertEqual(self.ids(ordering='file_bytes; drop')['sha256s'],
+                         self.shas(self.list_(page_size=200)))
+
+    def test_ids_only_ignores_page_and_page_size(self):
+        full = self.ids()['sha256s']
+        self.assertEqual(len(full), 12)
+        data = self.ids(page='99', page_size='1')
+        self.assertEqual(data['sha256s'], full, 'ids_only must ignore page/page_size')
+        self.assertEqual(data['count'], 12)
+        self.assertEqual(self.ids(page='2', page_size='5')['sha256s'], full)
+
+    def test_ids_only_falsy_values_fall_through_to_row_mode(self):
+        for v in ('0', 'false', 'no', 'off', '', 'banana', 'ids_only'):
+            resp = self.client.get(reverse('receipts:list'), {'ids_only': v})
+            self.assertEqual(resp.status_code, 200, (v, resp.content[:200]))
+            data = resp.json()
+            self.assertIn('results', data, f'ids_only={v!r} must fall through to the ROW mode')
+            self.assertIn('totals', data, v)
+            self.assertNotIn('sha256s', data, v)
+            self.assertNotIn('truncated', data, v)
+        data = self.list_()  # absent entirely
+        self.assertIn('results', data)
+        self.assertNotIn('sha256s', data)
+
+    def test_ids_only_truthy_variants_trigger_ids_mode(self):
+        for v in ('1', 'true', 'TRUE', 'yes', 'on'):
+            resp = self.client.get(reverse('receipts:list'), {'ids_only': v})
+            self.assertEqual(resp.status_code, 200, v)
+            self.assertEqual(set(resp.json()), {'count', 'sha256s', 'truncated'}, f'ids_only={v!r}')
+
+    def test_ids_only_q_with_nul_byte_is_never_a_5xx(self):
+        client = APIClient(raise_request_exception=False)
+        client.credentials(**self.client._credentials)
+        resp = client.get(reverse('receipts:list'), {'ids_only': '1', 'q': 'a\x00b'})
+        self.assertLess(resp.status_code, 500, f'NUL in q: {resp.status_code} {resp.content[:300]}')
+
+
+# --------------------------------------------------------------------------- #
+# 18. ids_only truncation boundary (MAX_IDS)
+# --------------------------------------------------------------------------- #
+class IdsOnlyTruncationTests(ReceiptsFixtureMixin, TestCase):
+    """
+    views.py binds the name at import time (``from .services import MAX_IDS``), so the patch
+    must target ``apps.receipts.views.MAX_IDS`` — patching services.MAX_IDS would be a no-op.
+    """
+
+    def ids(self, **params):
+        resp = self.client.get(reverse('receipts:list'), {'ids_only': '1', **params})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        return resp.json()
+
+    def test_truncated_false_when_the_filter_matches_exactly_the_cap(self):
+        with mock.patch('apps.receipts.views.MAX_IDS', 3):
+            data = self.ids(status='MATCHED')  # exactly 3 fixture rows
+        self.assertEqual(data['count'], 3)
+        self.assertEqual(len(data['sha256s']), 3)
+        self.assertFalse(data['truncated'], 'exactly-at-cap must NOT be flagged truncated')
+        self.assertEqual(set(data['sha256s']),
+                         {self.NAMES['a_fy26'], self.NAMES['b_fy26_auto'], self.NAMES['l_orphan_jn']})
+
+    def test_truncated_true_when_the_filter_exceeds_the_cap(self):
+        row_order = self.shas(self.list_(fy='FY26', status='PENDING', page_size=200))
+        self.assertEqual(len(row_order), 4)  # f, g, h, i
+        with mock.patch('apps.receipts.views.MAX_IDS', 3):
+            data = self.ids(fy='FY26', status='PENDING')
+        self.assertTrue(data['truncated'], 'over-cap must be flagged truncated')
+        self.assertEqual(data['count'], 4, 'count reports the FULL filter match, not the cap')
+        self.assertEqual(data['sha256s'], row_order[:3], 'truncated ids must be the ordered prefix')
+
+
+# --------------------------------------------------------------------------- #
+# 19. page_size clamp — proven against MORE than MAX_PAGE_SIZE rows
+# --------------------------------------------------------------------------- #
+class PageSizeClampTests(TestCase):
+    """
+    page_size is clamped into 1..200, never rejected. The fixture holds 205 rows so
+    'page_size=200 honoured' means an actual 200-row page, not a vacuous echo on 12 rows.
+    """
+    N = 205
+
+    @classmethod
+    def setUpTestData(cls):
+        create_slips_table()
+        base = ts(2025, 8, 1, 0, 0)
+        for i in range(cls.N):
+            insert_slip(sha(5000 + i), slip_ts=base + dt.timedelta(minutes=i), filename=f'page-{i:03d}.jpg')
+        cls.user = User.objects.create_user(username='pager', email='pager@example.com', password='pw-irrelevant')
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {RefreshToken.for_user(self.user).access_token}')
+
+    def list_(self, **params):
+        resp = self.client.get(reverse('receipts:list'), params)
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        return resp.json()
+
+    def test_contract_constants(self):
+        # If any of these moves, the console contract moved with it — scream, don't drift.
+        from . import services, views
+        self.assertEqual(views.BULK_MAX, 500)
+        self.assertEqual(views.MAX_IDS, 2000)
+        self.assertEqual(services.MAX_PAGE_SIZE, 200)
+        self.assertEqual(services.DEFAULT_PAGE_SIZE, 50)
+
+    def test_page_size_200_is_honoured_with_a_real_200_row_page(self):
+        data = self.list_(page_size=200)
+        self.assertEqual(data['page_size'], 200)
+        self.assertEqual(len(data['results']), 200, 'page_size=200 must return an actual 200-row page')
+        self.assertEqual(data['count'], self.N)
+        self.assertEqual(data['num_pages'], 2)
+        page2 = self.list_(page_size=200, page=2)
+        self.assertEqual(len(page2['results']), 5)
+        all_shas = {r['sha256'] for r in data['results']} | {r['sha256'] for r in page2['results']}
+        self.assertEqual(len(all_shas), self.N, 'the two pages must partition the set without overlap/loss')
+
+    def test_oversize_page_size_is_clamped_to_200_not_rejected(self):
+        for oversize in (201, 500, 2000, 10 ** 9):
+            data = self.list_(page_size=oversize)
+            self.assertEqual(data['page_size'], 200, f'page_size={oversize} must clamp to 200, not reject')
+            self.assertEqual(len(data['results']), 200, oversize)
+            self.assertEqual(data['num_pages'], 2, oversize)
+
+    def test_zero_negative_and_junk_page_size(self):
+        data = self.list_(page_size=0)
+        self.assertEqual(data['page_size'], 1, 'page_size=0 must clamp to 1')
+        self.assertEqual(len(data['results']), 1)
+        self.assertEqual(data['num_pages'], self.N)
+        data = self.list_(page_size=-5)
+        self.assertEqual(data['page_size'], 1, 'page_size=-5 must clamp to 1')
+        self.assertEqual(len(data['results']), 1)
+        for junk in ('abc', '', '200.5', '2e2', None):
+            params = {} if junk is None else {'page_size': junk}
+            data = self.list_(**params)
+            self.assertEqual(data['page_size'], 50, f'page_size={junk!r} must fall back to the default 50')
+            self.assertEqual(len(data['results']), 50, junk)
+            self.assertEqual(data['num_pages'], 5, junk)
+
+    def test_ids_only_at_scale_ignores_pagination_and_keeps_order(self):
+        expected = [sha(5000 + i) for i in reversed(range(self.N))]  # default ordering is -slip_ts
+        resp = self.client.get(reverse('receipts:list'), {'ids_only': '1', 'page': '99', 'page_size': '1'})
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        data = resp.json()
+        self.assertEqual(data['count'], self.N)
+        self.assertFalse(data['truncated'])
+        self.assertEqual(data['sha256s'], expected,
+                         'ids_only must return ALL matching ids in order, ignoring page/page_size')

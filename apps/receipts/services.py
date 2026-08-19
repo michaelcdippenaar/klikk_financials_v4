@@ -171,6 +171,23 @@ def fy_label(value: dt.date | dt.datetime | None) -> str | None:
 # --------------------------------------------------------------------------- #
 # Filter building
 # --------------------------------------------------------------------------- #
+def strip_nul(value: str) -> str:
+    """
+    Drop NUL (0x00) from a string bound for Postgres.
+
+    JSON and query strings both permit ``\\u0000``; a Postgres ``text`` column cannot hold
+    it, and psycopg raises ``ValueError: A string literal cannot contain NUL`` while binding
+    the parameter — before the statement is ever sent. Unscrubbed, that surfaces as a raw
+    500 from pure client input on every endpoint that puts a user string in the SQL.
+
+    Filters scrub (a NUL in a search box is never intentional, and this module's contract is
+    that unparseable filter values are ignored rather than rejected). The write endpoints
+    reject instead — see ``views``: silently altering a note the caller sent is worse than
+    telling them it was malformed.
+    """
+    return value.replace('\x00', '') if value else value
+
+
 def _bool(value) -> bool | None:
     if value is None:
         return None
@@ -205,7 +222,7 @@ def build_filters(params) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     args: list[Any] = []
 
-    q = (params.get('q') or '').strip()
+    q = strip_nul(params.get('q') or '').strip()
     if q:
         clauses.append(
             "(s.search_tsv @@ plainto_tsquery('simple', %s) or s.filename ilike %s or s.ocr->>'supplier' ilike %s)"
@@ -258,7 +275,7 @@ def build_filters(params) -> tuple[str, list[Any]]:
         clauses.append('s.sha256 = any(%s)')
         args.append(shas)
 
-    category = (params.get('category') or '').strip()
+    category = strip_nul(params.get('category') or '').strip()
     if category:
         clauses.append("s.ocr->>'category' ilike %s")
         args.append(category)
