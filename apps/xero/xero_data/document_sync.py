@@ -63,8 +63,11 @@ DEFAULT_CALLS_PER_MINUTE = 55
 DISCOVERY_PAGE_SIZE = 1000
 
 # Default floor of X-DayLimit-Remaining below which discretionary fetch work
-# stops cleanly, so the 02:45 nightly pipeline never starves.
-DEFAULT_HEADROOM = 1500
+# stops cleanly, so the 02:45 nightly pipeline never starves. MEASURED
+# 2026-08-19: the Klikk tenant's X-DayLimit-Remaining reads 999 right after the
+# daily reset, i.e. the cap is 1,000/day (Xero's lower tier), not 5,000 — so the
+# floor is 300 (30%); pass --headroom to override per tenant.
+DEFAULT_HEADROOM = 300
 
 _XERO_DATE_RE = re.compile(r'/Date\((\d+)(?:[+-]\d{4})?\)/')
 
@@ -323,6 +326,10 @@ def discover_attachments_for_tenant(tenant_id, user=None, source_types=None, mod
         'flagged_true': 0, 'flagged_false': 0, 'updated_rows': 0, 'unknown_local': 0,
         'seeded': 0, 'per_type': {}, 'stopped_early': None, 'day_limit_remaining': None,
         'errors': [],
+        # IDs Xero just reported with HasAttachments=true. In incremental mode the
+        # fetch pass must visit these even when the locally stored UpdatedDateUTC is
+        # stale (the nightly pipeline may not have refreshed the record yet).
+        'flagged_ids': [],
     }
     tenant, err = _load_tenant(tenant_id)
     if err:
@@ -368,6 +375,7 @@ def discover_attachments_for_tenant(tenant_id, user=None, source_types=None, mod
                 if rid and isinstance(flag, bool):
                     flags[rid] = flag
             per['records'] += len(items)
+            result['flagged_ids'].extend(k for k, v in flags.items() if v)
             per['true'] += sum(1 for v in flags.values() if v)
             per['false'] += sum(1 for v in flags.values() if not v)
             if flags:
@@ -433,7 +441,7 @@ def pending_fetch_queryset(tenant, source_types=None, transaction_ids=None, only
 def sync_documents_for_tenant(tenant_id, user=None, transaction_ids=None, source_types=None,
                               modified_after=None, max_api_calls=None, offset=0,
                               calls_per_minute=DEFAULT_CALLS_PER_MINUTE,
-                              only_flagged=True, headroom=None):
+                              only_flagged=True, headroom=None, force_ids=None):
     """
     FETCH pass: download attachments from Xero and save as XeroDocument linked to XeroTransactionSource.
 
@@ -453,6 +461,8 @@ def sync_documents_for_tenant(tenant_id, user=None, transaction_ids=None, source
         calls_per_minute: Throttle ceiling (Xero tenant limit is 60/min).
         only_flagged: Visit only rows with has_attachments=True (default). False = legacy probe-everything.
         headroom: Stop cleanly when X-DayLimit-Remaining (from Xero's response headers) drops below this.
+        force_ids: Transaction IDs that bypass the modified_after check (typically the IDs the
+            discovery pass just saw flagged — their stored UpdatedDateUTC may be stale).
 
     Returns:
         dict with: success, message, synced, errors, skipped, processed, api_calls,
@@ -487,6 +497,7 @@ def sync_documents_for_tenant(tenant_id, user=None, transaction_ids=None, source
         qs = qs[offset:]
 
     call = _RateLimitedCaller(calls_per_minute=calls_per_minute, api_client=api_client, headroom=headroom)
+    force_ids = set(force_ids or ())
     synced = 0
     errors = []
     skipped = 0
@@ -507,9 +518,11 @@ def sync_documents_for_tenant(tenant_id, user=None, transaction_ids=None, source
             skipped += 1
             continue
 
-        if modified_after is not None:
+        if modified_after is not None and txn_id not in force_ids:
             # Incremental mode: only rows Xero changed since the watermark (the
             # backlog of older flagged rows is the backfill's job, not the nightly's).
+            # Rows discovery just saw flagged are forced in regardless — their
+            # stored UpdatedDateUTC lags until the pipeline refreshes the record.
             updated = parse_xero_date((source.collection or {}).get('UpdatedDateUTC'))
             if updated is None:
                 unparsed_dates += 1

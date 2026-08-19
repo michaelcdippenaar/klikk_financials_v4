@@ -166,6 +166,7 @@ class Command(BaseCommand):
                 offset=options.get('offset') or 0,
                 only_flagged=not options.get('legacy_probe_all'),
                 headroom=headroom,
+                force_ids=discovery['flagged_ids'] if discovery else None,
             )
         except DailyLimitReached as e:
             # Daily-limit hits inside the loops become stopped_early; this catches
