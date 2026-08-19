@@ -18,7 +18,6 @@ import csv
 import datetime as dt
 import io
 import json
-import unittest
 from decimal import Decimal
 from urllib.parse import parse_qs, urlparse
 
@@ -27,7 +26,7 @@ from django.db import connection
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework.test import APIClient
-from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from apps.audit.slip_view import slip_signature
 from apps.xero.xero_core.models import XeroTenant
@@ -35,7 +34,7 @@ from apps.xero.xero_data.models import XeroJournals
 from apps.xero.xero_metadata.models import XeroAccount, XeroContacts
 
 from .models import SlipComment, SlipReview
-from .services import SLIP_TZ, fy_label, fy_range
+from .services import KLIKK_TENANT_ID, SLIP_TZ, fy_label, fy_range
 
 UTC = dt.timezone.utc
 User = get_user_model()
@@ -125,10 +124,13 @@ def make_contact(tenant, contacts_id, name):
     return XeroContacts.objects.bulk_create([XeroContacts(organisation=tenant, contacts_id=contacts_id, name=name)])[0]
 
 
-def make_line(tenant, journal_number, account, amount, *, journal_id, date, description='', contact=None):
+def make_line(tenant, journal_number, account, amount, *, journal_id, date, description='', contact=None,
+              journal_type='journal'):
+    # journal_type: the mirror holds journal / manual_journal / system_journal / transaction in
+    # production (the model's `choices` are not DB-enforced), and the join is discriminated by it.
     amount = Decimal(amount)
     return XeroJournals.objects.create(
-        organisation=tenant, journal_id=journal_id, journal_number=journal_number, journal_type='journal',
+        organisation=tenant, journal_id=journal_id, journal_number=journal_number, journal_type=journal_type,
         account=account, contact=contact, date=date, description=description,
         amount=amount, debit=amount if amount > 0 else Decimal('0'), credit=amount if amount < 0 else Decimal('0'),
         tax_amount=Decimal('0'),
@@ -247,7 +249,12 @@ class ReceiptsFixtureMixin:
 
     # ---- helpers ----
     def setUp(self):
+        # Every receipts endpoint now requires authentication, so the shared client
+        # authenticates by default; tests that probe the anonymous path use self.anon
+        # (or clear credentials explicitly).
         self.client = APIClient()
+        self.auth()
+        self.anon = APIClient()
 
     def auth(self):
         token = str(RefreshToken.for_user(self.user).access_token)
@@ -565,9 +572,12 @@ class FiscalYearTests(TestCase):
         }
         for name, (s, when, _fy) in cls.rows.items():
             insert_slip(s, slip_ts=when, filename=f'{name}.jpg', ocr={'supplier': name, 'total': '1.00'})
+        cls.user = User.objects.create_user(username='fy-reviewer', email='fy@example.com', password='pw-irrelevant')
 
     def setUp(self):
+        # reads are now IsAuthenticated
         self.client = APIClient()
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {RefreshToken.for_user(self.user).access_token}')
 
     def list_(self, **params):
         resp = self.client.get(reverse('receipts:list'), params)
@@ -692,15 +702,14 @@ class JournalJoinTests(ReceiptsFixtureMixin, TestCase):
         self.assertEqual(j['account_code'], '450')
         self.assertEqual(Decimal(j['amount']), Decimal('812.40'))
 
-    def test_unknown_org_or_null_org_gives_no_journal_not_a_guess(self):
+    def test_unknown_named_org_gives_no_journal_not_a_guess(self):
+        # NULL/blank xero_org now falls back to the Klikk tenant (see JournalTypeAndOrgScopeTests);
+        # an unknown *named* org must still resolve to nothing — never to another tenant's lines.
         insert_slip(sha(202), slip_ts=ts(2025, 1, 1), xero_status='MATCHED', journal_number=697, xero_org='Nonexistent Org',
                     ocr={'total': '1.00'})
-        insert_slip(sha(203), slip_ts=ts(2025, 1, 1), xero_status='MATCHED', journal_number=697, xero_org=None,
-                    ocr={'total': '1.00'})
-        for s in (sha(202), sha(203)):
-            row = self.client.get(reverse('receipts:detail', args=[s])).json()
-            self.assertIsNone(row['journal'], f'{s}: journal must not be resolved from a different tenant')
-            self.assertEqual(row['journal_number'], 697)
+        row = self.client.get(reverse('receipts:detail', args=[sha(202)])).json()
+        self.assertIsNone(row['journal'], 'journal must not be resolved from a different tenant')
+        self.assertEqual(row['journal_number'], 697)
 
     def test_orphan_journal_number_and_no_journal_number(self):
         rows = {r['sha256']: r for r in self.list_(page_size=200)['results']}
@@ -709,40 +718,39 @@ class JournalJoinTests(ReceiptsFixtureMixin, TestCase):
         self.assertIsNone(rows[self.NAMES['c_fy25_pend']]['journal'])
         self.assertIsNone(rows[self.NAMES['c_fy25_pend']]['journal_number'])
 
-    @unittest.expectedFailure  # BUG-4 — remove once the join is scoped by journal_type (or the recon carries one)
     def test_same_org_journal_number_shared_by_journal_and_manual_journal_is_not_blended(self):
-        # BUG-4: services.JOURNAL_LATERAL_SQL filters `j.journal_number = s.journal_number` + org only.
-        # In production xero_data_xerojournals holds journal_type in {journal, manual_journal,
-        # system_journal, transaction} and 1,225 same-org (journal_number) pairs span >1 type; the
-        # auto-recon matches slips to BOTH regular and manual journals (xero_detail
-        # 'journal_number=216150 (loan acc)' is a manual journal). When a slip's number exists as both a
-        # `journal` and a `manual_journal` in the same org, the lateral aggregates BOTH sets of lines:
-        # amount/debit/credit are the sum of two unrelated transactions and description/account come
-        # from whichever has the larger debit. The slip row does not carry a type, so the endpoint
-        # cannot disambiguate — needs a decision (prefer 'journal'? carry type in the register?).
+        # The join is discriminated by journal_type = 'journal' (services.JOURNAL_TYPE): when a slip's
+        # number exists as BOTH a `journal` and a `manual_journal` in the same org, the endpoint must
+        # return exactly the 'journal' one — never the manual one, never a blend of the two.
         k_loan = make_account(self.klikk, 'acc-k-loan', '880', 'Loan - MC', 'CURRLIAB')
         k_bank = XeroAccount.objects.get(account_id='acc-k-bank')
         k_meals = XeroAccount.objects.get(account_id='acc-k-meals')
         d = ts(2026, 1, 8)
-        # regular journal #777: Spur 300
+        # regular journal #777: Spur 300 (2 lines)
         make_line(self.klikk, 777, k_meals, '300.00', journal_id='k777-j1', date=d, description='Spur lunch')
         make_line(self.klikk, 777, k_bank, '-300.00', journal_id='k777-j2', date=d, description='Spur lunch')
-        # manual journal #777 (same org, same number): loan 1500
-        for i, (acc, amt, desc) in enumerate((
-            (k_loan, '1000.00', 'Loan repayment A'), (k_loan, '500.00', 'Loan repayment B'), (k_bank, '-1500.00', 'Loan repayment'),
-        )):
-            XeroJournals.objects.create(
-                organisation=self.klikk, journal_id=f'k777-m{i}', journal_number=777, journal_type='manual_journal',
-                account=acc, date=d, description=desc, amount=Decimal(amt),
-                debit=Decimal(amt) if Decimal(amt) > 0 else 0, credit=Decimal(amt) if Decimal(amt) < 0 else 0, tax_amount=0)
+        # manual journal #777 (same org, same number): loan 1500 (3 lines)
+        make_line(self.klikk, 777, k_loan, '1000.00', journal_id='k777-m0', date=d,
+                  description='Loan repayment A', journal_type='manual_journal')
+        make_line(self.klikk, 777, k_loan, '500.00', journal_id='k777-m1', date=d,
+                  description='Loan repayment B', journal_type='manual_journal')
+        make_line(self.klikk, 777, k_bank, '-1500.00', journal_id='k777-m2', date=d,
+                  description='Loan repayment', journal_type='manual_journal')
         insert_slip(sha(210), slip_ts=d, xero_status='MATCHED (auto-recon 2026-08-17)', xero_detail='journal_number=777',
                     synced=True, journal_number=777, xero_org='Klikk (Pty) Ltd',
                     ocr={'supplier': 'Spur', 'total': '300.00', 'category': 'Meals'})
         j = self.client.get(reverse('receipts:detail', args=[sha(210)])).json()['journal']
         self.assertIsNotNone(j)
-        self.assertIn(Decimal(j['amount']), (Decimal('300.00'), Decimal('1500.00')),
-                      f"journal amount {j['amount']} is a blend of a journal and a manual_journal with the same number")
-        self.assertIn(j['description'], ('Spur lunch', 'Loan repayment A'))
+        self.assertEqual(j['journal_number'], 777)
+        self.assertEqual(Decimal(j['amount']), Decimal('300.00'),
+                         f"journal amount {j['amount']} must be exactly the 'journal' #777, not the manual/blend")
+        self.assertNotEqual(Decimal(j['amount']), Decimal('1800.00'),
+                            'amount is the blended sum of the journal and the manual_journal')
+        self.assertNotEqual(Decimal(j['amount']), Decimal('1500.00'), "amount is the manual_journal's, not the journal's")
+        self.assertEqual(j['description'], 'Spur lunch')
+        self.assertEqual(j['account_code'], '420')
+        self.assertEqual(Decimal(j['debit']), Decimal('300.00'))
+        self.assertEqual(Decimal(j['credit']), Decimal('-300.00'))
 
     def test_two_line_journal(self):
         j = next(r for r in self.list_(page_size=200)['results'] if r['sha256'] == self.NAMES['b_fy26_auto'])['journal']
@@ -817,6 +825,7 @@ class ReviewPatchTests(ReceiptsFixtureMixin, TestCase):
         return reverse('receipts:review', args=[s or self.NAMES['a_fy26']])
 
     def test_unauthenticated_patch_is_401(self):
+        self.client.credentials()  # setUp authenticates by default; this test probes the anonymous path
         resp = self.client.patch(self.url(), {'decision': 'CAPTURE'}, format='json')
         self.assertEqual(resp.status_code, 401, resp.content)
         self.assertFalse(SlipReview.objects.exists())
@@ -961,6 +970,7 @@ class CommentPostTests(ReceiptsFixtureMixin, TestCase):
         return reverse('receipts:comments', args=[s or self.NAMES['a_fy26']])
 
     def test_unauthenticated_post_is_401(self):
+        self.client.credentials()  # setUp authenticates by default; this test probes the anonymous path
         resp = self.client.post(self.url(), {'text': 'hi'}, format='json')
         self.assertEqual(resp.status_code, 401, resp.content)
         self.assertFalse(SlipComment.objects.exists())
@@ -1027,8 +1037,7 @@ class CommentPostTests(ReceiptsFixtureMixin, TestCase):
 
     def test_get_on_comments_url_is_405_not_a_listing(self):
         # unauthenticated GET is gated first (401); authenticated GET must be 405, never a comment dump
-        self.assertEqual(self.client.get(self.url()).status_code, 401)
-        self.auth()
+        self.assertEqual(self.anon.get(self.url()).status_code, 401)
         self.assertEqual(self.client.get(self.url()).status_code, 405)
 
 
@@ -1218,22 +1227,28 @@ class ViewUrlTests(ReceiptsFixtureMixin, TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# 9. Method / auth matrix on read endpoints (reads are intentionally public)
+# 9. Method / auth matrix (every endpoint is now IsAuthenticated)
 # --------------------------------------------------------------------------- #
 class MethodMatrixTests(ReceiptsFixtureMixin, TestCase):
-    def test_reads_are_public_and_writes_are_not(self):
-        self.assertEqual(self.client.get(reverse('receipts:list')).status_code, 200)
-        self.assertEqual(self.client.get(reverse('receipts:detail', args=[self.NAMES['a_fy26']])).status_code, 200)
-        self.assertEqual(self.client.get(reverse('receipts:export')).status_code, 200)
-        self.assertEqual(self.client.patch(reverse('receipts:review', args=[self.NAMES['a_fy26']]), {'note': 'x'}, format='json').status_code, 401)
-        self.assertEqual(self.client.post(reverse('receipts:comments', args=[self.NAMES['a_fy26']]), {'text': 'x'}, format='json').status_code, 401)
+    def test_reads_are_gated_like_the_writes(self):
+        # Reads and the export were AllowAny; they now require authentication like the writes.
+        for url in (reverse('receipts:list'), reverse('receipts:detail', args=[self.NAMES['a_fy26']]),
+                    reverse('receipts:export')):
+            self.assertEqual(self.anon.get(url).status_code, 401, url)
+            self.assertEqual(self.client.get(url).status_code, 200, url)
+        self.assertEqual(self.anon.patch(reverse('receipts:review', args=[self.NAMES['a_fy26']]), {'note': 'x'}, format='json').status_code, 401)
+        self.assertEqual(self.anon.post(reverse('receipts:comments', args=[self.NAMES['a_fy26']]), {'text': 'x'}, format='json').status_code, 401)
 
     def test_wrong_methods_are_405_not_writes(self):
         s = self.NAMES['a_fy26']
+        # Anonymous wrong-method is 401, not 405: DRF runs authentication/permissions (initial())
+        # before method routing, so an anonymous caller cannot even probe the allowed-method map.
+        self.assertEqual(self.anon.post(reverse('receipts:list'), {}, format='json').status_code, 401)
+        self.assertEqual(self.anon.delete(reverse('receipts:detail', args=[s])).status_code, 401)
+        # Authenticated wrong methods are 405 and never write.
         self.assertEqual(self.client.post(reverse('receipts:list'), {}, format='json').status_code, 405)
         self.assertEqual(self.client.delete(reverse('receipts:detail', args=[s])).status_code, 405)
         self.assertEqual(self.client.put(reverse('receipts:detail', args=[s]), {}, format='json').status_code, 405)
-        self.auth()
         self.assertEqual(self.client.post(reverse('receipts:review', args=[s]), {'note': 'x'}, format='json').status_code, 405)
         self.assertEqual(self.client.put(reverse('receipts:review', args=[s]), {'note': 'x'}, format='json').status_code, 405)
         self.assertEqual(self.client.delete(reverse('receipts:review', args=[s])).status_code, 405)
@@ -1247,3 +1262,318 @@ class MethodMatrixTests(ReceiptsFixtureMixin, TestCase):
         insert_slip('export', slip_ts=ts(2025, 1, 1), ocr={'total': '1.00'})
         resp = self.client.get('/audit/receipts/export/')
         self.assertTrue(resp['Content-Type'].startswith('text/csv'))
+
+
+# --------------------------------------------------------------------------- #
+# 10. Auth gate — every endpoint requires authentication (change 1)
+# --------------------------------------------------------------------------- #
+class AuthGateTests(ReceiptsFixtureMixin, TestCase):
+    """
+    Adversarial coverage of the authentication gate. The whole point of gating the
+    reads is that an anonymous caller can no longer harvest signed ``view_url``s
+    (permanent links to receipt images), supplier names, or OCR money fields.
+    The export runs a SEPARATE auth code path (the ``drf_login_required`` decorator,
+    not a DRF permission class), so it is exercised independently throughout.
+    """
+
+    def endpoints(self, client, *, body=True):
+        """(name, response) for all five endpoints, called with ``client``."""
+        s = self.NAMES['a_fy26']
+        return [
+            ('list', client.get(reverse('receipts:list'))),
+            ('detail', client.get(reverse('receipts:detail', args=[s]))),
+            ('export_csv', client.get(reverse('receipts:export'))),
+            ('export_xlsx', client.get(reverse('receipts:export'), {'format': 'xlsx'})),
+            ('review', client.patch(reverse('receipts:review', args=[s]),
+                                    {'to_process': True, 'note': 'authed'} if body else None, format='json')),
+            ('comments', client.post(reverse('receipts:comments', args=[s]),
+                                     {'text': 'authed comment'} if body else None, format='json')),
+        ]
+
+    def test_anonymous_caller_gets_401_on_all_five_endpoints(self):
+        for name, resp in self.endpoints(self.anon):
+            self.assertEqual(resp.status_code, 401, f'{name}: anonymous request must be 401')
+        # and the gated writes wrote nothing
+        self.assertFalse(SlipReview.objects.exists())
+        self.assertFalse(SlipComment.objects.exists())
+
+    def test_anonymous_401_bodies_leak_nothing(self):
+        # An anonymous 401 must not hand out anything harvestable: no signed view_url,
+        # no slip sha256, no supplier, no CSV header row, no signature, no blob bytes.
+        sig = slip_signature(self.NAMES['c_fy25_pend'])
+        markers = ['view_url', '/audit/slip/', 'Builders Warehouse', 'Engen Stellenbosch',
+                   'date,supplier,total', sig, *self.NAMES.values()]
+        for name, resp in self.endpoints(self.anon):
+            self.assertEqual(resp.status_code, 401, name)
+            text = resp.content.decode('utf-8', 'replace')
+            for marker in markers:
+                self.assertNotIn(marker, text, f'{name}: anonymous 401 body leaks {marker!r}')
+            self.assertFalse(body_has_blob(text), f'{name}: anonymous 401 body leaks file bytes')
+
+    def test_valid_jwt_succeeds_on_all_five_endpoints(self):
+        by_name = dict(self.endpoints(self.client))
+        self.assertEqual(by_name['list'].status_code, 200)
+        self.assertEqual(by_name['list'].json()['count'], 12)
+        self.assertEqual(by_name['detail'].status_code, 200)
+        self.assertEqual(by_name['detail'].json()['sha256'], self.NAMES['a_fy26'])
+        self.assertEqual(by_name['export_csv'].status_code, 200)
+        self.assertTrue(by_name['export_csv']['Content-Type'].startswith('text/csv'))
+        self.assertEqual(by_name['export_xlsx'].status_code, 200)
+        self.assertEqual(by_name['export_xlsx']['Content-Type'],
+                         'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        self.assertEqual(by_name['review'].status_code, 200)
+        self.assertEqual(by_name['comments'].status_code, 201)
+
+    def test_review_write_stamps_the_authenticated_username(self):
+        resp = self.client.patch(reverse('receipts:review', args=[self.NAMES['a_fy26']]),
+                                 {'decision': 'CAPTURE'}, format='json')
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        self.assertEqual(resp.json()['updated_by'], 'reviewer', 'updated_by must be the JWT user, not blank')
+        self.assertEqual(SlipReview.objects.get(sha256=self.NAMES['a_fy26']).updated_by, 'reviewer')
+
+    def test_garbage_bearer_token_is_401_on_drf_view_and_export(self):
+        # The export's auth is a decorator, not a permission class — exercise both code paths.
+        for garbage in ('not.a.jwt', 'a' * 40, 'ey.ey.ey', 'null'):
+            client = APIClient()
+            client.credentials(HTTP_AUTHORIZATION=f'Bearer {garbage}')
+            self.assertEqual(client.get(reverse('receipts:list')).status_code, 401, garbage)
+            resp = client.get(reverse('receipts:export'))
+            self.assertEqual(resp.status_code, 401, garbage)
+            self.assertNotIn('date,supplier,total', resp.content.decode('utf-8', 'replace'))
+
+    def test_expired_token_is_401_on_drf_view_and_export(self):
+        token = AccessToken.for_user(self.user)
+        token.set_exp(lifetime=-dt.timedelta(seconds=1))  # already expired when serialised
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
+        self.assertEqual(client.get(reverse('receipts:list')).status_code, 401)
+        self.assertEqual(client.get(reverse('receipts:detail', args=[self.NAMES['a_fy26']])).status_code, 401)
+        resp = client.get(reverse('receipts:export'))
+        self.assertEqual(resp.status_code, 401, 'export must reject an expired token via its own auth path')
+        self.assertNotIn('date,supplier,total', resp.content.decode('utf-8', 'replace'))
+
+    def test_export_401_carries_www_authenticate(self):
+        resp = self.anon.get(reverse('receipts:export'))
+        self.assertEqual(resp.status_code, 401)
+        self.assertIn('Bearer', resp.headers.get('WWW-Authenticate', ''),
+                      'export 401 must carry a WWW-Authenticate challenge')
+
+    def test_export_auth_is_checked_before_format_validation(self):
+        # An anonymous caller must not be able to distinguish a valid format from a bogus
+        # one (401 for both, identical body) — auth runs before the 400 format check.
+        good = self.anon.get(reverse('receipts:export'), {'format': 'xlsx'})
+        bogus = self.anon.get(reverse('receipts:export'), {'format': 'exe'})
+        self.assertEqual(good.status_code, 401)
+        self.assertEqual(bogus.status_code, 401, 'anonymous bogus format must 401, not 400')
+        self.assertEqual(good.content, bogus.content, 'anonymous caller can distinguish valid from invalid formats')
+
+    def test_anonymous_non_get_export_never_returns_a_file(self):
+        url = reverse('receipts:export')
+        for method in ('post', 'put', 'delete'):
+            resp = getattr(self.anon, method)(url)
+            self.assertEqual(resp.status_code, 401, f'{method}: auth gate must run before method routing')
+            self.assertNotEqual(resp.status_code, 200)
+            self.assertFalse(resp['Content-Type'].startswith('text/csv'), method)
+            self.assertNotIn('attachment', resp.headers.get('Content-Disposition', ''), method)
+            self.assertNotIn(b'date,supplier,total', resp.content, method)
+
+    def test_signed_slip_viewer_stays_public(self):
+        # DELIBERATELY ungated: the console's <img>/<iframe> cannot send a Bearer token and
+        # exported spreadsheets link here. A regression to 401/403 with a VALID signature
+        # silently breaks the console's receipt modal — pin the contract both ways.
+        s = self.NAMES['c_fy25_pend']  # the fixture row with file_bytes set
+        good = slip_signature(s)
+        resp = self.anon.get(f'/audit/slip/{s}/', {'s': good})
+        self.assertEqual(resp.status_code, 200, 'anonymous signed viewer must stay reachable')
+        self.assertEqual(resp.content, BLOB)
+        bad = ('0' if good[0] != '0' else '1') + good[1:]
+        self.assertEqual(self.anon.get(f'/audit/slip/{s}/', {'s': bad}).status_code, 403)
+        self.assertEqual(self.anon.get(f'/audit/slip/{s}/').status_code, 403)
+
+    def test_authenticated_export_still_never_leaks_file_bytes(self):
+        # The blob-leak guarantee must hold on the now-authenticated export path too.
+        csv_resp = self.client.get(reverse('receipts:export'))
+        self.assertEqual(csv_resp.status_code, 200)
+        self.assertFalse(body_has_blob(csv_resp.content.decode('utf-8', 'replace')))
+        xlsx_resp = self.client.get(reverse('receipts:export'), {'format': 'xlsx'})
+        self.assertEqual(xlsx_resp.status_code, 200)
+        self.assertFalse(body_has_blob(xlsx_resp.content.decode('latin-1')))
+
+
+# --------------------------------------------------------------------------- #
+# 11. Journal join — journal_type discrimination + org fallback (change 2)
+# --------------------------------------------------------------------------- #
+class JournalTypeAndOrgScopeTests(ReceiptsFixtureMixin, TestCase):
+    """
+    The lateral join now requires journal_type = services.JOURNAL_TYPE ('journal') and
+    resolves the org as: blank/NULL xero_org -> services.KLIKK_TENANT_ID, else tenant
+    name lookup (unknown name -> no journal). The summary aggregates DEBIT lines only,
+    falling back to the whole journal when there is no debit line.
+    """
+
+    def detail(self, s):
+        resp = self.client.get(reverse('receipts:detail', args=[s]))
+        self.assertEqual(resp.status_code, 200, resp.content[:300])
+        return resp.json()
+
+    def test_number_existing_only_as_other_types_resolves_no_journal(self):
+        # No fallback to manual_journal / system_journal / transaction when the number
+        # does not exist under type 'journal' in the slip's org.
+        k_bank = XeroAccount.objects.get(account_id='acc-k-bank')
+        k_hw = XeroAccount.objects.get(account_id='acc-k-hw')
+        d = ts(2026, 2, 1)
+        for i, jtype in enumerate(('manual_journal', 'system_journal', 'transaction')):
+            num = 810 + i
+            make_line(self.klikk, num, k_hw, '250.00', journal_id=f'k{num}-1', date=d,
+                      description=f'{jtype} expense', journal_type=jtype)
+            make_line(self.klikk, num, k_bank, '-250.00', journal_id=f'k{num}-2', date=d,
+                      description=f'{jtype} bank', journal_type=jtype)
+            s = sha(400 + i)
+            insert_slip(s, slip_ts=d, xero_status='MATCHED', xero_detail=f'journal_number={num}',
+                        journal_number=num, xero_org='Klikk (Pty) Ltd',
+                        ocr={'supplier': 'Some Shop', 'total': '250.00', 'category': 'Hardware'})
+            row = self.detail(s)
+            self.assertIsNone(row['journal'], f'{jtype}: endpoint must not fall back to a non-journal type')
+            self.assertEqual(row['journal_number'], num)
+        # and the list agrees
+        rows = {r['sha256']: r for r in self.list_(page_size=200)['results']}
+        for i in range(3):
+            self.assertIsNone(rows[sha(400 + i)]['journal'])
+
+    def test_journal_type_does_not_cross_orgs(self):
+        # #901 is a 'journal' in Klikk and a 'manual_journal' in Dippenaar Family. A dfam slip
+        # must resolve NOTHING (its org has no type-'journal' #901), never Klikk's lines.
+        k_bank = XeroAccount.objects.get(account_id='acc-k-bank')
+        k_meals = XeroAccount.objects.get(account_id='acc-k-meals')
+        d_groc = XeroAccount.objects.get(account_id='acc-d-groc')
+        d_bank = XeroAccount.objects.get(account_id='acc-d-bank')
+        d = ts(2026, 2, 10)
+        make_line(self.klikk, 901, k_meals, '210.00', journal_id='k901-1', date=d, description='Klikk 901 expense')
+        make_line(self.klikk, 901, k_bank, '-210.00', journal_id='k901-2', date=d, description='Klikk 901 bank')
+        make_line(self.dfam, 901, d_groc, '999.00', journal_id='d901-1', date=d,
+                  description='Dfam 901 manual', journal_type='manual_journal')
+        make_line(self.dfam, 901, d_bank, '-999.00', journal_id='d901-2', date=d,
+                  description='Dfam 901 manual', journal_type='manual_journal')
+        insert_slip(sha(405), slip_ts=d, journal_number=901, xero_org='Dippenaar Family',
+                    ocr={'supplier': 'Dfam Shop', 'total': '999.00'})
+        insert_slip(sha(406), slip_ts=d, journal_number=901, xero_org='Klikk (Pty) Ltd',
+                    ocr={'supplier': 'Klikk Shop', 'total': '210.00'})
+        self.assertIsNone(self.detail(sha(405))['journal'],
+                          "dfam slip must not resolve Klikk's 'journal' #901 across orgs")
+        j = self.detail(sha(406))['journal']
+        self.assertIsNotNone(j)
+        self.assertEqual(Decimal(j['amount']), Decimal('210.00'))
+        self.assertEqual(j['description'], 'Klikk 901 expense')
+
+    def test_null_and_blank_org_both_fall_back_to_the_klikk_tenant(self):
+        # The fallback resolves by tenant_id == services.KLIKK_TENANT_ID (the constant), not by
+        # name: the fixture's 'Klikk (Pty) Ltd' tenant deliberately has a DIFFERENT tenant_id.
+        live = make_tenant(KLIKK_TENANT_ID, 'Klikk Live (Pty) Ltd')
+        acc_exp = make_account(live, 'acc-live-exp', '460', 'Consumables', 'EXPENSE')
+        acc_bank = make_account(live, 'acc-live-bank', '091', 'Live Bank', 'BANK')
+        d = ts(2026, 3, 3)
+        make_line(live, 950, acc_exp, '120.00', journal_id='live950-1', date=d, description='Fallback coffee')
+        make_line(live, 950, acc_bank, '-120.00', journal_id='live950-2', date=d, description='Fallback coffee')
+        insert_slip(sha(410), slip_ts=d, journal_number=950, xero_org=None,
+                    ocr={'supplier': 'Coffee Shop', 'total': '120.00'})
+        insert_slip(sha(411), slip_ts=d, journal_number=950, xero_org='',
+                    ocr={'supplier': 'Coffee Shop', 'total': '120.00'})
+        for s, label in ((sha(410), 'NULL xero_org'), (sha(411), 'empty-string xero_org')):
+            j = self.detail(s)['journal']
+            self.assertIsNotNone(j, f'{label} must fall back to the Klikk tenant')
+            self.assertEqual(Decimal(j['amount']), Decimal('120.00'), label)
+            self.assertEqual(j['description'], 'Fallback coffee', label)
+            self.assertEqual(j['account_code'], '460', label)
+        # A slip NAMING a tenant never falls back: dfam has no #950, so no journal.
+        insert_slip(sha(412), slip_ts=d, journal_number=950, xero_org='Dippenaar Family',
+                    ocr={'supplier': 'Coffee Shop', 'total': '120.00'})
+        self.assertIsNone(self.detail(sha(412))['journal'],
+                          'a named org must not fall back to the Klikk tenant')
+
+    def test_summary_comes_from_debit_lines_only_never_the_credit_or_bank_side(self):
+        # Debit and credit sides carry different descriptions/accounts/contacts. The bank
+        # debit is the LARGEST debit, so if the BANK demotion were dropped the summary would
+        # pick it; and if credit lines leaked in, amount would exceed the debit sum.
+        k_bank = XeroAccount.objects.get(account_id='acc-k-bank')
+        k_hw = XeroAccount.objects.get(account_id='acc-k-hw')
+        sub = make_account(self.klikk, 'acc-k-sub', '431', 'Subscriptions', 'EXPENSE')
+        liab = make_account(self.klikk, 'acc-k-liab', '881', 'Sundry Creditors', 'CURRLIAB')
+        deb_contact = make_contact(self.klikk, 'con-k-deb', 'Debit Side Contact')
+        cred_contact = make_contact(self.klikk, 'con-k-cred', 'Credit Side Contact')
+        d = ts(2026, 4, 20)
+        make_line(self.klikk, 920, sub, '150.00', journal_id='k920-1', date=d,
+                  description='Debit main line', contact=deb_contact)
+        make_line(self.klikk, 920, k_hw, '50.00', journal_id='k920-2', date=d,
+                  description='Debit minor line', contact=deb_contact)
+        make_line(self.klikk, 920, k_bank, '300.00', journal_id='k920-3', date=d,
+                  description='Bank debit line')
+        make_line(self.klikk, 920, liab, '-500.00', journal_id='k920-4', date=d,
+                  description='Credit side line', contact=cred_contact)
+        insert_slip(sha(420), slip_ts=d, journal_number=920, xero_org='Klikk (Pty) Ltd',
+                    ocr={'supplier': 'Sub Shop', 'total': '500.00'})
+        j = self.detail(sha(420))['journal']
+        self.assertIsNotNone(j)
+        self.assertEqual(Decimal(j['amount']), Decimal('500.00'), 'amount must be the sum of DEBIT lines only')
+        self.assertEqual(Decimal(j['debit']), Decimal('500.00'))
+        self.assertEqual(Decimal(j['credit']), Decimal('-500.00'))
+        self.assertEqual(j['description'], 'Debit main line', 'main line must be the largest NON-BANK debit')
+        self.assertNotEqual(j['description'], 'Bank debit line')
+        self.assertNotEqual(j['description'], 'Credit side line')
+        self.assertEqual(j['account_code'], '431')
+        self.assertNotIn(j['account_code'], ('090', '881'))
+        self.assertEqual(j['contact_name'], 'Debit Side Contact')
+        self.assertNotEqual(j['contact_name'], 'Credit Side Contact')
+
+    def test_credit_only_journal_falls_back_to_whole_journal_not_nulls(self):
+        k_bank = XeroAccount.objects.get(account_id='acc-k-bank')
+        k_hw = XeroAccount.objects.get(account_id='acc-k-hw')
+        ref_contact = make_contact(self.klikk, 'con-k-ref', 'Refund Contact')
+        d = ts(2026, 5, 5)
+        make_line(self.klikk, 930, k_hw, '-100.00', journal_id='k930-1', date=d,
+                  description='Refund line', contact=ref_contact)
+        make_line(self.klikk, 930, k_bank, '-50.00', journal_id='k930-2', date=d,
+                  description='Bank refund line')
+        insert_slip(sha(425), slip_ts=d, journal_number=930, xero_org='Klikk (Pty) Ltd',
+                    ocr={'supplier': 'Refund Shop', 'total': '100.00'})
+        j = self.detail(sha(425))['journal']
+        self.assertIsNotNone(j, 'a credit-only journal must still resolve')
+        self.assertIsNotNone(j['description'], 'no-debit journal must fall back, not return null description')
+        self.assertIsNotNone(j['account_code'], 'no-debit journal must fall back, not return null account')
+        self.assertEqual(j['description'], 'Refund line')  # non-bank line first in the fallback too
+        self.assertEqual(j['account_code'], '429')
+        self.assertEqual(j['contact_name'], 'Refund Contact')
+        self.assertEqual(Decimal(j['credit']), Decimal('-150.00'))
+        self.assertEqual(Decimal(j['amount']), Decimal('0.00'), 'no debit lines: amount falls back to sum(debit) = 0')
+
+    def test_multi_line_journal_yields_one_row_in_list_and_export(self):
+        k_bank = XeroAccount.objects.get(account_id='acc-k-bank')
+        k_hw = XeroAccount.objects.get(account_id='acc-k-hw')
+        k_vat = XeroAccount.objects.get(account_id='acc-k-vat')
+        d = ts(2026, 5, 20)
+        for i, (acc, amt) in enumerate(((k_hw, '400.00'), (k_hw, '35.00'), (k_vat, '65.25'), (k_bank, '-500.25'))):
+            make_line(self.klikk, 940, acc, amt, journal_id=f'k940-{i}', date=d, description='Big basket')
+        insert_slip(sha(430), slip_ts=d, journal_number=940, xero_org='Klikk (Pty) Ltd',
+                    ocr={'supplier': 'Basket Shop', 'total': '500.25'})
+        data = self.list_(page_size=200)
+        self.assertEqual(data['count'], 13, 'list count must not fan out on the 4-line journal')
+        self.assertEqual(data['totals']['count'], 13)
+        hits = [r for r in data['results'] if r['sha256'] == sha(430)]
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(Decimal(hits[0]['journal']['amount']), Decimal('500.25'))
+        rows = self.csv_rows(self.export())
+        self.assertEqual(len(rows), 13 + 1, 'export must have one row per slip, no fan-out')
+        self.assertEqual(sum(1 for r in rows[1:] if r[12] == sha(430)), 1)
+
+    def test_export_journal_number_column_agrees_with_detail(self):
+        rows = self.csv_rows(self.export())
+        by_sha = {r[12]: dict(zip(rows[0], r)) for r in rows[1:]}
+        # resolving slip: export column == detail journal.journal_number == slip journal_number
+        detail_a = self.detail(self.NAMES['a_fy26'])
+        self.assertEqual(detail_a['journal']['journal_number'], 697)
+        self.assertEqual(by_sha[self.NAMES['a_fy26']]['journal_number'], '697')
+        # orphan number: journal is null in detail but the register's number still exports
+        detail_l = self.detail(self.NAMES['l_orphan_jn'])
+        self.assertIsNone(detail_l['journal'])
+        self.assertEqual(by_sha[self.NAMES['l_orphan_jn']]['journal_number'], '555')
+        # no number at all -> empty cell
+        self.assertEqual(by_sha[self.NAMES['c_fy25_pend']]['journal_number'], '')
