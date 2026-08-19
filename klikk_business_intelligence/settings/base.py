@@ -71,6 +71,7 @@ INSTALLED_APPS = [
     'apps.ai_agent',
     'apps.personal_expenses',  # Personal-expenses classification + reporting
     'apps.audit',  # Year-end audit registry (audit.checks / check_runs / check_results)
+    'apps.receipts',  # Audit -> Receipts review workflow over whatsapp.klikk_slips
 ]
 
 MIDDLEWARE = [
@@ -159,6 +160,9 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Custom User Model
 AUTH_USER_MODEL = 'user.User'
+
+# Public base for signed slip-viewer links (apps.audit.slip_view.slip_url / receipts view_url)
+SLIP_VIEW_BASE_URL = os.environ.get('SLIP_VIEW_BASE_URL', 'https://console.8-bit.space/backend')
 
 # REST Framework Configuration
 REST_FRAMEWORK = {

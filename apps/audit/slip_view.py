@@ -1,8 +1,13 @@
 """Signed, read-only viewer for WhatsApp Slippies receipts stored in whatsapp.klikk_slips.
 
 URL: /audit/slip/<sha256>/?s=<sig>   where sig = HMAC-SHA256(SECRET_KEY, sha256)[:32]
-Links are unguessable (the backend is otherwise public-read) and never expire so spreadsheet
-links keep working. Bytes come straight from Postgres; nothing is written.
+Links are unguessable and never expire so spreadsheet links keep working. Bytes come straight
+from Postgres; nothing is written.
+
+This view is DELIBERATELY unauthenticated and must stay that way: the console's receipt modal
+loads it in a plain <img>/<iframe> and exported spreadsheets link to it, neither of which can
+carry a Bearer token. The HMAC in ?s= is its only guard, which is why the endpoints that hand
+out these links (apps.receipts) all require authentication — see docs/receipts.md §7.
 """
 import hashlib
 import hmac
@@ -18,7 +23,8 @@ def slip_signature(sha256: str) -> str:
     return hmac.new(settings.SECRET_KEY.encode(), sha256.encode(), hashlib.sha256).hexdigest()[:32]
 
 
-def slip_url(sha256: str, base: str = "https://console.8-bit.space/backend") -> str:
+def slip_url(sha256: str, base: str | None = None) -> str:
+    base = base or getattr(settings, "SLIP_VIEW_BASE_URL", "https://console.8-bit.space/backend")
     return f"{base}/audit/slip/{sha256}/?s={slip_signature(sha256)}"
 
 
