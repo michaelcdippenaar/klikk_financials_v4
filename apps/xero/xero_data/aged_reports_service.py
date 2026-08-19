@@ -41,6 +41,7 @@ import logging
 from datetime import date as date_type, datetime
 from decimal import Decimal, InvalidOperation
 
+from apps.xero.xero_core.exceptions import DailyLimitReached, TenantReauthRequired
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_metadata.models import XeroContacts
 from apps.xero.xero_data.models import AgedPayable, AgedReceivable
@@ -173,6 +174,11 @@ def sync_aged_payables(tenant: XeroTenant, report_date: date_type | None = None)
                 date=report_date,
             )
             serialized = serialize_model(raw)
+        except (DailyLimitReached, TenantReauthRequired):
+            # One call per contact: swallowing these would walk every remaining
+            # supplier issuing calls that cannot possibly succeed (~317/run).
+            # Abort the sweep and let the caller handle it.
+            raise
         except Exception as exc:
             logger.error(
                 'Aged payables API error for contact %s (%s): %s',
@@ -264,6 +270,10 @@ def sync_aged_receivables(tenant: XeroTenant, report_date: date_type | None = No
                 date=report_date,
             )
             serialized = serialize_model(raw)
+        except (DailyLimitReached, TenantReauthRequired):
+            # See aged payables above: never keep looping contacts once the
+            # daily budget is gone or the tenant needs re-authorization.
+            raise
         except Exception as exc:
             logger.error(
                 'Aged receivables API error for contact %s (%s): %s',
