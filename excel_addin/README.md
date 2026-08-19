@@ -42,8 +42,15 @@ done
 
 The add-in authenticates with a **DRF authtoken** (`Authorization: Token <key>`)
 bound to a dedicated, non-staff, non-superuser Django user `excel-addin`. The
-user holds the token; the token is entered once by the operator and stored in
-Office roaming settings, never in a workbook.
+token is entered once by the operator and kept in the task pane's
+`localStorage`, scoped to this add-in's origin on that machine.
+
+Do **not** move it to `Office.context.document.settings` — that persists inside
+the workbook, so the credential would travel to anyone the file is shared with.
+And not `Office.context.roamingSettings` either: that is part of the
+Outlook/Mailbox API and is `undefined` in Excel. Reading it threw on the first
+line of startup and left the pane stuck on "Loading…" — the pane now carries a
+boot watchdog that names the failing step rather than hanging silently.
 
 It deliberately does **not** use the shared `KLIKK_API_TOKEN` service token
 (`klikk_business_intelligence.permissions.ServiceTokenAuthentication` /

@@ -57,6 +57,15 @@ def _label_quarter(r):
     return '%04d-Q%d' % (y, q) if y and q else BLANK
 
 
+def _label_report(r):
+    # Xero's Class splits the two statements: REVENUE/EXPENSE are the income
+    # statement, everything else is the balance sheet.
+    g = r.get('account__grouping')
+    if not g:
+        return BLANK
+    return 'Income Statement' if g in ('REVENUE', 'EXPENSE') else 'Balance Sheet'
+
+
 def _plain(alias):
     def f(r):
         v = r.get(alias)
@@ -68,6 +77,8 @@ def _plain(alias):
 # A `None` expression means the alias is already a real ORM path and needs no annotate().
 DIMENSIONS = {
     'entity':             ('Entity',              {'organisation__tenant_name': None},          _plain('organisation__tenant_name')),
+    'report':             ('Report (IS / BS)',    {'account__grouping': None},                  _label_report),
+    'account_class':      ('Account class',       {'account__grouping': None},                  _plain('account__grouping')),
     'account_type':       ('Account type',        {'account__type': None},                      _plain('account__type')),
     'account':            ('Account',             {'account__code': None, 'account__name': None}, None),   # special-cased
     'supplier':           ('Supplier / contact',  {'d_supplier': Coalesce('contact__name', 'transaction_source__contact__name', Value(''), output_field=CharField())}, _plain('d_supplier')),
@@ -299,7 +310,7 @@ class XeroJournalPivotView(APIView):
         empty sheet reads as a broken tool rather than a correct answer."""
         if leaves or not zero_rows or measure not in ('amount',):
             return None
-        separators = {'account', 'account_type'}
+        separators = {'account', 'account_type', 'account_class', 'report'}
         if separators & set(row_dims + col_dims):
             return None
         return (

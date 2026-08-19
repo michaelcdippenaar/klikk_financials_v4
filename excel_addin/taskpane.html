@@ -3,8 +3,58 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
   <title>Klikk Journals</title>
   <link rel="stylesheet" href="styles.css">
+  <script>
+(function () {
+  var errs = [];
+  window.addEventListener('error', function (e) {
+    errs.push((e.message || 'error') + (e.filename ? ' @ ' + e.filename.split('/').pop() : '') +
+              (e.lineno ? ':' + e.lineno : ''));
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    errs.push('unhandled promise: ' + (e.reason && e.reason.message ? e.reason.message : e.reason));
+  });
+  window.__klikkDiag = function () {
+    return {
+      office: typeof Office,
+      officeReady: typeof Office !== 'undefined' && !!Office.onReady,
+      excel: typeof Excel,
+      appLoaded: !!window.__klikkAppLoaded,
+      onReadyFired: !!window.__klikkOnReadyFired,
+      host: window.__klikkHost,
+      step: window.__klikkStep,
+      bootDone: !!window.__klikkBootDone,
+      errors: errs
+    };
+  };
+  setTimeout(function () {
+    var boot = document.getElementById('boot');
+    if (!boot || boot.hidden) return;                 // started fine
+    if (window.__klikkAppReportedError) return;        // app already said something better
+    var d = window.__klikkDiag();
+    var why;
+    if (d.office === 'undefined')      why = 'office.js did not load. Check the network, then reopen the pane.';
+    else if (!d.appLoaded)             why = 'app.js did not load or failed to parse.';
+    else if (d.excel === 'undefined')  why = 'the Excel API is unavailable in this host.';
+    else if (!d.onReadyFired)          why = 'Office never invoked onReady.';
+    else if (!d.bootDone)              why = 'onReady fired but did not finish — see host below.';
+    else                               why = 'startup stalled after boot.';
+    boot.innerHTML =
+      '<p style="margin:0 0 8px;font-weight:600">Klikk Journals could not start.</p>' +
+      '<p style="margin:0 0 10px">' + why + '</p>' +
+      '<pre style="white-space:pre-wrap;font-size:11px;opacity:.8;margin:0">' +
+      'Office: ' + d.office + '   Excel: ' + d.excel + '\n' +
+      'app.js loaded: ' + d.appLoaded + '   onReady fired: ' + d.onReadyFired + '\n' +
+      'onReady done: ' + d.bootDone + '   host: ' + d.host + '\n' +
+      'last step: ' + d.step + '\n' +
+      (d.errors.length ? 'errors:\n  ' + d.errors.join('\n  ') : 'no script errors captured') +
+      '</pre>';
+  }, 6000);
+})();
+</script>
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 </head>
 <body>
@@ -26,7 +76,7 @@
       <input type="url" id="baseUrl" spellcheck="false" autocomplete="off">
       <label for="token">API token</label>
       <input type="password" id="token" spellcheck="false" autocomplete="off" placeholder="paste the add-in token">
-      <p class="hint">Stored in your Office roaming settings for this account — not saved inside the workbook.</p>
+      <p class="hint">Stored locally by this add-in on this machine — never saved inside the workbook, so it does not travel with a file you share.</p>
       <div class="row">
         <button class="btn btn--primary" id="btnConnect">Connect</button>
         <button class="btn" id="btnForget">Forget</button>

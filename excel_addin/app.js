@@ -7,6 +7,8 @@
 (function () {
   'use strict';
 
+  window.__klikkAppLoaded = true;
+
   var DEFAULT_BASE = 'https://console.8-bit.space/backend';
   var PAGE_SIZE = 1000;
   var WRITE_CHUNK = 2000;
@@ -18,6 +20,8 @@
     { key: 'journal_number',          label: 'Jrnl #',     fmt: 'int',   width: 8  },
     { key: 'journal_type',            label: 'Type',       fmt: null,    width: 13 },
     { key: 'tenant_name',             label: 'Entity',     fmt: null,    width: 16 },
+    { key: 'report',                  label: 'Report',     fmt: null,    width: 16 },
+    { key: 'account_class',           label: 'Acct class', fmt: null,    width: 12 },
     { key: 'account_code',            label: 'Acct code',  fmt: null,    width: 12 },
     { key: 'account_name',            label: 'Account',    fmt: null,    width: 28 },
     { key: 'account_type',            label: 'Acct type',  fmt: null,    width: 12 },
@@ -49,8 +53,19 @@
   /* ── boot ──────────────────────────────────────────────── */
 
   Office.onReady(function (info) {
-    if (info.host !== Office.HostType.Excel) {
-      document.getElementById('boot').textContent = 'This add-in only runs in Excel.';
+    window.__klikkOnReadyFired = true;
+    window.__klikkHost = String(info && info.host);
+
+    // Gate on the capability, not on the reported host. Some Office builds hand
+    // back a host value that doesn't match Office.HostType.Excel (and on others
+    // Office.HostType itself is undefined, which threw a TypeError that Office's
+    // own promise chain swallowed — a silent permanent "Loading…"). Excel.run is
+    // what this add-in actually needs, so test for that.
+    if (typeof Excel === 'undefined' || typeof Excel.run !== 'function') {
+      window.__klikkAppReportedError = true;
+      document.getElementById('boot').textContent =
+        'This add-in needs the Excel JavaScript API, which is not available here'
+        + (info && info.host ? ' (host reported: ' + info.host + ').' : '.');
       return;
     }
     [
@@ -63,10 +78,27 @@
       'refreshPanel', 'sheetInfo', 'btnRefresh', 'btnRestore', 'progressPanel',
       'progressMsg', 'progressFill', 'btnCancel', 'errorMsg'
     ].forEach(function (id) { el[id] = document.getElementById(id); });
+    window.__klikkStep = 'ids';
 
-    loadSettings();
-    wireEvents();
+    try {
+      window.__klikkStep = 'loadSettings';
+      loadSettings();
+      window.__klikkStep = 'wireEvents';
+      wireEvents();
+      window.__klikkStep = 'wired';
+    } catch (e) {
+      // Claim the boot panel so the watchdog does not overwrite this with a
+      // vaguer message — that clobbering is what hid the real error before.
+      window.__klikkAppReportedError = true;
+      document.getElementById('boot').innerHTML =
+        '<p style="margin:0 0 8px;font-weight:600">Klikk Journals failed to start.</p>' +
+        '<pre style="white-space:pre-wrap;font-size:11px;margin:0">' +
+        esc('at step: ' + window.__klikkStep + '\n' + (e && e.message ? e.message : String(e))) +
+        '</pre>';
+      return;
+    }
 
+    window.__klikkBootDone = true;
     el.boot.hidden = true;
     el.app.hidden = false;
 
@@ -104,19 +136,36 @@
 
   /* ── settings ──────────────────────────────────────────── */
 
+  /* Credential storage.
+   *
+   * NOT Office.context.roamingSettings — that is part of the Outlook/Mailbox
+   * API and is undefined in Excel; reading it threw and left the pane stuck.
+   * NOT Office.context.document.settings either: that persists inside the
+   * workbook, so the token would travel to anyone the file is shared with.
+   * localStorage is scoped to this add-in's origin on this machine, which is
+   * the property we actually want. */
+  var LS_BASE = 'klikk.baseUrl';
+  var LS_TOKEN = 'klikk.token';
+
+  function lsGet(k) {
+    try { return window.localStorage.getItem(k) || ''; } catch (e) { return ''; }
+  }
+
+  function lsSet(k, v) {
+    try { window.localStorage.setItem(k, v); return true; } catch (e) { return false; }
+  }
+
   function loadSettings() {
-    var r = Office.context.roamingSettings;
-    settings.baseUrl = r.get('klikkBaseUrl') || DEFAULT_BASE;
-    settings.token = r.get('klikkToken') || '';
+    settings.baseUrl = lsGet(LS_BASE) || DEFAULT_BASE;
+    settings.token = lsGet(LS_TOKEN);
     el.baseUrl.value = settings.baseUrl;
     el.token.value = settings.token;
   }
 
   function persistSettings() {
-    var r = Office.context.roamingSettings;
-    r.set('klikkBaseUrl', settings.baseUrl);
-    r.set('klikkToken', settings.token);
-    return new Promise(function (resolve) { r.saveAsync(function () { resolve(); }); });
+    lsSet(LS_BASE, settings.baseUrl);
+    lsSet(LS_TOKEN, settings.token);
+    return Promise.resolve();
   }
 
   function forget() {

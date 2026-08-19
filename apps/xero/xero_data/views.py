@@ -10,7 +10,7 @@ from django.utils.dateparse import parse_date
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.pagination import PageNumberPagination
 
 from apps.xero.xero_core.models import XeroTenant
@@ -155,6 +155,11 @@ class XeroJournalSearchView(APIView):
                 'date': journal.date.date().isoformat() if journal.date else None,
                 'journal_number': journal.journal_number,
                 'journal_type': journal.journal_type,
+                'report': (
+                    ('Income Statement' if account_obj.grouping in ('REVENUE', 'EXPENSE')
+                     else 'Balance Sheet') if account_obj and account_obj.grouping else ''
+                ),
+                'account_class': account_obj.grouping if account_obj else '',
                 'account_code': account_obj.code if account_obj else '',
                 'account_name': account_obj.name if account_obj else '',
                 'account_type': account_obj.type if account_obj else '',
@@ -384,7 +389,7 @@ class XeroSyncDocumentsView(APIView):
 
 class XeroDocumentsByTransactionView(APIView):
     """List documents linked to a Xero transaction (by transaction ID, e.g. InvoiceID)."""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request, transaction_id):
         qs = XeroDocument.objects.filter(
@@ -498,7 +503,7 @@ class XeroAgedPayablesListView(APIView):
     Response: paginated list of { id, contact_id, contact_name, report_date,
               current, one_month, two_months, three_months, older, total, synced_at }
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         tenant_id = request.query_params.get('tenant_id')
@@ -537,7 +542,7 @@ class XeroAgedReceivablesListView(APIView):
 
     List AgedReceivable rows.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         tenant_id = request.query_params.get('tenant_id')
@@ -678,7 +683,7 @@ class XeroQuoteListView(APIView):
 
     Returns: { count, results: [...] }
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         tenant_id = request.query_params.get('tenant_id')
@@ -742,7 +747,7 @@ class XeroQuoteDetailView(APIView):
     quote_id matches the Xero QuoteID (UUID).
     Returns: full quote + line_items[].
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request, quote_id):
         tenant_id = request.query_params.get('tenant_id')
@@ -869,7 +874,7 @@ class XeroInvoiceListView(APIView):
              date_from, date_to, due_date_from, due_date_to,
              min_amount_due (e.g. for "outstanding > 0"), q, limit, offset.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         tenant_id = request.query_params.get('tenant_id')
@@ -936,7 +941,7 @@ class XeroInvoiceListView(APIView):
 
 class XeroInvoiceDetailView(APIView):
     """GET /xero/data/invoices/<invoice_id>/ — full invoice + line items."""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request, invoice_id):
         tenant_id = request.query_params.get('tenant_id')
