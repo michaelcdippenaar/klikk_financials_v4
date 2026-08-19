@@ -51,20 +51,30 @@ class XeroTransactionSourceModelManager(models.Manager):
         
         to_create = []
         to_update = []
-        
+        # Paged list GETs (Invoices / BankTransactions / CreditNotes) carry the
+        # HasAttachments flag for free, so the nightly pipeline doubles as
+        # attachment discovery: record it here instead of probing per record.
+        now = timezone.now()
+
         for r in xero_response:
             transaction_id = r[transaction_id_key]
             contact = None
             if "Contact" in r:
                 contact_id = r["Contact"].get("ContactID")
                 contact = contacts_dict.get(contact_id)
-            
+            has_attachments = r.get('HasAttachments')
+            if not isinstance(has_attachments, bool):
+                has_attachments = None
+
             if transaction_id in existing_transactions:
                 # Update existing
                 existing = existing_transactions[transaction_id]
                 existing.contact = contact
                 existing.transaction_source = transaction_source_type
                 existing.collection = r
+                if has_attachments is not None:
+                    existing.has_attachments = has_attachments
+                    existing.attachments_checked_at = now
                 to_update.append(existing)
             else:
                 # Create new
@@ -73,14 +83,17 @@ class XeroTransactionSourceModelManager(models.Manager):
                     transactions_id=transaction_id,
                     contact=contact,
                     transaction_source=transaction_source_type,
-                    collection=r
+                    collection=r,
+                    has_attachments=has_attachments,
+                    attachments_checked_at=now if has_attachments is not None else None,
                 ))
-        
+
         # Bulk create and update
         if to_create:
             self.bulk_create(to_create, ignore_conflicts=True)
         if to_update:
-            self.bulk_update(to_update, ['contact', 'transaction_source', 'collection'])
+            self.bulk_update(to_update, ['contact', 'transaction_source', 'collection',
+                                         'has_attachments', 'attachments_checked_at'])
         
         return self
     
@@ -137,11 +150,23 @@ class XeroTransactionSource(models.Model):
     contact = models.ForeignKey(XeroContacts, on_delete=models.DO_NOTHING, null=True, blank=True,
                                 related_name='transaction_sources')
     collection = models.JSONField(blank=True, null=True)
+    # Attachment discovery (2026-08-19): Xero's paged list GETs return
+    # HasAttachments per record, so one call per 1,000 records replaces one
+    # Attachments probe per record. NULL = never learned from Xero.
+    has_attachments = models.BooleanField(null=True, blank=True)
+    attachments_checked_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When HasAttachments was last read from a Xero list response (or the Attachments list).',
+    )
 
     objects = XeroTransactionSourceModelManager()
 
     class Meta:
         unique_together = [('organisation', 'transactions_id')]
+        indexes = [
+            models.Index(fields=['organisation', 'has_attachments'],
+                         name='xero_txsrc_org_hasatt_idx'),
+        ]
 
     def __str__(self):
         return f'{self.organisation.tenant_name}: {self.contact} - {self.transaction_source}'

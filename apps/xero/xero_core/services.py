@@ -237,6 +237,10 @@ class XeroApiClient:
             ),
             pool_threads=1,
         )
+        # Budget telemetry, updated by the HTTP guard on every response.
+        self.request_count = 0
+        self.day_limit_remaining = None
+        self.min_limit_remaining = None
         self._install_http_guards()
         self.tenant_token = None
         if tenant_id:
@@ -281,25 +285,48 @@ class XeroApiClient:
         )
 
         original_request = rest_client.request
+        client = self
 
         def request_with_guards(*args, **kwargs):
             if not kwargs.get('_request_timeout'):
                 kwargs['_request_timeout'] = HTTP_TIMEOUT
+            client.request_count += 1
             try:
                 response = original_request(*args, **kwargs)
             except HTTPStatusException as e:
                 # rest.py raises the BASE HTTPStatusException for any non-2xx;
                 # it only becomes RateLimitException after translation higher
                 # up, so 429 must be detected by status here.
+                client._record_limit_headers(e)
                 if getattr(e, 'status', None) == 429:
                     raise_if_daily_limit(e)
                 raise
+            client._record_limit_headers(response)
             # Backstop in case a 429 response is ever returned un-raised.
             if getattr(response, 'status', None) == 429:
                 raise_if_daily_limit(response)
             return response
 
         rest_client.request = request_with_guards
+
+    def _record_limit_headers(self, source):
+        """Remember Xero's allowance headers from the latest response (success or error).
+
+        X-DayLimit-Remaining / X-MinLimit-Remaining ride on every response and are
+        the only trustworthy budget signal (the daily window resets at an
+        unpublished per-tenant instant), so bulk jobs read them instead of
+        computing their own arithmetic.
+        """
+        try:
+            headers = _headers_from(source)
+            day = headers.get('x-daylimit-remaining') or headers.get('X-DayLimit-Remaining')
+            minute = headers.get('x-minlimit-remaining') or headers.get('X-MinLimit-Remaining')
+            if day is not None:
+                self.day_limit_remaining = int(day)
+            if minute is not None:
+                self.min_limit_remaining = int(minute)
+        except (TypeError, ValueError):
+            pass
 
     def get_tenant_token(self):
         """Get tenant token data from credentials.tenant_tokens or XeroTenantToken model."""
