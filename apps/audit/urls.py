@@ -1,6 +1,7 @@
 from django.urls import path
 
 from . import views
+from .slip_view import slip_file_view
 
 app_name = 'audit'
 
@@ -11,4 +12,5 @@ urlpatterns = [
     path('run/', views.run_audit_view, name='run_audit'),
     path('history/<str:code>/', views.history_view, name='history'),
     path('runs/', views.runs_view, name='runs'),
+    path('slip/<str:sha256>/', slip_file_view, name='slip_file'),
 ]
