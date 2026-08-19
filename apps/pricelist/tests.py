@@ -22,7 +22,7 @@ from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -831,6 +831,15 @@ class BuildQuoteTests(TestCase):
 # =========================================================================== #
 # 6. REST API
 # =========================================================================== #
+# The three write actions (POST /items/, PATCH|PUT /items/<code>/, POST /items/<code>/prices/)
+# require HasServiceToken as of 2026-08-19. The write-path classes below are about the write
+# LOGIC — validation, effective-dating, 400-not-500 — so they authenticate in setUp and say
+# nothing about the gate itself. The gate is section 9's subject, and section 9 deliberately
+# does NOT inherit this credential. Distinct value from section 9's SERVICE_TOKEN so neither
+# can mask a bug in the other.
+WRITE_TEST_TOKEN = 'pricelist-write-path-test-token-3b7Ac1'
+
+
 class ApiTestBase(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -935,7 +944,12 @@ class ItemsListApiTests(ApiTestBase):
         self.assertIn('date', r.json()['detail'])
 
 
+@override_settings(KLIKK_API_TOKEN=WRITE_TEST_TOKEN)
 class ItemDetailAndPriceApiTests(ApiTestBase):
+    def setUp(self):
+        super().setUp()
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {WRITE_TEST_TOKEN}')
+
     def test_item_detail_get(self):
         """GET /items/<code>/ returns the item dict."""
         r = self.client.get(self._url('item_detail', 'DB-V10P'))
@@ -1028,7 +1042,12 @@ class ItemDetailAndPriceApiTests(ApiTestBase):
         self.assertEqual(PriceListPrice.objects.filter(item=self.top).count(), 2)
 
 
+@override_settings(KLIKK_API_TOKEN=WRITE_TEST_TOKEN)
 class ItemsCreateApiTests(ApiTestBase):
+    def setUp(self):
+        super().setUp()
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {WRITE_TEST_TOKEN}')
+
     def test_post_creates_item_201_and_uppercases_code(self):
         """POST /items/ creates (201), code upper-cased/stripped, category validated."""
         r = self.client.post(self.items_url, {'code': ' pio-cdj3000 ', 'name': 'Pioneer CDJ-3000', 'category': 'dj',
@@ -1114,7 +1133,12 @@ class ItemsCreateApiTests(ApiTestBase):
                                           format='json').status_code, 400)
 
 
+@override_settings(KLIKK_API_TOKEN=WRITE_TEST_TOKEN)
 class ItemPricesApiTests(ApiTestBase):
+    def setUp(self):
+        super().setUp()
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {WRITE_TEST_TOKEN}')
+
     def test_get_prices_history_newest_first(self):
         """GET /items/<code>/prices/ lists the lane history, newest first, money as strings."""
         add_price(self.top, price='900', valid_from=D(2026, 3, 1))
@@ -1495,3 +1519,784 @@ class SeedCommandIdempotencyTests(TestCase):
         PriceListItem.objects.all().delete()
         call_command('seed_pricelist', '--only', first.lower(), stdout=out, stderr=err)
         self.assertEqual(list(PriceListItem.objects.values_list('code', flat=True)), [first])
+
+
+# =========================================================================== #
+# 9. Shared-secret service-token auth on the three write endpoints
+#
+# Adversarial by construction: EVERY denial asserts the HTTP status AND the
+# database side effect. "403 but the row was still written" is the exact bug
+# these tests exist to catch, so a denial test that only looks at the status
+# code is not written here at all.
+#
+# Imports are local to this section (rather than added to the module header) so
+# the 133 tests above are not restructured. ``klikk_business_intelligence.permissions``
+# is imported INSIDE test bodies on purpose: if that module has not landed yet,
+# only these tests fail — an ImportError at module scope would take the whole
+# file down with it.
+# =========================================================================== #
+from django.contrib.auth import get_user_model
+from django.test import override_settings
+
+SERVICE_TOKEN = 'klikk-service-token-6d0f4c1eF9'
+
+
+class ServiceTokenTestBase(ApiTestBase):
+    """Fixtures + the two assertions every denial test in this section must make.
+
+    Inherits ApiTestBase's rate card: DB-V10P (open LIST @850.00 from 2025-12-03
+    plus an open TRADE @680.00 for Aurras), DB-D40, OLD-THING.
+    """
+
+    def _hdr(self, value):
+        """Raw Authorization header. Kept as HTTP_* kwargs (not ``headers=``) so the
+        test reads the same on any Django 5.x point release."""
+        return {'HTTP_AUTHORIZATION': value}
+
+    def _bearer(self, token=SERVICE_TOKEN):
+        return self._hdr(f'Bearer {token}')
+
+    def _new_payload(self, code='SVC-INTRUDER', **kw):
+        body = {'code': code, 'name': 'created by an unauthenticated caller',
+                'category': 'PA', 'unit': 'DAY', 'qty_owned': 3}
+        body.update(kw)
+        return body
+
+    def _list_row(self):
+        return PriceListPrice.objects.get(item=self.top, price_type='LIST', customer__isnull=True)
+
+    def _snapshot(self):
+        """Every column any of the three write endpoints could touch."""
+        self.top.refresh_from_db()
+        row = self._list_row()
+        return {
+            'items': PriceListItem.objects.count(),
+            'prices': PriceListPrice.objects.count(),
+            'top_name': self.top.name,
+            'top_qty_owned': self.top.qty_owned,
+            'top_active': self.top.active,
+            'top_notes': self.top.notes,
+            'top_price_rows': self.top.prices.count(),
+            'open_list_price': row.price,
+            'open_list_valid_from': row.valid_from,
+            'open_list_valid_to': row.valid_to,
+        }
+
+    def assertDenied(self, response, label):
+        self.assertIn(
+            response.status_code, (401, 403),
+            f'{label}: expected 401/403, got {response.status_code} {response.content[:300]!r}',
+        )
+
+    def assertNoWrite(self, before, label):
+        self.assertEqual(
+            self._snapshot(), before,
+            f'{label}: the request was DENIED but the database still changed — the permission '
+            f'check is running after the write, not before it',
+        )
+
+
+# --------------------------------------------------------------------------- #
+# 9a. Denial — token configured, caller has no / the wrong credential
+# --------------------------------------------------------------------------- #
+@override_settings(KLIKK_API_TOKEN=SERVICE_TOKEN)
+class ServiceTokenDenialTests(ServiceTokenTestBase):
+    # ---- POST /items/ ----
+    def test_post_items_no_header_is_denied_and_creates_nothing(self):
+        """(1) No Authorization at all → denied AND the item row must not exist."""
+        before = self._snapshot()
+        r = self.client.post(self.items_url, self._new_payload(), format='json')
+        self.assertDenied(r, 'POST /items/ with no Authorization header')
+        self.assertFalse(
+            PriceListItem.objects.filter(code='SVC-INTRUDER').exists(),
+            'POST /items/ was denied but the PriceListItem row was created anyway',
+        )
+        self.assertNoWrite(before, 'POST /items/ with no Authorization header')
+
+    def test_post_items_wrong_token_is_denied_and_creates_nothing(self):
+        """(2) Bearer wrong-token → denied AND no row."""
+        before = self._snapshot()
+        r = self.client.post(self.items_url, self._new_payload(), format='json',
+                             **self._bearer('wrong-token'))
+        self.assertDenied(r, 'POST /items/ with a wrong bearer token')
+        self.assertFalse(PriceListItem.objects.filter(code='SVC-INTRUDER').exists())
+        self.assertNoWrite(before, 'POST /items/ with a wrong bearer token')
+
+    def test_post_items_token_prefix_is_not_accepted(self):
+        """A token that merely STARTS WITH / EXTENDS the real one must be rejected —
+        guards against ``startswith`` / truncated comparisons."""
+        before = self._snapshot()
+        near_misses = (SERVICE_TOKEN[:-1], SERVICE_TOKEN[1:], SERVICE_TOKEN + 'x',
+                       SERVICE_TOKEN.upper(), SERVICE_TOKEN.replace('-', '_'),
+                       SERVICE_TOKEN[:len(SERVICE_TOKEN) // 2])
+        for n, bad in enumerate(near_misses):
+            with self.subTest(token=bad):
+                r = self.client.post(self.items_url, self._new_payload(code=f'SVC-NEAR{n}'),
+                                     format='json', **self._bearer(bad))
+                self.assertDenied(r, f'POST /items/ with near-miss token {bad!r}')
+        self.assertNoWrite(before, 'near-miss tokens')
+
+    def test_extra_whitespace_between_scheme_and_token_is_tolerated(self):
+        """DOCUMENTED LENIENCY, verified against the implementation rather than wished for.
+
+        ``get_authorization_header(request).split()`` splits on runs of whitespace, so
+        'Bearer<SP><SP><tok>' yields exactly two parts and authenticates. I originally
+        asserted this as a near-miss denial; it is not one. RFC 7235 permits only a single
+        SP, so this is more permissive than the spec, but the credential itself is compared
+        byte-for-byte and constant-time — nothing is truncated or coerced, so it is
+        tolerance, not a weakness. Pinned so a future switch to split(' ', 1) is a visible
+        behaviour change.
+        """
+        r = self.client.post(self.items_url, self._new_payload(code='SVC-WS'),
+                             format='json', **self._hdr(f'Bearer  {SERVICE_TOKEN}'))
+        self.assertEqual(r.status_code, 201, r.content)
+        self.assertTrue(PriceListItem.objects.filter(code='SVC-WS').exists())
+
+    def test_post_items_replace_true_without_token_cannot_overwrite(self):
+        """The 409/replace branch is a WRITE too — it must be behind the same gate.
+        A denied replace must leave the existing item byte-for-byte unchanged."""
+        before = self._snapshot()
+        r = self.client.post(self.items_url,
+                             {'code': 'DB-V10P', 'name': 'HIJACKED', 'category': 'PA',
+                              'replace': True, 'qty_owned': 99},
+                             format='json')
+        self.assertDenied(r, 'POST /items/ replace=true with no token')
+        self.top.refresh_from_db()
+        self.assertEqual(self.top.name, 'd&b V10P point-source top')
+        self.assertEqual(self.top.qty_owned, 0)
+        self.assertNoWrite(before, 'POST /items/ replace=true with no token')
+
+    # ---- PATCH / PUT /items/<code>/ ----
+    def test_patch_item_no_header_is_denied_and_field_unchanged(self):
+        """(3) PATCH with no header → denied AND the field on a fresh DB read is unchanged."""
+        before = self._snapshot()
+        r = self.client.patch(self._url('item_detail', 'DB-V10P'),
+                              {'name': 'HIJACKED', 'qty_owned': 99, 'notes': 'pwned'}, format='json')
+        self.assertDenied(r, 'PATCH /items/DB-V10P/ with no Authorization header')
+        fresh = PriceListItem.objects.get(code='DB-V10P')
+        self.assertEqual(fresh.name, 'd&b V10P point-source top',
+                         'PATCH was denied but the name was written anyway')
+        self.assertEqual(fresh.qty_owned, 0)
+        self.assertEqual(fresh.notes, '')
+        self.assertNoWrite(before, 'PATCH /items/DB-V10P/ with no Authorization header')
+
+    def test_put_item_no_header_is_denied_and_field_unchanged(self):
+        """PUT is an alias for PATCH in this view — it must be gated identically."""
+        before = self._snapshot()
+        r = self.client.put(self._url('item_detail', 'DB-V10P'),
+                            {'name': 'HIJACKED-PUT', 'active': False}, format='json')
+        self.assertDenied(r, 'PUT /items/DB-V10P/ with no Authorization header')
+        fresh = PriceListItem.objects.get(code='DB-V10P')
+        self.assertEqual(fresh.name, 'd&b V10P point-source top')
+        self.assertTrue(fresh.active)
+        self.assertNoWrite(before, 'PUT /items/DB-V10P/ with no Authorization header')
+
+    def test_patch_item_wrong_token_is_denied_and_field_unchanged(self):
+        before = self._snapshot()
+        r = self.client.patch(self._url('item_detail', 'DB-V10P'), {'name': 'HIJACKED'},
+                              format='json', **self._bearer('wrong-token'))
+        self.assertDenied(r, 'PATCH with a wrong bearer token')
+        self.assertEqual(PriceListItem.objects.get(code='DB-V10P').name, 'd&b V10P point-source top')
+        self.assertNoWrite(before, 'PATCH with a wrong bearer token')
+
+    # ---- POST /items/<code>/prices/ ----
+    def test_post_price_no_header_is_denied_and_no_row_and_previous_still_open(self):
+        """(4) The close-previous side effect is the dangerous one: even if the INSERT is
+        rolled back, an UPDATE that stamped valid_to on the live row would silently leave
+        the item with NO current price. Assert both halves."""
+        before = self._snapshot()
+        r = self.client.post(self._url('item_prices', 'DB-V10P'),
+                             {'price': '9999.00', 'valid_from': '2026-03-01', 'set_by': 'intruder'},
+                             format='json')
+        self.assertDenied(r, 'POST /items/DB-V10P/prices/ with no Authorization header')
+        self.top.refresh_from_db()
+        self.assertEqual(self.top.prices.count(), 2, 'a price row was inserted despite the denial')
+        self.assertIsNone(self._list_row().valid_to,
+                          'the previously-open LIST row was CLOSED by a request that was denied — '
+                          'the close-previous side effect fired before the permission check')
+        self.assertEqual(self._list_row().price, Decimal('850.00'))
+        self.assertNoWrite(before, 'POST prices with no Authorization header')
+
+    def test_post_price_wrong_token_is_denied_and_previous_still_open(self):
+        before = self._snapshot()
+        r = self.client.post(self._url('item_prices', 'DB-V10P'),
+                             {'price': '9999.00', 'valid_from': '2026-03-01'},
+                             format='json', **self._bearer('wrong-token'))
+        self.assertDenied(r, 'POST prices with a wrong bearer token')
+        self.assertIsNone(self._list_row().valid_to)
+        self.assertNoWrite(before, 'POST prices with a wrong bearer token')
+
+    def test_post_price_same_valid_from_without_token_cannot_update_in_place(self):
+        """add_price's idempotent same-day branch UPDATEs an existing row. Without a token
+        that update must never happen — assert the price value itself."""
+        before = self._snapshot()
+        r = self.client.post(self._url('item_prices', 'DB-V10P'),
+                             {'price': '1.00', 'valid_from': '2025-12-03'}, format='json')
+        self.assertDenied(r, 'POST prices same-day update with no token')
+        self.assertEqual(self._list_row().price, Decimal('850.00'),
+                         'a denied request still rewrote the existing price row in place')
+        self.assertNoWrite(before, 'POST prices same-day update with no token')
+
+    # ---- malformed / hostile Authorization headers ----
+    def test_jwt_shaped_garbage_token_is_denied_not_500(self):
+        """(5) 'a.b.c' looks like a JWT to simplejwt. It must be a clean denial, never a 500."""
+        before = self._snapshot()
+        for bad in ('a.b.c', 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.notarealsignature', '...', 'a.b.c.d'):
+            with self.subTest(token=bad):
+                r = self.client.post(self.items_url, self._new_payload(code='SVC-JWTISH'),
+                                     format='json', **self._bearer(bad))
+                self.assertNotEqual(r.status_code, 500,
+                                    f'{bad!r} produced a 500: {r.content[:300]!r}')
+                self.assertDenied(r, f'POST /items/ with JWT-shaped garbage {bad!r}')
+        self.assertFalse(PriceListItem.objects.filter(code='SVC-JWTISH').exists())
+        self.assertNoWrite(before, 'JWT-shaped garbage tokens')
+
+    def test_wrong_scheme_token_is_denied(self):
+        """(6a) 'Token <tok>' — the shared secret must only be honoured on the Bearer scheme.
+        (DRF's TokenAuthentication is also registered, so this lands on the authtoken table
+        and 401s; either way it must not write.)"""
+        before = self._snapshot()
+        r = self.client.post(self.items_url, self._new_payload(code='SVC-SCHEME'),
+                             format='json', **self._hdr(f'Token {SERVICE_TOKEN}'))
+        self.assertDenied(r, "POST /items/ with 'Token <tok>' scheme")
+        self.assertFalse(PriceListItem.objects.filter(code='SVC-SCHEME').exists())
+        self.assertNoWrite(before, "'Token <tok>' scheme")
+
+    def test_bearer_with_no_value_is_denied(self):
+        """(6b) 'Bearer' and 'Bearer ' carry no credential. If the implementation splits on
+        ' ' with maxsplit and gets '', a mis-guarded compare against a configured token is
+        still a denial — but this is the shape that becomes a bypass the moment the setting
+        is empty (see ServiceTokenUnsetTests)."""
+        before = self._snapshot()
+        for header in ('Bearer', 'Bearer ', 'Bearer  ', 'bearer'):
+            with self.subTest(header=header):
+                r = self.client.post(self.items_url, self._new_payload(code='SVC-NOVALUE'),
+                                     format='json', **self._hdr(header))
+                self.assertNotEqual(r.status_code, 500, f'{header!r} produced a 500')
+                self.assertDenied(r, f'POST /items/ with {header!r}')
+        self.assertFalse(PriceListItem.objects.filter(code='SVC-NOVALUE').exists())
+        self.assertNoWrite(before, 'Bearer with no value')
+
+    def test_lowercase_bearer_scheme_is_ACCEPTED_per_contract(self):
+        """(6c) The contract says ServiceTokenAuthentication lower-cases the scheme, so
+        'bearer <tok>' must be ACCEPTED.
+
+        FLAGGED, because it surprised me: this is looser than every other authenticator in
+        the stack. simplejwt compares the scheme byte-for-byte against AUTH_HEADER_TYPES
+        ('Bearer'), so 'bearer <jwt>' is NOT accepted for a console JWT — a caller can use a
+        lowercase scheme for the shared secret but not for a JWT. RFC 7235 does say the
+        scheme is case-insensitive, so accepting it is defensible; the inconsistency with
+        JWTAuthentication is the thing worth knowing about, not a vulnerability.
+        """
+        r = self.client.post(self.items_url, self._new_payload(code='SVC-LOWER'),
+                             format='json', **self._hdr(f'bearer {SERVICE_TOKEN}'))
+        self.assertEqual(r.status_code, 201,
+                         f'contract says the scheme is lower-cased, so "bearer <tok>" must be '
+                         f'accepted; got {r.status_code} {r.content[:300]!r}')
+        self.assertTrue(PriceListItem.objects.filter(code='SVC-LOWER').exists())
+
+    def test_extra_parts_in_authorization_header_are_denied(self):
+        """'Bearer <tok> extra' is malformed — must not authenticate, must not 500."""
+        before = self._snapshot()
+        r = self.client.post(self.items_url, self._new_payload(code='SVC-EXTRA'),
+                             format='json', **self._hdr(f'Bearer {SERVICE_TOKEN} extra'))
+        self.assertNotEqual(r.status_code, 500)
+        self.assertDenied(r, 'Bearer <tok> extra')
+        self.assertNoWrite(before, 'Bearer <tok> extra')
+
+    def test_non_ascii_token_does_not_500(self):
+        """``hmac.compare_digest`` raises TypeError when handed a str with non-ASCII
+        characters, and ``bytes.decode()`` (utf-8) raises UnicodeDecodeError on a latin-1
+        header byte. Either turns a hostile header into a 500. Must be a clean denial."""
+        before = self._snapshot()
+        for bad in ('wr\xf6ng-token', '\xe9' * 40, SERVICE_TOKEN + '\xff'):
+            with self.subTest(token=bad):
+                r = self.client.post(self.items_url, self._new_payload(code='SVC-NONASCII'),
+                                     format='json', **self._bearer(bad))
+                self.assertNotEqual(
+                    r.status_code, 500,
+                    f'non-ASCII bearer token {bad!r} produced a 500 — the comparison is not '
+                    f'byte-safe (hmac.compare_digest on non-ASCII str, or a utf-8 .decode())',
+                )
+                self.assertDenied(r, f'non-ASCII token {bad!r}')
+        self.assertNoWrite(before, 'non-ASCII tokens')
+
+    def test_very_long_token_is_denied_not_500(self):
+        before = self._snapshot()
+        r = self.client.post(self.items_url, self._new_payload(code='SVC-LONG'),
+                             format='json', **self._bearer('x' * 8000))
+        self.assertNotEqual(r.status_code, 500)
+        self.assertDenied(r, 'an 8000-char bearer token')
+        self.assertNoWrite(before, 'an 8000-char bearer token')
+
+    def test_denial_response_body_never_echoes_the_configured_token(self):
+        """A 401/403 body that quotes the expected secret would be a disclosure bug."""
+        r = self.client.post(self.items_url, self._new_payload(code='SVC-ECHO'),
+                             format='json', **self._bearer('wrong-token'))
+        self.assertNotIn(SERVICE_TOKEN, r.content.decode('utf-8', 'replace'))
+
+
+# --------------------------------------------------------------------------- #
+# 9b. Denial — KLIKK_API_TOKEN unset (the empty-secret bypass)
+# --------------------------------------------------------------------------- #
+@override_settings(KLIKK_API_TOKEN='')
+class ServiceTokenUnsetTests(ServiceTokenTestBase):
+    """With no token configured the endpoints must be closed to anonymous callers, not open.
+
+    The hunt here is ``if token == settings.KLIKK_API_TOKEN`` without a non-empty guard:
+    an empty setting plus an empty/absent credential compares equal and authenticates
+    *everyone*. This is the single worst failure mode of the whole feature, because the
+    setting is empty by default — a deploy that forgets the env var would ship the API wide
+    open while every happy-path test still passes.
+    """
+
+    def test_empty_setting_plus_any_bearer_is_denied_and_writes_nothing(self):
+        """(7) KLIKK_API_TOKEN='' + 'Bearer anything' → denied, no write, no 500."""
+        before = self._snapshot()
+        for tok in ('anything', '', ' ', 'None', SERVICE_TOKEN):
+            with self.subTest(token=tok):
+                r = self.client.post(self.items_url, self._new_payload(code='SVC-EMPTY'),
+                                     format='json', **self._bearer(tok))
+                self.assertNotEqual(r.status_code, 500, f'Bearer {tok!r} produced a 500')
+                self.assertDenied(r, f'KLIKK_API_TOKEN="" + Bearer {tok!r}')
+        self.assertFalse(
+            PriceListItem.objects.filter(code='SVC-EMPTY').exists(),
+            'EMPTY-SECRET BYPASS: with KLIKK_API_TOKEN unset a bearer credential still '
+            'authenticated and the write went through',
+        )
+        self.assertNoWrite(before, 'KLIKK_API_TOKEN="" with a bearer credential')
+
+    def test_empty_setting_plus_bare_bearer_scheme_is_denied(self):
+        """The exact '' == '' shape: empty setting AND an empty credential."""
+        before = self._snapshot()
+        for header in ('Bearer', 'Bearer ', 'bearer ', 'Bearer  '):
+            with self.subTest(header=header):
+                r = self.client.post(self.items_url, self._new_payload(code='SVC-EMPTY2'),
+                                     format='json', **self._hdr(header))
+                self.assertNotEqual(r.status_code, 500)
+                self.assertDenied(r, f'KLIKK_API_TOKEN="" + {header!r}')
+        self.assertFalse(PriceListItem.objects.filter(code='SVC-EMPTY2').exists())
+        self.assertNoWrite(before, 'KLIKK_API_TOKEN="" + a bare Bearer scheme')
+
+    def test_empty_setting_no_header_denied_on_all_three_writes(self):
+        """(7b) KLIKK_API_TOKEN='' + no header → all three writes denied, nothing written."""
+        before = self._snapshot()
+
+        r = self.client.post(self.items_url, self._new_payload(code='SVC-EMPTY3'), format='json')
+        self.assertNotEqual(r.status_code, 500)
+        self.assertDenied(r, 'POST /items/ (token unset, no header)')
+        self.assertFalse(PriceListItem.objects.filter(code='SVC-EMPTY3').exists())
+
+        r = self.client.patch(self._url('item_detail', 'DB-V10P'), {'name': 'HIJACKED'}, format='json')
+        self.assertNotEqual(r.status_code, 500)
+        self.assertDenied(r, 'PATCH /items/DB-V10P/ (token unset, no header)')
+        self.assertEqual(PriceListItem.objects.get(code='DB-V10P').name, 'd&b V10P point-source top')
+
+        r = self.client.post(self._url('item_prices', 'DB-V10P'),
+                             {'price': '9999.00', 'valid_from': '2026-03-01'}, format='json')
+        self.assertNotEqual(r.status_code, 500)
+        self.assertDenied(r, 'POST prices (token unset, no header)')
+        self.assertIsNone(self._list_row().valid_to)
+
+        self.assertNoWrite(before, 'KLIKK_API_TOKEN="" with no Authorization header')
+
+    def test_missing_setting_entirely_is_denied_not_500(self):
+        """ROBUSTNESS, BEYOND THE LITERAL CONTRACT (the contract guarantees base.py defines
+        KLIKK_API_TOKEN). The realistic scenario is a deploy where permissions.py lands
+        before settings/base.py, or a settings module that does not import base. Reading the
+        setting with ``getattr(settings, 'KLIKK_API_TOKEN', '')`` costs nothing and turns a
+        500 into a denial. Failing this is advisory, not a contract breach."""
+        before = self._snapshot()
+        with override_settings():
+            from django.conf import settings as dj_settings
+            if hasattr(dj_settings, 'KLIKK_API_TOKEN'):
+                del dj_settings.KLIKK_API_TOKEN
+            r = self.client.post(self.items_url, self._new_payload(code='SVC-NOSETTING'), format='json')
+            self.assertNotEqual(
+                r.status_code, 500,
+                f'KLIKK_API_TOKEN absent from settings produced a 500 — read it with '
+                f'getattr(settings, "KLIKK_API_TOKEN", ""): {r.content[:300]!r}',
+            )
+            self.assertDenied(r, 'KLIKK_API_TOKEN absent from settings')
+        self.assertFalse(PriceListItem.objects.filter(code='SVC-NOSETTING').exists())
+        self.assertNoWrite(before, 'KLIKK_API_TOKEN absent from settings')
+
+
+# --------------------------------------------------------------------------- #
+# 9c. Success — the correct token, on all three write actions
+# --------------------------------------------------------------------------- #
+@override_settings(KLIKK_API_TOKEN=SERVICE_TOKEN)
+class ServiceTokenSuccessTests(ServiceTokenTestBase):
+    def test_post_items_with_token_creates_the_row(self):
+        """(8) 201 AND the row is in the DB with the values that were sent.
+
+        Also the ordering canary: if ServiceTokenAuthentication is not FIRST in
+        DEFAULT_AUTHENTICATION_CLASSES, JWTAuthentication sees the Bearer header first,
+        fails to decode the shared secret as a JWT and raises 401 before our authenticator
+        ever runs. A 401 here means the registration order is wrong.
+        """
+        r = self.client.post(self.items_url,
+                             {'code': 'svc-cdj3000 ', 'name': 'Pioneer CDJ-3000', 'category': 'dj',
+                              'unit': 'day', 'qty_owned': 4, 'notes': 'via service token'},
+                             format='json', **self._bearer())
+        self.assertEqual(r.status_code, 201, r.content)
+        row = PriceListItem.objects.get(code='SVC-CDJ3000')
+        self.assertEqual(row.name, 'Pioneer CDJ-3000')
+        self.assertEqual(row.category, 'DJ')
+        self.assertEqual(row.unit, 'DAY')
+        self.assertEqual(row.qty_owned, 4)
+        self.assertEqual(row.notes, 'via service token')
+        self.assertTrue(r.json()['created'])
+
+    def test_post_items_with_token_and_opening_price_writes_both_rows(self):
+        """The atomic item+opening-price branch must work through the gate too."""
+        r = self.client.post(self.items_url,
+                             {'code': 'SVC-OPEN', 'name': 'With opening price', 'category': 'PA',
+                              'price': '123.45', 'valid_from': '2026-01-01'},
+                             format='json', **self._bearer())
+        self.assertEqual(r.status_code, 201, r.content)
+        item = PriceListItem.objects.get(code='SVC-OPEN')
+        row = item.prices.get()
+        self.assertEqual(row.price, Decimal('123.45'))
+        self.assertEqual(row.valid_from, D(2026, 1, 1))
+        self.assertIsNone(row.valid_to)
+
+    def test_post_items_replace_true_with_token_updates(self):
+        """(9) replace=true + token → 200 and the DB row is updated."""
+        r = self.client.post(self.items_url,
+                             {'code': 'DB-V10P', 'name': 'd&b V10P (renamed by service)',
+                              'category': 'PA', 'replace': True, 'qty_owned': 7},
+                             format='json', **self._bearer())
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertFalse(r.json()['created'])
+        self.top.refresh_from_db()
+        self.assertEqual(self.top.name, 'd&b V10P (renamed by service)')
+        self.assertEqual(self.top.qty_owned, 7)
+        # and the price history is untouched by a replace
+        self.assertEqual(self.top.prices.count(), 2)
+
+    def test_patch_item_with_token_changes_the_db_row(self):
+        """(10) PATCH + token → 200 and the DB row actually changed."""
+        r = self.client.patch(self._url('item_detail', 'DB-V10P'),
+                              {'name': 'patched by service', 'qty_owned': 11, 'notes': 'ok'},
+                              format='json', **self._bearer())
+        self.assertEqual(r.status_code, 200, r.content)
+        fresh = PriceListItem.objects.get(code='DB-V10P')
+        self.assertEqual(fresh.name, 'patched by service')
+        self.assertEqual(fresh.qty_owned, 11)
+        self.assertEqual(fresh.notes, 'ok')
+
+    def test_put_item_with_token_changes_the_db_row(self):
+        r = self.client.put(self._url('item_detail', 'DB-V10P'), {'name': 'put by service'},
+                            format='json', **self._bearer())
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(PriceListItem.objects.get(code='DB-V10P').name, 'put by service')
+
+    def test_post_price_with_token_creates_row_and_closes_previous(self):
+        """(11) 201, the new row exists open, AND the previous open row's valid_to is the
+        day BEFORE valid_from — i.e. the effective-dating side effect really ran."""
+        r = self.client.post(self._url('item_prices', 'DB-V10P'),
+                             {'price': '900', 'valid_from': '2026-03-01', 'set_by': 'svc',
+                              'note': 'rate rise'},
+                             format='json', **self._bearer())
+        self.assertEqual(r.status_code, 201, r.content)
+        self.top.refresh_from_db()
+        self.assertEqual(self.top.prices.count(), 3)
+        new = PriceListPrice.objects.get(item=self.top, price_type='LIST', valid_from=D(2026, 3, 1))
+        self.assertEqual(new.price, Decimal('900.00'))
+        self.assertIsNone(new.valid_to)
+        self.assertEqual(new.set_by, 'svc')
+        closed = PriceListPrice.objects.get(item=self.top, price_type='LIST', valid_from=D(2025, 12, 3))
+        self.assertEqual(closed.valid_to, D(2026, 3, 1) - ONE_DAY)
+        self.assertEqual(closed.valid_to, D(2026, 2, 28))
+        self.assertEqual(r.json()['closed_previous']['valid_to'], '2026-02-28')
+
+    def test_token_write_does_not_persist_a_user(self):
+        """ServiceAccount is a stand-in, not a row. A service write must not create a User."""
+        UserModel = get_user_model()
+        before = UserModel.objects.count()
+        r = self.client.post(self.items_url, self._new_payload(code='SVC-NOUSER'),
+                             format='json', **self._bearer())
+        self.assertEqual(r.status_code, 201, r.content)
+        self.assertEqual(UserModel.objects.count(), before,
+                         'the service account was persisted as a real User row')
+
+    def test_success_response_never_echoes_the_token(self):
+        r = self.client.post(self.items_url, self._new_payload(code='SVC-NOECHO'),
+                             format='json', **self._bearer())
+        self.assertEqual(r.status_code, 201, r.content)
+        self.assertNotIn(SERVICE_TOKEN, r.content.decode('utf-8', 'replace'))
+
+    def test_reads_still_work_while_holding_a_valid_token(self):
+        """A valid service token must not break the read endpoints (e.g. by producing a
+        ServiceAccount that some downstream code cannot handle)."""
+        self.assertEqual(self.client.get(self.items_url, **self._bearer()).status_code, 200)
+        self.assertEqual(self.client.get(self._url('item_detail', 'DB-V10P'), **self._bearer()).status_code, 200)
+        self.assertEqual(self.client.get(self._url('export'), **self._bearer()).status_code, 200)
+        r = self.client.post(self._url('quote'), {'lines': [{'code': 'DB-V10P', 'qty': 1, 'days': 1}]},
+                             format='json', **self._bearer())
+        self.assertEqual(r.status_code, 200, r.content)
+
+
+# --------------------------------------------------------------------------- #
+# 9d. No regression on reads or on /quote/
+# --------------------------------------------------------------------------- #
+class ServiceTokenReadRegressionTests(ServiceTokenTestBase):
+    READ_CASES = (
+        ('items', None),
+        ('item_detail', 'DB-V10P'),
+        ('item_price', 'DB-V10P'),
+        ('item_prices', 'DB-V10P'),
+        ('export', None),
+    )
+
+    def test_all_reads_stay_open_with_no_header_token_set_and_unset(self):
+        """(12) Every GET must be 200 with NO Authorization header, whether or not
+        KLIKK_API_TOKEN is configured."""
+        for token_setting in (SERVICE_TOKEN, ''):
+            for name, code in self.READ_CASES:
+                with self.subTest(KLIKK_API_TOKEN=token_setting or '<unset>', endpoint=name):
+                    with override_settings(KLIKK_API_TOKEN=token_setting):
+                        r = self.client.get(self._url(name, code))
+                    self.assertEqual(r.status_code, 200,
+                                     f'GET {name} regressed to {r.status_code}: {r.content[:200]!r}')
+
+    def test_quote_stays_open_without_any_authorization_header(self):
+        """(13) POST /quote/ is a write-shaped method on a read-only calculation. A blanket
+        "unsafe method ⇒ needs a token" rule applied at the wrong level (settings-wide
+        DEFAULT_PERMISSION_CLASSES, or the decorator pasted onto quote_view) breaks the
+        console's quote builder for every anonymous caller. This is the regression."""
+        for token_setting in (SERVICE_TOKEN, ''):
+            with self.subTest(KLIKK_API_TOKEN=token_setting or '<unset>'):
+                with override_settings(KLIKK_API_TOKEN=token_setting):
+                    r = self.client.post(
+                        self._url('quote'),
+                        {'lines': [{'code': 'DB-V10P', 'qty': 4, 'days': 3},
+                                   {'code': 'DB-D40', 'qty': 1, 'days': 3}],
+                         'date': '2026-02-01'},
+                        format='json',
+                    )
+                self.assertEqual(r.status_code, 200,
+                                 f'POST /quote/ regressed to {r.status_code}: {r.content[:300]!r}')
+                self.assertEqual(r.json()['lines'][0]['unit_price'], '850.00')
+        self.assertEqual(PriceListPrice.objects.count(), 4, '/quote/ must persist nothing')
+
+    def test_quote_400_path_is_still_a_400_not_an_auth_error(self):
+        """A bad /quote/ body must still be the app's 400, not a 401/403 — proof the request
+        reached the view rather than being stopped by a permission class."""
+        with override_settings(KLIKK_API_TOKEN=SERVICE_TOKEN):
+            r = self.client.post(self._url('quote'), {'lines': []}, format='json')
+        self.assertEqual(r.status_code, 400, r.content)
+        self.assertIn('lines', r.json()['detail'])
+
+    @override_settings(KLIKK_API_TOKEN=SERVICE_TOKEN)
+    def test_get_with_a_garbage_bearer_header_documented_behaviour(self):
+        """(14) KNOWN CONSEQUENCE, not a wish.
+
+        A GET is permitted by HasServiceToken (SAFE_METHODS), but AUTHENTICATION runs before
+        PERMISSIONS. ServiceTokenAuthentication returns None on a non-matching token so the
+        chain falls through to JWTAuthentication, which RAISES on a non-JWT bearer value
+        rather than returning None. That exception short-circuits the request, so an open
+        read endpoint answers 401 when the caller volunteers a junk Bearer header.
+
+        That is DRF's documented authenticator contract (raise = stop the chain), it predates
+        this feature, and it only affects callers who send a broken credential they did not
+        need to send. Asserted here so the behaviour is pinned rather than discovered in
+        production; if it ever becomes 200 that is a change worth noticing, not a silent win.
+        """
+        r = self.client.get(self.items_url, **self._bearer('garbage'))
+        self.assertEqual(
+            r.status_code, 401,
+            f'expected the documented 401 from JWTAuthentication on a junk Bearer header; '
+            f'got {r.status_code} {r.content[:300]!r}',
+        )
+        # ...and it is genuinely the authenticator, not the permission class: the same GET
+        # with no header at all is fine.
+        self.assertEqual(self.client.get(self.items_url).status_code, 200)
+
+
+# --------------------------------------------------------------------------- #
+# 9e. The console (a real logged-in Django user) must still be able to write
+# --------------------------------------------------------------------------- #
+@override_settings(KLIKK_API_TOKEN='')
+class ConsoleUserWriteTests(ServiceTokenTestBase):
+    """(15) KLIKK_API_TOKEN deliberately UNSET: the console must not depend on the shared
+    secret existing. force_authenticate bypasses the authenticators and sets request.user,
+    which is exactly the console/session path HasServiceToken's second clause covers."""
+
+    def setUp(self):
+        super().setUp()
+        self.user = get_user_model().objects.create_user(
+            username='console-mc', email='mc@example.test', password='pw-not-used-by-force-auth')
+        self.client.force_authenticate(user=self.user)
+
+    def test_console_user_can_post_items(self):
+        r = self.client.post(self.items_url,
+                             {'code': 'CON-1', 'name': 'Console item', 'category': 'PA'}, format='json')
+        self.assertEqual(r.status_code, 201, r.content)
+        self.assertTrue(PriceListItem.objects.filter(code='CON-1').exists())
+
+    def test_console_user_can_patch_item(self):
+        r = self.client.patch(self._url('item_detail', 'DB-V10P'),
+                              {'name': 'console rename', 'qty_owned': 2}, format='json')
+        self.assertEqual(r.status_code, 200, r.content)
+        fresh = PriceListItem.objects.get(code='DB-V10P')
+        self.assertEqual(fresh.name, 'console rename')
+        self.assertEqual(fresh.qty_owned, 2)
+
+    def test_console_user_can_post_price_and_close_previous(self):
+        r = self.client.post(self._url('item_prices', 'DB-V10P'),
+                             {'price': '910', 'valid_from': '2026-04-01'}, format='json')
+        self.assertEqual(r.status_code, 201, r.content)
+        self.assertEqual(
+            PriceListPrice.objects.get(item=self.top, price_type='LIST', valid_from=D(2025, 12, 3)).valid_to,
+            D(2026, 3, 31))
+        self.assertIsNone(
+            PriceListPrice.objects.get(item=self.top, price_type='LIST', valid_from=D(2026, 4, 1)).valid_to)
+
+    def test_inactive_user_is_not_treated_as_authenticated(self):
+        """An INACTIVE user must not be able to write. ``is_authenticated`` is True even for
+        an inactive user object, so a permission that only checks that flag will let a
+        disabled account keep writing. Driven through the real authenticator chain (a JWT
+        for the disabled user) rather than force_authenticate, which would bypass the
+        is_active check that lives in authentication.
+        """
+        from rest_framework_simplejwt.tokens import AccessToken
+        disabled = get_user_model().objects.create_user(
+            username='disabled-mc', email='x@example.test', password='pw', is_active=False)
+        token = str(AccessToken.for_user(disabled))
+        client = APIClient()
+        client.raise_request_exception = False
+        r = client.post(self.items_url, {'code': 'CON-DISABLED', 'name': 'nope', 'category': 'PA'},
+                        format='json', HTTP_AUTHORIZATION=f'Bearer {token}')
+        self.assertIn(r.status_code, (401, 403),
+                      f'a DISABLED user wrote to the rate card: {r.status_code} {r.content[:300]!r}')
+        self.assertFalse(PriceListItem.objects.filter(code='CON-DISABLED').exists())
+
+
+# --------------------------------------------------------------------------- #
+# 9f. Structural: the decorator is on EXACTLY the three write views
+#
+# Supplementary to the endpoint tests above, not a substitute for them. It exists
+# because "NOT applied to item_price_view / export_view" is otherwise unobservable
+# over HTTP (both are GET-only, and HasServiceToken allows SAFE_METHODS), and
+# because @permission_classes silently no-ops if it is stacked ABOVE @api_view
+# instead of below it.
+# --------------------------------------------------------------------------- #
+class ServiceTokenWiringTests(TestCase):
+    GATED = ('items_view', 'item_detail_view', 'item_prices_view')
+    OPEN = ('quote_view', 'export_view', 'item_price_view')
+
+    def _permission_classes(self, view_name):
+        from . import views as pricelist_views
+        view = getattr(pricelist_views, view_name)
+        cls = getattr(view, 'cls', None)
+        self.assertIsNotNone(cls, f'{view_name} is not an @api_view-wrapped view')
+        return tuple(getattr(cls, 'permission_classes', ()))
+
+    def test_permission_class_is_on_exactly_the_three_write_views(self):
+        from klikk_business_intelligence.permissions import HasServiceToken
+        for name in self.GATED:
+            with self.subTest(view=name):
+                self.assertIn(HasServiceToken, self._permission_classes(name),
+                              f'{name} is NOT gated by HasServiceToken (is @permission_classes '
+                              f'stacked ABOVE @api_view? that silently does nothing)')
+        for name in self.OPEN:
+            with self.subTest(view=name):
+                self.assertNotIn(HasServiceToken, self._permission_classes(name),
+                                 f'{name} must stay open — the contract names exactly three gated views')
+
+    def test_service_token_authentication_is_registered_first(self):
+        """If it is not FIRST, JWTAuthentication raises on the shared secret before our
+        authenticator is ever consulted and every token write 401s."""
+        from django.conf import settings as dj_settings
+        classes = dj_settings.REST_FRAMEWORK['DEFAULT_AUTHENTICATION_CLASSES']
+        self.assertTrue(
+            str(classes[0]).endswith('ServiceTokenAuthentication'),
+            f'ServiceTokenAuthentication must be the FIRST authentication class; got {classes}',
+        )
+
+    def test_service_account_is_not_a_model_instance(self):
+        from django.db import models as django_models
+
+        from klikk_business_intelligence.permissions import ServiceAccount
+        account = ServiceAccount()
+        self.assertTrue(account.is_authenticated)
+        self.assertFalse(isinstance(account, django_models.Model),
+                         'ServiceAccount must be a non-persisted stand-in, not a Django model')
+        self.assertIsNone(getattr(account, 'pk', None),
+                          'ServiceAccount must not carry a primary key')
+
+    def test_klikk_api_token_setting_exists_and_is_a_string(self):
+        from django.conf import settings as dj_settings
+        self.assertIsInstance(getattr(dj_settings, 'KLIKK_API_TOKEN', None), str,
+                              'KLIKK_API_TOKEN must exist and default to "" when the env var is unset')
+
+    def test_token_is_read_at_request_time_not_import_time(self):
+        """override_settings must actually take effect. If the authenticator snapshots
+        ``settings.KLIKK_API_TOKEN`` into a module-level constant at import, the value is
+        frozen to whatever the environment held when Django booted — the setting becomes
+        un-rotatable without a restart, and every override_settings test above is silently
+        meaningless."""
+        client = APIClient()
+        client.raise_request_exception = False
+        url = reverse('pricelist:items')
+        with override_settings(KLIKK_API_TOKEN='first-secret'):
+            r = client.post(url, {'code': 'RT-1', 'name': 'rt', 'category': 'PA'},
+                            format='json', HTTP_AUTHORIZATION='Bearer first-secret')
+            self.assertEqual(r.status_code, 201, f'token not read at request time: {r.content[:300]!r}')
+        with override_settings(KLIKK_API_TOKEN='second-secret'):
+            r = client.post(url, {'code': 'RT-2', 'name': 'rt', 'category': 'PA'},
+                            format='json', HTTP_AUTHORIZATION='Bearer first-secret')
+            self.assertIn(r.status_code, (401, 403),
+                          'the OLD token still authenticated after the setting was rotated — '
+                          'KLIKK_API_TOKEN is cached at import time')
+            self.assertFalse(PriceListItem.objects.filter(code='RT-2').exists())
+            r = client.post(url, {'code': 'RT-3', 'name': 'rt', 'category': 'PA'},
+                            format='json', HTTP_AUTHORIZATION='Bearer second-secret')
+            self.assertEqual(r.status_code, 201, f'the rotated token was not honoured: {r.content[:300]!r}')
+
+# --------------------------------------------------------------------------- #
+# 9g. The 401-vs-403 challenge shape — a PROJECT-WIDE side effect
+#
+# Prepending an authentication class to DEFAULT_AUTHENTICATION_CLASSES changes the
+# status code of EVERY unauthenticated request in the project, not just this app's.
+# DRF derives the shape from ``get_authenticators()[0].authenticate_header()`` alone
+# (rest_framework/views.py: get_authenticate_header -> handle_exception) and coerces
+# NotAuthenticated / AuthenticationFailed to 403 when that returns None. So an
+# authentication class that omits ``authenticate_header`` silently turns every 401 in
+# klikk_financials — /xero/cube/*, /api/ai-agent/*, everything IsAuthenticated — into a
+# 403, breaking any client that branches on 401 to refresh its JWT.
+#
+# The denial tests above deliberately accept either 401 or 403, so none of them can catch
+# this. These two pin it explicitly, including one endpoint OUTSIDE apps.pricelist —
+# scope creep into another app's URL is intentional here: apps/pricelist/tests.py is the
+# only file this change is allowed to touch, and the blast radius is not local to it.
+# --------------------------------------------------------------------------- #
+@override_settings(KLIKK_API_TOKEN=SERVICE_TOKEN)
+class AuthChallengeShapeTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.client.raise_request_exception = False
+
+    def test_unauthenticated_pricelist_write_is_401_not_403(self):
+        r = self.client.post(reverse('pricelist:items'),
+                             {'code': 'SHAPE-1', 'name': 'shape', 'category': 'PA'}, format='json')
+        self.assertEqual(
+            r.status_code, 401,
+            f'expected 401 (the documented shape); got {r.status_code}. A 403 here means the '
+            f'first authentication class does not implement authenticate_header()',
+        )
+        self.assertEqual(r['WWW-Authenticate'], 'Bearer realm="api"')
+        self.assertFalse(PriceListItem.objects.filter(code='SHAPE-1').exists())
+
+    def test_unauthenticated_view_in_another_app_still_returns_401(self):
+        """Regression canary for the rest of the backend: an IsAuthenticated view that has
+        nothing to do with the rate card must still answer 401, not 403."""
+        r = self.client.get(reverse('xero_cube:xero-data-summary'))
+        self.assertEqual(
+            r.status_code, 401,
+            f'/xero/cube/summary/ now answers {r.status_code} instead of 401 — prepending '
+            f'ServiceTokenAuthentication changed the challenge shape for the WHOLE project',
+        )
+        self.assertEqual(r['WWW-Authenticate'], 'Bearer realm="api"')

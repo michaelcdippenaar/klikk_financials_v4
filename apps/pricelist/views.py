@@ -14,6 +14,14 @@ POST  /api/pricelist/quote/  {lines:[{code,qty,days}], customer?, date?, discoun
                                                                               pure quote calc — persists nothing
 GET   /api/pricelist/export/?date=&customer=&active=                          CSV of the rate card
 
+The three write actions — POST /items/, PATCH|PUT /items/<code>/ and
+POST /items/<code>/prices/ — require either Authorization: Bearer <KLIKK_API_TOKEN>
+(the machine callers: the klikk-financials MCP server) or a logged-in console user,
+whose JWT satisfies the same permission. Every GET, and POST /quote/ (a pure
+calculation that persists nothing), stay open — matching the rest of the backend.
+See klikk_business_intelligence/permissions.py for why the token needs an
+authentication class and not merely a permission class.
+
 Writes touch only pricelist_* tables. Xero is never called; customer / purchase
 line / tracking lookups are against the local mirror.
 """
@@ -28,8 +36,10 @@ from django.db.models import Q
 from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.decorators import api_view
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
+
+from klikk_business_intelligence.permissions import HasServiceToken
 
 from .models import (
     CATEGORY_VALUES, PRICE_TYPE_VALUES, UNIT_VALUES, PriceListItem,
@@ -158,7 +168,15 @@ def _apply_item_fields(item, data, *, partial):
 # --------------------------------------------------------------------------- #
 # /items/
 # --------------------------------------------------------------------------- #
+# SECURITY (2026-08-19): the three write actions below carry HasServiceToken. They are
+# internet-reachable via the Caddy edge (console.8-bit.space/backend/*) and they mutate the
+# rate card, so an unauthenticated caller must not reach them. Two callers are allowed: the
+# klikk-financials MCP server, which sends Authorization: Bearer <KLIKK_API_TOKEN>, and the
+# console, which sends a Bearer JWT (klikk_portal src/api/client.js). Reads and POST /quote/
+# are deliberately NOT covered — locking those is a project-wide decision, not a pricelist
+# one. Do NOT drop these decorators.
 @api_view(['GET', 'POST'])
+@permission_classes([HasServiceToken])
 def items_view(request):
     if request.method == 'GET':
         try:
@@ -223,6 +241,7 @@ def items_view(request):
 # /items/<code>/
 # --------------------------------------------------------------------------- #
 @api_view(['GET', 'PATCH', 'PUT'])
+@permission_classes([HasServiceToken])
 def item_detail_view(request, code):
     item = _item_or_404(code)
     if item is None:
@@ -272,6 +291,7 @@ def item_price_view(request, code):
 
 
 @api_view(['GET', 'POST'])
+@permission_classes([HasServiceToken])
 def item_prices_view(request, code):
     item = _item_or_404(code)
     if item is None:

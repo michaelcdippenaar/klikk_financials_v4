@@ -161,9 +161,17 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # Custom User Model
 AUTH_USER_MODEL = 'user.User'
 
+# Shared service token for machine callers (the klikk-financials MCP server) that have no
+# Django user. Consumed by klikk_business_intelligence.permissions.ServiceTokenAuthentication.
+# Unset => service-token writes are denied (a warning is logged once).
+KLIKK_API_TOKEN = (os.environ.get('KLIKK_API_TOKEN') or '').strip()
+
 # REST Framework Configuration
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        # Must run BEFORE JWTAuthentication: that class raises InvalidToken (401) on an opaque
+        # Bearer token, so a permission class alone could never accept the service token.
+        'klikk_business_intelligence.permissions.ServiceTokenAuthentication',  # Shared service token (MCP)
         'rest_framework_simplejwt.authentication.JWTAuthentication',  # JWT authentication
         'rest_framework.authentication.TokenAuthentication',  # Keep for backward compatibility
         'rest_framework.authentication.SessionAuthentication',

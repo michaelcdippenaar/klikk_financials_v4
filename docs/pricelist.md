@@ -431,12 +431,54 @@ The export honours `active`, `customer`, `category` and `q`, with the same seman
 
 ### Authentication
 
-**These endpoints are not authenticated.** The app defines no `permission_classes`, so it inherits the project default in `REST_FRAMEWORK` — `rest_framework.permissions.AllowAny` — exactly like the existing `/audit/` endpoints. That includes the write endpoints: `POST /items/`, `PATCH /items/<code>/` and `POST /items/<code>/prices/`.
+**The three write actions need a token now. Everything else does not.**
 
-This was left consistent with the existing apps rather than locked down unilaterally, because the MCP container currently runs **without** a `KLIKK_API_TOKEN` (`Dockerfile.mcp` sets only `KLIKK_API_BASE_URL`; `server.mjs` sends an `Authorization: Bearer` header only when `KLIKK_API_TOKEN` is set). Requiring authentication on the pricelist writes alone would break the MCP tools on the next deploy.
+`POST /items/`, `PATCH`/`PUT /items/<code>/` and `POST /items/<code>/prices/` — the only three requests in this app that change a row — require one of two things:
 
-**Open item for MC:** decide whether the backend API should require authentication generally. If yes, that is a project-wide change (pricelist, audit, and the rest), plus issuing a token to the MCP container. It is not a pricelist decision.
+- **the shared service token**, sent as `Authorization: Bearer <KLIKK_API_TOKEN>`. This is how the klikk-financials MCP server writes: it is a machine caller with no Django user to log in as; or
+- **a logged-in console user.** The console already sends a Bearer JWT on every request (`klikk_portal/src/api/client.js`), and that JWT satisfies the same permission — so the Price List page keeps editing exactly as it did, and you do not need to give the console a token.
 
+Anything else gets **401** with `WWW-Authenticate: Bearer realm="api"` and `{"detail": "Authentication credentials were not provided."}`, and nothing is written. A *wrong* Bearer token also gets 401, but with simplejwt's message (`{"detail": "Given token not valid for any token type", "code": "token_not_valid"}`) — the service token is checked first and, when it does not match, the request falls through to the JWT layer, which rejects it.
+
+**One behaviour change to know about:** an unauthenticated `PATCH`/`PUT /items/<code>/` on a code that does not exist now returns **401, not 404**. The permission runs before the lookup, so an anonymous caller can no longer probe which item codes exist. That is the better answer, but it is a change — if you have a script that treats 404 as safe to create, give it the token.
+
+**Every GET stays open, and so does `POST /quote/`** — a quote is a pure calculation that persists nothing, so it is a read in everything but the HTTP verb. That is consistent with the rest of the backend: `/audit/`, `/xero/data/` and `/api/investec/` are all `AllowAny` today. Treat this as a **known gap, not a decision**: those reads are internet-reachable at `https://console.8-bit.space/backend/`, so anyone who finds the URL can read the whole rate card. It is tracked in `SECURITY-NOTE.md` at the repo root. Closing it is a project-wide change — pricelist, audit, xero_data and the rest, in one pass — not a pricelist one.
+
+**If `KLIKK_API_TOKEN` is unset, token writes are simply denied.** The first write attempt logs one warning — `KLIKK_API_TOKEN is not set, so service-token writes are denied…` — and never logs it again for the life of the process, and never logs the token value. Console writes carry on working, because they authenticate as a user rather than as a token.
+
+Writing with the token:
+
+```bash
+curl -s -X POST 'https://console.8-bit.space/backend/api/pricelist/items/DB-D40/prices/' \
+  -H "Authorization: Bearer $KLIKK_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"price": "1500.00", "valid_from": "2026-09-01", "note": "2026 rate card", "set_by": "mc"}'
+```
+
+The same call with the header left off:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' \
+  -X POST 'https://console.8-bit.space/backend/api/pricelist/items/DB-D40/prices/' \
+  -H 'Content-Type: application/json' \
+  -d '{"price": "1500.00", "valid_from": "2026-09-01"}'
+# 401
+```
+
+**How to set it.** Generate the value once —
+
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+— and put the *same* value in two places:
+
+1. **The Django container**, so the API has something to compare against. Add `KLIKK_API_TOKEN=…` to `compose/klikk_financials_v4/.env.app-docker` and restart `klikk-financials-v4`. For a local run, `.env` or `.env.local` in the repo root works too — `settings/base.py` loads both at import time, and a real environment variable always wins over the file. `.env.example` carries the placeholder.
+2. **The MCP container**, so it sends it. `mcp/stock-market/server.mjs` reads `KLIKK_API_TOKEN` at startup and attaches `Authorization: Bearer <token>` to every backend call when it is set — and sends no auth header at all when it is not. `Dockerfile.mcp` sets only `KLIKK_API_BASE_URL`, so pass the token in as an environment variable on the `klikk-financials-mcp` container.
+
+Set it in one place and not the other and you get the confusing half-state: the MCP's four read tools carry on working, while the two mutating ones (`pricelist_set_price`, `pricelist_upsert_item`) start coming back 401.
+
+The token is a shared secret with no expiry, no rotation and no per-caller identity — it says "a machine we trust", nothing more. That is why every write row still carries `set_by`: the token tells you the call was authorised, `set_by` tells you who to ask about it.
 ---
 
 ## 5. MCP tools
