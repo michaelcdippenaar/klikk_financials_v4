@@ -168,13 +168,19 @@ class TenantTokenData:
         self.tenant = None  # Will be set if needed
     
     def save(self):
-        """Save token data back to credentials.tenant_tokens."""
-        from django.utils import timezone
-        self.credentials.set_tenant_token_data(
-            tenant_id=self.tenant_id,
+        """Persist the token to EVERY tenant slot on these credentials.
+
+        The refresh token is per-APP (one token set covers every connected
+        organisation), so a token obtained/rotated while working on one tenant
+        is the same token every other tenant must use. Writing only this
+        tenant's slot is what let the four slots diverge into two families and
+        killed a tenant with invalid_grant 30 minutes later.
+        """
+        self.credentials.set_token_data_for_all_tenants(
             token_data=self.token,
             refresh_token=self.refresh_token,
-            expires_at=self.expires_at
+            expires_at=self.expires_at,
+            tenant_id=self.tenant_id,
         )
     
     def refresh_from_db(self):
@@ -428,11 +434,15 @@ class XeroApiClient:
 
     @staticmethod
     def _refresh_lock_ids(tenant_token):
-        """(classid, objid) advisory-lock pair for this credentials+tenant token."""
-        tenant_id = getattr(tenant_token, 'tenant_id', None) or (
-            tenant_token.tenant.tenant_id if getattr(tenant_token, 'tenant', None) else 'unknown'
-        )
-        objid = zlib.crc32(f"{tenant_token.credentials.pk}:{tenant_id}".encode())
+        """(classid, objid) advisory-lock pair for this APP CONNECTION's token.
+
+        Deliberately keyed on the credentials row ONLY. Xero issues one refresh
+        token per application, shared by every connected tenant, so including
+        the tenant_id here gave each tenant its own lock and serialised nothing
+        that actually races — two tenants could still refresh the one shared
+        token concurrently and rotate it away from each other.
+        """
+        objid = zlib.crc32(f"{tenant_token.credentials.pk}".encode())
         if objid >= 2 ** 31:  # pg advisory lock args are signed int4
             objid -= 2 ** 32
         return _XERO_REFRESH_LOCK_CLASSID, objid
@@ -442,8 +452,9 @@ class XeroApiClient:
 
         Xero ROTATES the refresh token on every use, so two processes refreshing
         concurrently leaves the loser holding a dead refresh token (401 /
-        invalid_grant — the 2026-08-18 incident). A Postgres advisory lock keyed
-        on (credentials, tenant) serializes the refresh; waiters re-check after
+        invalid_grant — the 2026-08-18 incident). The token is per-APP, so a
+        Postgres advisory lock keyed on the CREDENTIALS row alone serializes
+        every tenant's refresh through one gate; waiters re-check after
         acquiring the lock and reuse the winner's fresh token instead of
         refreshing again.
         """
