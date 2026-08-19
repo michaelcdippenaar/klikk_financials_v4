@@ -6,4 +6,5 @@ app_name = 'xero_sync'
 urlpatterns = [
     path('update/', views.XeroUpdateModelsView.as_view(), name='xero-update-models'),
     path('api-call-stats/', views.XeroApiCallStatsView.as_view(), name='xero-api-call-stats'),
+    path('process-status/', views.XeroProcessStatusView.as_view(), name='xero-process-status'),
 ]
