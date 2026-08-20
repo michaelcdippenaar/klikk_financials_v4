@@ -410,9 +410,14 @@ input:focus, select:focus {
 .modal[hidden] { display: none; }
 
 .modal__card {
+  /* Fills the pane rather than sitting in it. A task pane is narrow and the
+     member lists are the whole point of this dialog, so the lists get the
+     space and the chrome around them stays minimal. */
   width: 100%;
-  max-width: 560px;
-  max-height: 100%;
+  max-width: none;
+  height: 92vh;
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
   box-sizing: border-box;
   padding: 12px;
@@ -440,19 +445,28 @@ input:focus, select:focus {
 /* Two panes with the transfer buttons between them. The task pane can be
    narrow, so the columns flex and the buttons keep a fixed, thumb-sized
    column rather than being squeezed out. */
-.xfer { display: flex; align-items: stretch; gap: 6px; margin-top: 8px; }
+.xfer {
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
+  margin-top: 8px;
+  /* ~75% of the dialog: the two member lists are the work surface. */
+  flex: 1 1 auto;
+  min-height: 0;
+}
 .xfer__col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; }
 .xfer__lbl { font-size: 11px; opacity: .75; margin-bottom: 3px; }
 .xfer__col select {
   width: 100%;
   box-sizing: border-box;
-  flex: 1;
-  min-height: 190px;
+  flex: 1 1 auto;
+  min-height: 0;          /* let it shrink inside the flex column */
+  height: 100%;
   font-size: 12px;
   font-family: inherit;
 }
 .xfer__btns {
-  flex: 0 0 34px;
+  flex: 0 0 30px;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -461,3 +475,10 @@ input:focus, select:focus {
 .xfer__btns .btn { width: 100%; padding: 4px 0; font-size: 14px; line-height: 1; }
 
 .modal__card input[type="search"] { width: 100%; box-sizing: border-box; }
+
+/* Saved subsets / saved views — the reuse bar. */
+.saved { margin-top: 8px; }
+.saved__row { display: flex; gap: 5px; align-items: center; margin-top: 4px; }
+.saved__row select,
+.saved__row input[type="text"] { flex: 1; min-width: 0; box-sizing: border-box; }
+.saved__row .btn { flex: 0 0 auto; }

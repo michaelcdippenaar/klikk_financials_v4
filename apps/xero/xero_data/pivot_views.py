@@ -184,7 +184,15 @@ def parse_dim_filters(p):
             raise ValueError('unknown dimension in dimf: %s' % k)
         vals = [str(x) for x in (v or []) if str(x) != '']
         if vals:
-            out[k] = set(vals)
+            # A LIST, not a set: a subset is an ordered sequence. The order the
+            # user arranged in the subset editor is how the rows and columns
+            # are laid out, so it has to survive the round trip.
+            seen, ordered = set(), []
+            for x in vals:
+                if x not in seen:
+                    seen.add(x)
+                    ordered.append(x)
+            out[k] = ordered
     return out
 
 
@@ -320,7 +328,26 @@ class XeroJournalPivotView(APIView):
         row_label = [_labeller(d) for d in row_dims]
         col_label = [_labeller(d) for d in col_dims]
 
-        filter_tests = [(_labeller(d), dim_filters[d]) for d in dim_filters]
+        filter_tests = [(_labeller(d), set(dim_filters[d])) for d in dim_filters]
+
+        # label -> position, per dimension. Anything not in a subset sorts after
+        # everything that is, alphabetically, so an unsubsetted dimension keeps
+        # exactly the behaviour it had before ordering existed.
+        order_maps = {d: {v: i for i, v in enumerate(vals)}
+                      for d, vals in dim_filters.items()}
+
+        def axis_key(dims):
+            def key(path):
+                out = []
+                for i, d in enumerate(dims):
+                    label = path[i] if i < len(path) else ''
+                    om = order_maps.get(d)
+                    if om is not None and label in om:
+                        out.append((0, om[label], ''))
+                    else:
+                        out.append((1, 0, label))
+                return tuple(out)
+            return key
 
         cells = {}
         row_keys, col_keys = set(), set()
@@ -336,7 +363,9 @@ class XeroJournalPivotView(APIView):
             val = rec['_v'] or 0
             cells[(rk, ck)] = cells.get((rk, ck), 0) + val
 
-        ordered_cols = sorted(col_keys)
+        # Sorting by the subset order keeps parent prefixes contiguous, which is
+        # what _with_consolidations relies on, so drill grouping is unaffected.
+        ordered_cols = sorted(col_keys, key=axis_key(col_dims) if col_dims else None)
         cols_truncated = len(ordered_cols) > MAX_COLS
         if cols_truncated:
             ordered_cols = ordered_cols[:MAX_COLS]
@@ -348,7 +377,7 @@ class XeroJournalPivotView(APIView):
         suppress = p.get('suppress') in ('1', 'true', 'True')
         leaves = []
         zero_rows = 0
-        for rk in sorted(row_keys):
+        for rk in sorted(row_keys, key=axis_key(row_dims)):
             vec = [0] * ncols
             for ck, i in col_index.items():
                 v = cells.get((rk, ck))

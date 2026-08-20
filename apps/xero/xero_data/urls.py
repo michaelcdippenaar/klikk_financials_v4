@@ -1,5 +1,5 @@
 from django.urls import path, re_path
-from apps.xero.xero_data import views, pivot_views, pivot_comments
+from apps.xero.xero_data import views, pivot_views, pivot_comments, cube_saved, document_views
 
 app_name = 'xero_data'
 
@@ -10,6 +10,8 @@ urlpatterns = [
     path('journals/pivot/dimensions/', pivot_views.XeroJournalPivotDimensionsView.as_view(), name='journal_pivot_dims'),
     path('journals/pivot/members/', pivot_views.XeroCubeMembersView.as_view(), name='journal_pivot_members'),
     path('journals/pivot/drill/', pivot_views.XeroCubeDrillView.as_view(), name='journal_pivot_drill'),
+    path('journals/pivot/subsets/', cube_saved.XeroCubeSubsetsView.as_view(), name='journal_pivot_subsets'),
+    path('journals/pivot/views/', cube_saved.XeroCubeViewsView.as_view(), name='journal_pivot_views'),
     path('journals/pivot/comments/', pivot_comments.XeroCubeCommentsView.as_view(), name='cube_comments'),
     path('journals/pivot/comments/<int:comment_id>/status/', pivot_comments.XeroCubeCommentStatusView.as_view(), name='cube_comment_status'),
     path('update/journals/', views.XeroUpdateDataView.as_view(), name='update_data'),
@@ -17,6 +19,8 @@ urlpatterns = [
     path('process/journals/', views.XeroProcessJournalsView.as_view(), name='process_journals'),
     re_path(r'^process/journals$', views.XeroProcessJournalsView.as_view(), name='process_journals_no_slash'),
     path('sync/documents/', views.XeroSyncDocumentsView.as_view(), name='sync_documents'),
+    path('documents/search/', document_views.XeroDocumentSearchView.as_view(), name='document_search'),
+    path('documents/<int:document_id>/file/', document_views.xero_document_file_view, name='document_file'),
     path('documents/by-transaction/<str:transaction_id>/', views.XeroDocumentsByTransactionView.as_view(), name='documents_by_transaction'),
 
     # Aged reports — sync triggers

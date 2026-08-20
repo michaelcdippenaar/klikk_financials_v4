@@ -134,6 +134,9 @@
       'pickerAvail', 'pickerSel', 'pickerAvailCount', 'pickerSelCount',
       'btnPickAdd', 'btnPickAddAll', 'btnPickRemove', 'btnPickRemoveAll',
       'pickerApply', 'pickerCancel', 'pickerMsg',
+      'btnPickUp', 'btnPickDown', 'btnPickSortAz',
+      'subsetPick', 'subsetName', 'btnSubsetLoad', 'btnSubsetSave', 'btnSubsetDelete',
+      'viewPick', 'viewName', 'btnViewLoad', 'btnViewSave', 'btnViewDelete',
       'commentPanel', 'commentAuthor', 'btnSyncComments', 'commentMsg',
       'btnFullPivot', 'selNone', 'selHas', 'selPath', 'selVal', 'selComment',
       'btnSaveComment', 'btnDeleteComment', 'selBox', 'markCells', 'btnPushComments',
@@ -202,6 +205,18 @@
     el.btnSaveComment.addEventListener('click', function () { run(saveSelectedComment); });
     el.btnDeleteComment.addEventListener('click', function () { run(deleteSelectedComment); });
     el.btnDrill.addEventListener('click', function () { run(drillSelection); });
+    el.btnViewSave.addEventListener('click', function () { run(saveCurrentView); });
+    el.btnViewLoad.addEventListener('click', function () { run(openSavedView); });
+    el.btnViewDelete.addEventListener('click', function () {
+      run(async function () {
+        var n = el.viewPick.value;
+        if (!n) throw new Error('Pick a saved view to delete.');
+        await apiDelete('/xero/data/journals/pivot/views/', { name: n });
+        await loadViewList();
+        el.cubeMsg.textContent = 'Deleted saved view "' + n + '". Sheets built from it are untouched.';
+        el.cubeMsg.className = 'msg';
+      });
+    });
     watchSelection();
     el.btnRefresh.addEventListener('click', function () { run(refreshActiveSheet); });
     el.btnRestore.addEventListener('click', restoreFiltersFromSheet);
@@ -374,6 +389,27 @@
     return res.json();
   }
 
+  async function apiDelete(path, params) {
+    var url = settings.baseUrl + path;
+    var qs = Object.keys(params || {})
+      .filter(function (k) { return params[k] !== '' && params[k] != null; })
+      .map(function (k) { return encodeURIComponent(k) + '=' + encodeURIComponent(params[k]); })
+      .join('&');
+    if (qs) url += '?' + qs;
+    var res;
+    try {
+      res = await fetch(url, {
+        method: 'DELETE',
+        headers: { Authorization: 'Token ' + settings.token, Accept: 'application/json' }
+      });
+    } catch (e) {
+      throw new Error('Cannot reach ' + settings.baseUrl + '.');
+    }
+    if (res.status === 401 || res.status === 403) throw new Error('Token rejected (' + res.status + ').');
+    if (!res.ok) throw new Error('Server returned ' + res.status + ' ' + res.statusText + '.');
+    return res.json();
+  }
+
   async function apiPost(path, body) {
     var res;
     try {
@@ -445,7 +481,10 @@
     var f = spec && spec.filters ? spec.filters : {};
     var live = {};
     Object.keys(f).forEach(function (k) {
-      if (f[k] && f[k].length) live[k] = f[k].slice().sort();
+      // NOT sorted. The subset's order is the layout order -- the server lays
+      // rows and columns out in exactly this sequence -- so sorting here would
+      // silently throw away the arrangement the user made.
+      if (f[k] && f[k].length) live[k] = f[k].slice();
     });
     return Object.keys(live).length ? { dimf: JSON.stringify(live) } : {};
   }
@@ -838,6 +877,7 @@
     reflowWells();
     wireWells();
     wirePicker();
+    loadViewList();   // async on purpose: the wells must not wait on it
   }
 
   function dimLabel(key) {
@@ -1146,6 +1186,7 @@
           Object.assign({}, toParams(qy), { dim: key }));
       }
       renderPicker();
+      await loadSubsetList();
     } catch (e) {
       el.pickerAvailCount.textContent = '';
       el.pickerMsg.textContent = e.message;
@@ -1217,6 +1258,109 @@
     pickerKey = null;
   }
 
+  /* Reordering. The subset is a sequence, and that sequence IS the layout
+     order -- the server lays rows and columns out in exactly this order -- so
+     moving an item here moves the row or column on the next build. */
+  function movePicked(delta) {
+    var chosen = chosenIn(el.pickerSel);
+    if (!chosen.length) {
+      el.pickerMsg.textContent = 'Pick an item on the right first, then move it.';
+      el.pickerMsg.className = 'msg';
+      return;
+    }
+    var idx = chosen.map(function (v) { return working.indexOf(v); })
+      .filter(function (i) { return i >= 0; })
+      .sort(function (a, b) { return delta < 0 ? a - b : b - a; });
+    // Walking from the leading edge means a block of selected items slides
+    // together instead of collapsing into each other.
+    for (var n = 0; n < idx.length; n++) {
+      var i = idx[n], j = i + delta;
+      if (j < 0 || j >= working.length) continue;
+      if (chosen.indexOf(working[j]) !== -1) continue;   // swapping with itself
+      var t = working[i]; working[i] = working[j]; working[j] = t;
+    }
+    renderPicker();
+    // Keep the moved items selected so the button can be pressed repeatedly.
+    Array.prototype.forEach.call(el.pickerSel.options, function (o) {
+      o.selected = chosen.indexOf(o.value) !== -1;
+    });
+  }
+
+  /* Saved subsets and saved views live on the server, not in this workbook.
+     A subset is shared analytical vocabulary: "the trading entities" must mean
+     the same three entities to MC, to the bookkeeper and to an agent, rather
+     than three private definitions that drift apart. */
+  async function loadSubsetList() {
+    if (!pickerKey) return;
+    fillSelect(el.subsetPick, [], '— none saved —');
+    try {
+      var d = await apiGet('/xero/data/journals/pivot/subsets/', { dimension: pickerKey });
+      var names = (d.results || []).map(function (r) {
+        return { value: r.name, label: r.name + ' (' + r.members.length + ')' };
+      });
+      savedSubsets = {};
+      (d.results || []).forEach(function (r) { savedSubsets[r.name] = r.members; });
+      fillSelect(el.subsetPick, names, names.length ? '— pick one —' : '— none saved —');
+    } catch (e) { /* the editor still works without saved subsets */ }
+  }
+
+  function fillSelect(sel, items, placeholder) {
+    sel.innerHTML = '';
+    var o0 = document.createElement('option');
+    o0.value = ''; o0.textContent = placeholder;
+    sel.appendChild(o0);
+    items.forEach(function (it) {
+      var o = document.createElement('option');
+      o.value = it.value; o.textContent = it.label;
+      sel.appendChild(o);
+    });
+  }
+
+  var savedSubsets = {};
+  var savedViews = {};
+
+  async function loadViewList() {
+    try {
+      var d = await apiGet('/xero/data/journals/pivot/views/', {});
+      savedViews = {};
+      (d.results || []).forEach(function (r) { savedViews[r.name] = r; });
+      fillSelect(el.viewPick, (d.results || []).map(function (r) {
+        return { value: r.name, label: r.name };
+      }), (d.results || []).length ? '— pick a view —' : '— none saved —');
+    } catch (e) { /* saved views are optional; the cube still builds */ }
+  }
+
+  async function saveCurrentView() {
+    var name = (el.viewName.value || '').trim();
+    if (!name) throw new Error('Name the view first.');
+    var spec = readCubeSpec();
+    var bad = validateCube(spec);
+    if (bad) throw new Error(bad);
+    // The journal filters travel with it. A view that renders different numbers
+    // depending on what the pane happened to be filtered to is not a saved view.
+    await apiPost('/xero/data/journals/pivot/views/', {
+      name: name, spec: spec, query: readQuery(),
+      author: (el.commentAuthor.value || '').trim()
+    });
+    el.viewName.value = '';
+    await loadViewList();
+    el.viewPick.value = name;
+    el.cubeMsg.textContent = 'Saved view "' + name + '" — layout, subsets and filters.';
+    el.cubeMsg.className = 'msg msg--ok';
+  }
+
+  async function openSavedView() {
+    var name = el.viewPick.value;
+    if (!name || !savedViews[name]) throw new Error('Pick a saved view first.');
+    var v = savedViews[name];
+    applyCubeSpec(v.spec || {});
+    if (v.query) applyQuery(v.query);
+    rememberCubeSpec();
+    el.cubeMsg.textContent = 'Opened "' + name + '". Build to write it to a sheet.';
+    el.cubeMsg.className = 'msg';
+    if (wells.rows.length) await buildCube();
+  }
+
   var pickerWired = false;
 
   function wirePicker() {
@@ -1245,6 +1389,49 @@
       reflowWells();
       rememberCubeSpec();
       if (el.autoBuild.checked && wells.rows.length) run(buildCube);
+    });
+
+    el.btnPickUp.addEventListener('click', function () { movePicked(-1); });
+    el.btnPickDown.addEventListener('click', function () { movePicked(1); });
+    el.btnPickSortAz.addEventListener('click', function () {
+      working.sort(function (a, b) { return a.localeCompare(b); });
+      renderPicker();
+    });
+
+    el.btnSubsetLoad.addEventListener('click', function () {
+      var n = el.subsetPick.value;
+      if (!n || !savedSubsets[n]) return;
+      working = savedSubsets[n].slice();
+      el.subsetName.value = n;
+      renderPicker();
+    });
+
+    el.btnSubsetSave.addEventListener('click', function () {
+      run(async function () {
+        var n = (el.subsetName.value || '').trim();
+        if (!n) throw new Error('Name the subset first.');
+        if (!working.length) throw new Error('An empty subset is the same as no subset.');
+        await apiPost('/xero/data/journals/pivot/subsets/', {
+          dimension: pickerKey, name: n, members: working.slice(),
+          author: (el.commentAuthor.value || '').trim()
+        });
+        await loadSubsetList();
+        el.subsetPick.value = n;
+        el.pickerMsg.textContent = 'Saved subset "' + n + '" (' + working.length + ' members, in this order).';
+        el.pickerMsg.className = 'msg msg--ok';
+      });
+    });
+
+    el.btnSubsetDelete.addEventListener('click', function () {
+      run(async function () {
+        var n = el.subsetPick.value;
+        if (!n) throw new Error('Pick a saved subset to delete.');
+        await apiDelete('/xero/data/journals/pivot/subsets/',
+          { dimension: pickerKey, name: n });
+        await loadSubsetList();
+        el.pickerMsg.textContent = 'Deleted saved subset "' + n + '". The subset in front of you is untouched.';
+        el.pickerMsg.className = 'msg';
+      });
     });
 
     el.pickerCancel.addEventListener('click', closePicker);

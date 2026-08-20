@@ -212,6 +212,24 @@
               <label class="xfer__lbl">In the subset <span id="pickerSelCount"></span></label>
               <select id="pickerSel" multiple size="12"></select>
             </div>
+            <div class="xfer__btns">
+              <button class="btn btn--tiny" id="btnPickUp" type="button" title="Move up">&uarr;</button>
+              <button class="btn btn--tiny" id="btnPickDown" type="button" title="Move down">&darr;</button>
+              <button class="btn btn--tiny" id="btnPickSortAz" type="button" title="Sort A–Z">A&darr;</button>
+            </div>
+          </div>
+
+          <div class="saved">
+            <label class="xfer__lbl" for="subsetPick">Saved subsets</label>
+            <div class="saved__row">
+              <select id="subsetPick"></select>
+              <button class="btn btn--tiny" id="btnSubsetLoad" type="button">Load</button>
+              <button class="btn btn--tiny" id="btnSubsetDelete" type="button" title="Delete saved subset">&times;</button>
+            </div>
+            <div class="saved__row">
+              <input type="text" id="subsetName" placeholder="Name this subset…">
+              <button class="btn btn--tiny" id="btnSubsetSave" type="button">Save</button>
+            </div>
           </div>
 
           <p class="hint">Double-click moves an item. An empty subset means no
@@ -239,6 +257,19 @@
       <label class="chk"><input type="checkbox" id="autoBuild"> Rebuild on every change</label>
       <label class="chk"><input type="checkbox" id="outline" checked> Collapsible groups in the sheet</label>
       <label class="chk"><input type="checkbox" id="suppress" checked> Suppress zero rows</label>
+
+      <div class="saved">
+        <label class="xfer__lbl" for="viewPick">Saved views</label>
+        <div class="saved__row">
+          <select id="viewPick"></select>
+          <button class="btn btn--tiny" id="btnViewLoad" type="button">Open</button>
+          <button class="btn btn--tiny" id="btnViewDelete" type="button" title="Delete saved view">&times;</button>
+        </div>
+        <div class="saved__row">
+          <input type="text" id="viewName" placeholder="Name this view…">
+          <button class="btn btn--tiny" id="btnViewSave" type="button">Save</button>
+        </div>
+      </div>
 
       <div class="row">
         <button class="btn btn--primary" id="btnCube">Build cube view</button>
