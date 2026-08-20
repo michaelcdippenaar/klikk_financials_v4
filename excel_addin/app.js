@@ -77,7 +77,7 @@
       'btnConnect', 'btnForget', 'settingsMsg', 'queryPanel', 'tenant', 'journalType',
       'typeHint', 'dateFrom', 'dateTo', 'account', 'accountList', 'contact', 'reference',
       'contactList', 'description', 'amount', 'q', 'maxRows', 'countLine', 'btnLoad', 'btnCount',
-      'detailPanel', 'btnPivot', 'cubePanel', 'measure',
+      'detailPanel', 'btnPivot', 'cubePanel', 'measure', 'btnResetComments',
       'suppress', 'btnCube', 'cubeMsg', 'btnReload', 'wellAvail', 'wellRows',
       'wellCols', 'autoBuild', 'outline',
       'commentPanel', 'commentAuthor', 'btnSyncComments', 'commentMsg',
@@ -130,6 +130,7 @@
     el.btnPivot.addEventListener('click', function () { run(addNativePivot); });
     el.btnReload.addEventListener('click', function () { run(reloadThisSheet); });
     el.btnSyncComments.addEventListener('click', function () { run(syncComments); });
+    el.btnResetComments.addEventListener('click', function () { run(resetSheetComments); });
     el.btnFullPivot.addEventListener('click', function () { run(pivotFromFullDetail); });
     el.btnPushComments.addEventListener('click', function () { run(pushCommentsToSheet); });
     el.btnSaveComment.addEventListener('click', function () { run(saveSelectedComment); });
@@ -628,6 +629,7 @@
       el.btnPivot.disabled = true;
       el.btnReload.disabled = true;
       el.btnSyncComments.disabled = true;
+      el.btnResetComments.disabled = true;
       return;
     }
     var when = new Date(b.loadedAt);
@@ -646,6 +648,7 @@
     el.btnPivot.disabled = b.kind !== 'detail';
     el.btnReload.disabled = false;
     el.btnSyncComments.disabled = (b.kind !== 'cube' && b.kind !== 'pivot');
+    el.btnResetComments.disabled = el.btnSyncComments.disabled;
   }
 
   function restoreFiltersFromSheet() {
@@ -1398,6 +1401,38 @@
      comment, each re-loading every comment on the sheet and its location — the
      bridge traffic grew with the square of the comment count, which is the kind
      of load that destabilises the host. */
+  /* Drop every comment on the sheet, then re-place from Postgres.
+   *
+   * Needed because the grid is only a MIRROR. Comments live in
+   * app.cube_comments anchored by meaning -- measure, row path, column path,
+   * filter context -- never by cell address. So re-laying out a PivotTable
+   * (dragging fields, collapsing, moving it) does not invalidate a single
+   * comment; it invalidates where they were DRAWN. Sync alone cannot fix that:
+   * it walks the current data body, so a note whose old cell now falls outside
+   * the body is never visited and stays behind, pointing at a number it no
+   * longer describes. That stale note is worse than no note.
+   *
+   * Clearing is safe precisely because the grid is not the record. Nothing is
+   * lost here that a re-sync does not restore. */
+  async function resetSheetComments() {
+    if (!activeSheet.binding) throw new Error('Open a cube or PivotTable sheet first.');
+
+    var removed = 0;
+    await Excel.run(async function (ctx) {
+      var sheet = ctx.workbook.worksheets.getItem(activeSheet.id);
+      var comments = sheet.comments;
+      comments.load('items');
+      await ctx.sync();
+      removed = comments.items.length;
+      // Backwards: deleting shifts the collection under us.
+      for (var i = comments.items.length - 1; i >= 0; i--) comments.items[i].delete();
+      await ctx.sync();
+    });
+
+    progress(0, 1, 'Cleared ' + fmtNum(removed) + ' — re-reading from Postgres…');
+    await syncPivotComments();
+  }
+
   async function writeCellComments(sheetId, writes) {
     if (!writes.length) return;
     try {
