@@ -397,3 +397,15 @@ input:focus, select:focus {
 .pick { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 12px; }
 .pick__t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pick__n { opacity: .55; font-variant-numeric: tabular-nums; }
+
+/* Empty wells say what they are for. Without this an empty drop zone is an
+   unlabelled blank strip and reads as a missing feature. */
+.well__ph {
+  display: block;
+  font-size: 11px;
+  line-height: 1.35;
+  opacity: .6;
+  font-style: italic;
+  padding: 3px 2px;
+}
+.well--over .well__ph { opacity: .95; font-style: normal; }

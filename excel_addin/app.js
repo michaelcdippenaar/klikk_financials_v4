@@ -815,16 +815,22 @@
     if (ph) ph.remove();
     if (!el.measure.value) el.measure.value = 'amount';
 
+    /* Restoring a previous layout must never be able to cost you the field
+       wells. populateCube runs inside the connect path, so anything thrown
+       here used to surface as "not connected" with an empty Cube panel --
+       no Fields, no Rows, no Columns, no Filters. The restore is a
+       convenience; the wells are the feature. */
     if (!wells.rows.length && !wells.cols.length) {
-      // The sheet in front wins; then what you last had; then a sane default.
-      if (!syncCubeToSheet()) {
-        var saved = recallCubeSpec();
-        if (saved && (saved.rows || []).length) {
-          applyCubeSpec(saved);
-        } else {
-          wells.rows = ['account_class', 'account'];
-          wells.cols = ['fin_year'];
+      try {
+        // The sheet in front wins; then what you last had; then a sane default.
+        if (!syncCubeToSheet()) {
+          var saved = recallCubeSpec();
+          if (saved && (saved.rows || []).length) applyCubeSpec(saved);
         }
+      } catch (e) { /* fall through to the default below */ }
+      if (!wells.rows.length && !wells.cols.length) {
+        wells.rows = ['account_class', 'account'];
+        wells.cols = ['fin_year'];
       }
     }
     reflowWells();
@@ -848,6 +854,23 @@
     var host = { avail: el.wellAvail, rows: el.wellRows,
                  cols: el.wellCols, filt: el.wellFilt }[zone];
     host.innerHTML = '';
+
+    /* An empty well is a thin blank box, which reads as "there is nothing
+       here" rather than "drop something here" -- the Filters zone in
+       particular looked like a missing feature rather than an empty one. Say
+       what the zone is for while it is empty. */
+    if (!wells[zone].length) {
+      var ph = document.createElement('span');
+      ph.className = 'well__ph';
+      ph.textContent = {
+        avail: 'No fields left — all of them are in use below.',
+        rows: 'Drag fields here for rows, or tap R on a field.',
+        cols: 'Drag fields here for columns, or tap C on a field.',
+        filt: 'Drag a field here (or tap F) to filter — then pick one or more values.'
+      }[zone];
+      host.appendChild(ph);
+      return;
+    }
     wells[zone].forEach(function (key, idx) {
       var chip = document.createElement('span');
       chip.className = 'chip';
@@ -1153,7 +1176,11 @@
     if (el.autoBuild.checked && wells.rows.length) run(buildCube);
   }
 
+  var pickerWired = false;
+
   function wirePicker() {
+    if (pickerWired) return;
+    pickerWired = true;
     el.pickerClose.addEventListener('click', function () {
       el.picker.hidden = true;
       pickerKey = null;
