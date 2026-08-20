@@ -598,6 +598,17 @@ class XeroCubeDrillView(APIView):
         except (TypeError, ValueError):
             limit = 500
 
+        # The total must be computed on the SAME measure the cell showed.
+        # Summing amount for a comment written on a debit or credit figure
+        # reconciles only by luck -- it happens to agree when a line's debit
+        # equals its amount, and disagrees silently when it does not.
+        measure = (p.get('measure') or 'amount').strip()
+        if measure not in MEASURES:
+            return Response({'error': 'unknown measure: %s' % measure},
+                            status=status.HTTP_400_BAD_REQUEST)
+        FIELD = {'amount': 'amount', 'debit': 'debit', 'credit': 'credit',
+                 'tax': 'tax_amount'}
+
         qs = apply_journal_filters(XeroJournals.objects.all(), p)
 
         # Push down what SQL can do.
@@ -636,7 +647,10 @@ class XeroCubeDrillView(APIView):
                 rec = {a: _attr_path(j, a) for a in aliases}
                 if any(f(rec) != v for _, f, v in tests):
                     continue
-            total += float(j.amount or 0)
+            if measure == 'count':
+                total += 1
+            else:
+                total += float(getattr(j, FIELD[measure], None) or 0)
             if len(rows) >= limit:
                 truncated = True
                 continue
@@ -686,6 +700,7 @@ class XeroCubeDrillView(APIView):
 
         return Response({
             'coords': coords,
+            'measure': measure,
             'count': len(rows),
             'line_total': _r2(total),
             'truncated': truncated,
