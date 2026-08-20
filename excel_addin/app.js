@@ -1489,7 +1489,7 @@
     });
 
     progress(0, 1, 'Cleared ' + fmtNum(removed) + ' — re-reading from Postgres…');
-    await syncPivotComments();
+    await pushCommentsToSheet();
   }
 
   async function writeCellComments(sheetId, writes) {
@@ -1530,6 +1530,167 @@
   }
 
   /* Paint every stored comment for this sheet back onto its cell. */
+  /* Resolve one cube grid cell to the intersection it represents.
+   *
+   * (i, ci) are indexes INTO THE CUBE, not the sheet: i indexes cube.rows,
+   * ci indexes cube.cols, and ci === cols.length is the grand-total column.
+   * Callers convert from sheet coordinates by subtracting firstDataRow and
+   * nRowDims, which is why out-of-range input is normal here and returns null
+   * rather than throwing -- clicking a header or a margin lands outside.
+   *
+   * A row carries the keys of its whole ancestry; the path is that ancestry
+   * down to the row's own depth, which is exactly what the consolidation
+   * rows above it named. */
+  function cellToIntersection(cube, i, ci) {
+    if (!cube || !cube.rows || i < 0 || i >= cube.rows.length) return null;
+    var nCols = cube.cols.length;
+    if (ci < 0 || ci > nCols) return null;
+
+    var r = cube.rows[i];
+    var depth = typeof r.depth === 'number' ? r.depth : (r.keys.length - 1);
+
+    var row_path = [], row_dims = [];
+    for (var d = 0; d <= depth && d < r.keys.length; d++) {
+      if (r.keys[d] == null || r.keys[d] === '') continue;
+      row_path.push(String(r.keys[d]));
+      var dim = cube.row_dims[d];
+      row_dims.push(dim ? (dim.key || dim.label) : 'row_' + (d + 1));
+    }
+    if (!row_path.length) return null;        // a spacer or an unlabelled row
+
+    var isTotal = ci === nCols;
+    var value = isTotal
+      ? (r.cells || []).reduce(function (a, v) { return a + (v || 0); }, 0)
+      : (r.cells || [])[ci];
+
+    return {
+      row_dims: row_dims,
+      row_path: row_path,
+      col_dims: (cube.col_dims || []).map(function (d, n) {
+        return d && (d.key || d.label) ? (d.key || d.label) : 'col_' + (n + 1);
+      }),
+      col_path: isTotal ? 'Total' : String(cube.cols[ci]),
+      cell_value: typeof value === 'number' ? value : null
+    };
+  }
+
+  /* Read the comments typed on this sheet and send them to Postgres.
+   *
+   * The other direction of the mirror. Excel gives a comment a location, not a
+   * meaning, so each commented cell is resolved to its intersection first --
+   * a note is only worth storing if we can say which figure it is about. Cells
+   * whose meaning cannot be resolved are counted and reported rather than
+   * uploaded against a guess. */
+  async function syncComments() {
+    var b = activeSheet.binding;
+    if (!b) throw new Error('Open a cube or PivotTable sheet first.');
+    if (!Office.context.requirements.isSetSupported('ExcelApi', '1.10')) {
+      throw new Error('This Excel build has no comment API (needs ExcelApi 1.10).');
+    }
+
+    // 1. Every comment on the sheet, with where it sits.
+    var notes = [];
+    await Excel.run(async function (ctx) {
+      var sheet = ctx.workbook.worksheets.getItem(activeSheet.id);
+      var comments = sheet.comments;
+      comments.load('items/content');
+      await ctx.sync();
+      var locs = comments.items.map(function (cm) {
+        var rng = cm.getLocation();
+        rng.load('rowIndex,columnIndex');
+        return rng;
+      });
+      await ctx.sync();
+      comments.items.forEach(function (cm, n) {
+        var txt = (cm.content || '').trim();
+        if (txt) notes.push({ r: locs[n].rowIndex, c: locs[n].columnIndex, t: txt });
+      });
+    });
+
+    if (!notes.length) {
+      el.countLine.textContent = 'No comments on this sheet to send.';
+      return;
+    }
+
+    // 2. Resolve each commented cell, and only those cells.
+    var sent = 0, skipped = 0;
+
+    if (b.kind === 'cube') {
+      var cached = lastCube[activeSheet.id];
+      if (!cached) throw new Error('Rebuild this cube sheet first, then try again.');
+      for (var n = 0; n < notes.length; n++) {
+        var note = notes[n];
+        var x = cellToIntersection(cached.cube,
+          note.r - cached.firstDataRow, note.c - cached.nRowDims);
+        if (!x) { skipped++; continue; }
+        progress(n + 1, notes.length, 'Sending ' + (n + 1) + ' of ' + notes.length + '…');
+        await postComment({
+          measure: b.spec.measure,
+          row_dims: x.row_dims, row_path: x.row_path,
+          col_dims: x.col_dims, col_path: x.col_path,
+          value: x.cell_value, query: b.query
+        }, note.t);
+        sent++;
+      }
+    } else {
+      if (!Office.context.requirements.isSetSupported('ExcelApi', '1.12')) {
+        throw new Error('Needs ExcelApi 1.12 to locate PivotTable cells by meaning.');
+      }
+      // Only the commented cells are resolved, not the whole body -- a handful
+      // of notes should not cost an 825-cell walk.
+      var anchors = [];
+      await Excel.run(async function (ctx) {
+        var sheet = ctx.workbook.worksheets.getItem(activeSheet.id);
+        var pivot = sheet.pivotTables.getItem(b.spec.pivotName);
+        var body = pivot.layout.getDataBodyRange();
+        body.load('rowIndex,columnIndex,rowCount,columnCount');
+        await ctx.sync();
+
+        var pend = [];
+        notes.forEach(function (note) {
+          // getPivotItems traps on out-of-body cells, so bounds-check first.
+          var inBody = note.r >= body.rowIndex && note.r < body.rowIndex + body.rowCount
+            && note.c >= body.columnIndex && note.c < body.columnIndex + body.columnCount;
+          if (!inBody) { anchors.push(null); return; }
+          var cell = sheet.getRangeByIndexes(note.r, note.c, 1, 1);
+          var pr = pivot.layout.getPivotItems(Excel.PivotAxis.row, cell);
+          var pc = pivot.layout.getPivotItems(Excel.PivotAxis.column, cell);
+          var pd = pivot.layout.getDataHierarchy(cell);
+          var vals = cell;
+          vals.load('values');
+          pr.load('items/name'); pc.load('items/name'); pd.load('name');
+          anchors.push({ pr: pr, pc: pc, pd: pd, vals: vals });
+          pend.push(1);
+        });
+        await ctx.sync();
+      });
+
+      for (var k = 0; k < notes.length; k++) {
+        var a = anchors[k];
+        if (!a) { skipped++; continue; }
+        var rp = a.pr.items.map(function (z) { return z.name; });
+        if (!rp.length) { skipped++; continue; }
+        progress(k + 1, notes.length, 'Sending ' + (k + 1) + ' of ' + notes.length + '…');
+        await postComment({
+          measure: a.pd.name || 'Amount',
+          row_dims: rp.map(function (_, z) { return 'pivot_row_' + (z + 1); }),
+          row_path: rp,
+          col_dims: ['pivot_col'],
+          col_path: a.pc.items.map(function (z) { return z.name; }).join(' | ') || 'Total',
+          value: (a.vals.values && a.vals.values[0]) ? a.vals.values[0][0] : null,
+          query: b.query
+        }, notes[k].t);
+        sent++;
+      }
+    }
+
+    commentCache = null;
+    el.countLine.innerHTML = 'Sent <strong>' + fmtNum(sent) + '</strong> comment'
+      + (sent === 1 ? '' : 's') + ' to Postgres'
+      + (skipped ? ', skipped ' + fmtNum(skipped)
+          + ' whose cell could not be tied to a figure.' : '.');
+  }
+
   async function pushCommentsToSheet() {
     var b = activeSheet.binding;
     if (!b) throw new Error('Open a cube or PivotTable sheet first.');
