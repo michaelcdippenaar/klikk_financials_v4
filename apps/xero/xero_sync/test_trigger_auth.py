@@ -314,22 +314,23 @@ _ALLOWED_OPEN_XERO_ROUTES = {
     "xero/sync/process-status/",
 }
 
-# KNOWN, UNFIXED HOLES as of 2026-08-20. Each is AllowAny AND pulls live report
-# data from Xero when it runs, so any anonymous internet caller can burn the
-# tenant's 1,000/day budget -- exactly the class of hole the gating pass was
-# meant to close, but these two were MISSED (they live in the same
-# xero_validation app as the ReconcileReportsView that WAS gated).
-# Reported to senior-dev. The living sweep subtracts these so it stays green
-# and keeps biting on genuinely-new triggers; the tripwire below asserts they
-# are still open, and will FAIL the moment they are gated -- forcing this list
-# to be trimmed when the fix lands.
+# DELIBERATE AllowAny EXEMPTIONS. Currently EMPTY, and that is the point.
+#
+# Anything listed here is a trigger-shaped Xero route that is knowingly left
+# AllowAny -- which means an anonymous internet caller can burn the tenant's
+# 1,000/day API budget. The list started with two such holes
+# (xero_validation:import_profit_loss and xero_validation:validate_complete),
+# both missed by the first gating pass and both caught by the living sweep
+# below; the SECURITY-NOTE.md lockdown closed them, so the list emptied.
+#
+# It earns its keep while empty. The living sweep subtracts these routes, so a
+# hole can only be tolerated by being written down here, in a diff someone
+# reviews; and the tripwire asserts every entry is genuinely still AllowAny, so
+# an entry whose hole gets fixed must be deleted rather than left to rot into a
+# stale exemption. Empty list + tripwire = a new exemption has to be added on
+# purpose, and cannot be added silently.
 _KNOWN_UNGATED_HOLES = {
     # route: (reverse_name, view_class_name, why)
-    # EMPTIED 2026-08-20. Both entries -- xero_validation:import_profit_loss and
-    # xero_validation:validate_complete -- were closed by the SECURITY-NOTE.md
-    # lockdown, and this tripwire is what caught it. Keep the dict (and the
-    # tripwire) in place: it is the mechanism that stops a future AllowAny
-    # exemption from becoming permanent and forgotten.
 }
 
 
@@ -347,8 +348,9 @@ class AntiRegressionSweepTests(TestCase):
 
     def test_no_new_ungated_xero_triggers(self):
         """LIVING GUARD: every trigger-shaped path under xero/ must NOT be
-        AllowAny, EXCEPT the documented negative controls and the two known,
-        reported holes. A NEWLY-added ungated Xero trigger fails here."""
+        AllowAny, EXCEPT the documented negative controls and any deliberate
+        exemption written into _KNOWN_UNGATED_HOLES (currently none). A
+        newly-added ungated Xero trigger fails here."""
         violations = []
         for route, cls in _iter_routes(get_resolver()):
             if not route.startswith("xero/"):
@@ -379,11 +381,14 @@ class AntiRegressionSweepTests(TestCase):
 
     def test_known_holes_are_still_open_tripwire(self):
         """TRIPWIRE. Asserts every entry in _KNOWN_UNGATED_HOLES is STILL
-        AllowAny, so a hole that gets fixed must be removed from the list
-        rather than lingering as a stale exemption. The list is empty as of
-        2026-08-20 -- this test now also asserts it STAYS empty, which is the
-        stronger property: a new AllowAny exemption has to be added here
-        deliberately, in a diff someone reviews."""
+        AllowAny, so a hole that gets fixed must be deleted from the list
+        rather than lingering as a stale exemption.
+
+        The list is empty as of 2026-08-20, so this currently passes
+        vacuously -- the property it protects only bites once someone adds an
+        exemption. That is intended: the guard that keeps the list empty is
+        test_no_new_ungated_xero_triggers, which no longer subtracts anything.
+        """
         fixed = []
         for route, (name, view_name, _why) in _KNOWN_UNGATED_HOLES.items():
             match = resolve(reverse(name))
