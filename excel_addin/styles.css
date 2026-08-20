@@ -315,3 +315,12 @@ input:focus, select:focus {
 .sel textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .sel .row { margin-top: 7px; }
 .sel--saved { border-color: var(--ok); }
+
+/* Inline action inside the selection hint — the pivot cell read is manual
+   because resolving it automatically crashes Excel for Mac. */
+.btn--tiny {
+  padding: 2px 8px;
+  font-size: 11px;
+  line-height: 1.6;
+  vertical-align: baseline;
+}

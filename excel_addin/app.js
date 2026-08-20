@@ -1170,22 +1170,51 @@
     await addNativePivot();
   }
 
+  /* Selection handling.
+   *
+   * PivotLayout.getPivotItems is NOT resolved automatically on selection any
+   * more. Excel for Mac hard-crashes (EXC_BAD_INSTRUCTION, no catchable JS
+   * error) when that API is handed a cell it does not consider part of the
+   * PivotTable's data body -- a row header, a filter cell, a subtotal, a blank
+   * cell beside the pivot. Since onSelectionChanged fires on every click and
+   * arrow key, the passive path was calling it constantly with exactly those
+   * cells. Cube sheets keep live resolution: that path only reads plain range
+   * values and has no such surface.
+   *
+   * Pivot cells are now resolved only when the user asks, via the button, and
+   * only after the selection is proven to be inside the data body. */
+  var selBusy = false;
+  var selTimer = null;
+
   function watchSelection() {
     Excel.run(function (ctx) {
-      ctx.workbook.onSelectionChanged.add(function () { return readSelection(); });
+      ctx.workbook.onSelectionChanged.add(function () {
+        // Debounced and single-flight: the event fires per keystroke while
+        // arrowing around, and overlapping Excel.run batches against the same
+        // proxies was itself a source of instability.
+        if (selTimer) clearTimeout(selTimer);
+        selTimer = setTimeout(function () { readSelection(); }, 150);
+      });
       return ctx.sync();
     }).catch(function () { /* host without the event: the buttons still work */ });
   }
 
-  async function readSelection() {
+  async function readSelection(explicit) {
+    if (selBusy) return;
+    selBusy = true;
     try {
       var b = activeSheet.binding;
-      if (!b) { return showSelection(null); }
-      if (b.kind === 'pivot') return showSelection(await resolvePivotSelection(b));
+      if (!b) return showSelection(null);
       if (b.kind === 'cube') return showSelection(await resolveCubeSelection(b));
+      if (b.kind === 'pivot') {
+        if (!explicit) return showSelection({ pivotManual: true });
+        return showSelection(await resolvePivotSelection(b));
+      }
       return showSelection(null);
     } catch (e) {
       return showSelection(null);
+    } finally {
+      selBusy = false;
     }
   }
 
@@ -1196,9 +1225,26 @@
       var sheet = ctx.workbook.worksheets.getItem(activeSheet.id);
       var pivot = sheet.pivotTables.getItem(b.spec.pivotName);
       var cell = ctx.workbook.getSelectedRange();
-      cell.load('values,cellCount,rowIndex,columnIndex');
+      var cellSheet = cell.worksheet;
+      var body = pivot.layout.getDataBodyRange();
+      cell.load('values,cellCount,rowIndex,columnIndex,address');
+      cellSheet.load('id');
+      body.load('address,rowIndex,columnIndex,rowCount,columnCount');
       await ctx.sync();
+
       if (cell.cellCount !== 1) return;
+
+      /* Hard preconditions before touching getPivotItems. Handing it a cell
+       * outside the data body -- a header, a subtotal, a cell on another
+       * sheet -- takes Excel for Mac down with a native trap that no
+       * try/catch here can intercept. Prove the cell is inside the body
+       * first; if it is not, say so rather than ask. */
+      if (cellSheet.id !== activeSheet.id) return;
+      var inBody = cell.rowIndex >= body.rowIndex
+        && cell.rowIndex < body.rowIndex + body.rowCount
+        && cell.columnIndex >= body.columnIndex
+        && cell.columnIndex < body.columnIndex + body.columnCount;
+      if (!inBody) { out = { outsideBody: true, address: cell.address }; return; }
 
       var rows = pivot.layout.getPivotItems(Excel.PivotAxis.row, cell);
       var cols = pivot.layout.getPivotItems(Excel.PivotAxis.column, cell);
@@ -1246,6 +1292,24 @@
 
   async function showSelection(sel) {
     selection = sel;
+
+    // Two informational states that carry no anchor: a pivot cell awaiting an
+    // explicit read, and a cell proven to be outside the pivot's data body.
+    if (sel && (sel.pivotManual || sel.outsideBody)) {
+      selection = null;
+      el.selHas.hidden = true;
+      el.selNone.hidden = false;
+      el.selBox.className = 'sel';
+      el.selNone.innerHTML = sel.outsideBody
+        ? 'That cell (' + esc(sel.address || '') + ') is outside the PivotTable\'s '
+          + 'values area. Comments pin to a figure, so pick a number inside the pivot.'
+        : 'Select a value cell in the PivotTable, then press '
+          + '<button class="btn btn--tiny" id="btnReadCell">Read cell</button>';
+      var rb = document.getElementById('btnReadCell');
+      if (rb) rb.addEventListener('click', function () { readSelection(true); });
+      return;
+    }
+
     if (!sel) {
       el.selHas.hidden = true;
       el.selNone.hidden = false;
