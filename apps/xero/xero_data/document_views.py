@@ -20,6 +20,7 @@ import hmac
 import logging
 import mimetypes
 from decimal import Decimal, InvalidOperation
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.db.models import Q
@@ -44,8 +45,47 @@ def xero_document_signature(document_id) -> str:
     ).hexdigest()[:32]
 
 
-def xero_document_url(document_id, base: str | None = None) -> str:
-    base = base or getattr(settings, 'SLIP_VIEW_BASE_URL', 'https://console.8-bit.space/backend')
+DEFAULT_VIEW_BASE = 'https://console.8-bit.space/backend'
+
+
+def public_base_url(request=None) -> str:
+    """
+    The public origin + path prefix to hang signed document links off.
+
+    Derived from the REQUEST (scheme + host) rather than hardcoded, so a link
+    minted on staging/dev/localhost points back at the host the caller actually
+    reached — the old behaviour handed every caller a production URL, which is a
+    dead link anywhere but production and a silent cross-environment leak of the
+    console's hostname.
+
+    The PATH PREFIX cannot come from the request: nginx serves this API under
+    ``/backend`` and strips that prefix before Django sees it, so
+    ``request.path`` has no ``/backend`` in it and building the URL from the
+    request alone would drop it and produce a 404 in production. The prefix
+    therefore comes from ``X-Forwarded-Prefix`` when the proxy sets it, else
+    from the configured ``SLIP_VIEW_BASE_URL`` — which is also the whole-URL
+    fallback when there is no request (management commands, exports, tests).
+    """
+    configured = getattr(settings, 'SLIP_VIEW_BASE_URL', DEFAULT_VIEW_BASE)
+    if request is None:
+        return configured
+    try:
+        host = request.get_host()
+    except Exception:  # DisallowedHost and friends — never 500 a link builder
+        return configured
+    if not host:
+        return configured
+    prefix = (request.META.get('HTTP_X_FORWARDED_PREFIX') or urlsplit(configured).path or '')
+    return f'{request.scheme}://{host}{prefix.rstrip("/")}'
+
+
+def xero_document_url(document_id, base: str | None = None, request=None) -> str:
+    """Signed, absolute URL for ``xero_document_file_view``.
+
+    ``base`` is an explicit override and wins over everything; otherwise the base
+    is derived from ``request`` (see ``public_base_url``).
+    """
+    base = base or public_base_url(request)
     return f"{base}/xero/data/documents/{document_id}/file/?s={xero_document_signature(document_id)}"
 
 
@@ -172,7 +212,7 @@ class XeroDocumentSearchView(APIView):
                     d.transaction_source.transaction_source if d.transaction_source else ''
                 ),
                 'transaction_id': guid,
-                'view_url': xero_document_url(d.id),
+                'view_url': xero_document_url(d.id, request=request),
             })
 
         return Response({
