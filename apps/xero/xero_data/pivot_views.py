@@ -264,6 +264,59 @@ def apply_journal_filters(qs, p):
     return qs
 
 
+
+def _insert_col_totals(ordered_cols, leaves, level, flags):
+    """Add a total column after each group of columns sharing a prefix.
+
+    Stacked columns (Financial year over period) previously had no year total
+    at all -- only one grand total at the far right -- so reading a year meant
+    adding its periods by eye.
+
+    The synthetic column's path is the parent prefix plus 'Total', which means
+    it renders under the parent in the stacked header AND gets its own anchor
+    ("FY2018 | Total"), distinct from both the periods and the grand total. A
+    comment on a year total is therefore a comment on that year, not on
+    whichever period happened to sit in that position.
+    """
+    groups, start = [], 0
+    for i in range(1, len(ordered_cols) + 1):
+        end = i == len(ordered_cols)
+        if end or ordered_cols[i][:level + 1] != ordered_cols[start][:level + 1]:
+            groups.append((start, i))
+            start = i
+
+    width = max((len(c) for c in ordered_cols), default=level + 1)
+    new_cols, index_map, new_flags = [], [], []
+    for gstart, gend in groups:
+        for i in range(gstart, gend):
+            index_map.append(i)
+            new_cols.append(ordered_cols[i])
+            new_flags.append(flags[i])
+        prefix = list(ordered_cols[gstart][:level + 1])
+        total_path = tuple(prefix + ['Total'] + [''] * (width - level - 2))
+        index_map.append(None)
+        new_cols.append(total_path)
+        new_flags.append(True)          # synthetic: a total OF other columns
+
+    new_leaves = []
+    for rk, vec in leaves:
+        out = []
+        run = 0.0
+        for src in index_map:
+            if src is None:
+                out.append(_r2(run))
+                run = 0.0
+            else:
+                out.append(vec[src])
+                # A nested total already counted its own children, so only real
+                # columns feed the running sum -- otherwise an inner total would
+                # be added twice into the outer one.
+                if not flags[src]:
+                    run += vec[src]
+        new_leaves.append((rk, out))
+    return new_cols, new_leaves, new_flags
+
+
 class XeroJournalPivotView(APIView):
     """
     GET /xero/data/journals/pivot/
@@ -403,13 +456,43 @@ class XeroJournalPivotView(APIView):
                 leaves = [(rk, [vec[i] for i in keep]) for rk, vec in leaves]
                 ncols = len(keep)
 
-        out_rows = self._with_consolidations(leaves, len(row_dims), ncols)
+        # Which fields show a total. Absent = every row level (what it always
+        # did) and no column totals (likewise) -- so an old client is unchanged.
+        def _wanted(param):
+            raw = (p.get(param) or '').strip()
+            if not raw:
+                return None
+            return {d.strip() for d in raw.split(',') if d.strip()}
+
+        rtotals = _wanted('rtotals')
+        row_levels = None
+        if rtotals is not None:
+            row_levels = {i + 1 for i, d in enumerate(row_dims[:-1]) if d in rtotals}
+
+        ctotals = _wanted('ctotals') or set()
+        # Deepest first: inserting an inner total does not disturb the grouping
+        # of the levels outside it, whereas the reverse is not true. The LAST
+        # column dimension is skipped -- a total of one leaf is that leaf.
+        col_synthetic = [False] * len(ordered_cols)
+        for lvl in sorted(
+            (i for i, d in enumerate(col_dims[:-1]) if d in ctotals), reverse=True
+        ):
+            ordered_cols, leaves, col_synthetic = _insert_col_totals(
+                ordered_cols, leaves, lvl, col_synthetic)
+        ncols = len(ordered_cols)
+
+        out_rows = self._with_consolidations(leaves, len(row_dims), ncols, row_levels)
 
         col_totals = [0.0] * ncols
         for _, vec in leaves:
             for i, v in enumerate(vec):
                 col_totals[i] += v
         col_totals = [_r2(v) for v in col_totals]
+
+        # The grand total sums the REAL columns only. A year-total column is a
+        # sum of columns already counted, so including it would silently double
+        # the grand total the moment anyone switched year totals on.
+        grand = _r2(sum(t for i, t in enumerate(col_totals) if not col_synthetic[i]))
 
         return Response({
             'measure': measure,
@@ -426,7 +509,8 @@ class XeroJournalPivotView(APIView):
             'col_paths': [list(c) for c in ordered_cols],
             'rows': out_rows,
             'col_totals': col_totals,
-            'grand_total': _r2(sum(col_totals)),
+            'grand_total': grand,
+            'col_synthetic': col_synthetic,
             'leaf_count': len(leaves),
             'truncated_rows': rows_truncated,
             'truncated_cols': cols_truncated,
@@ -454,8 +538,15 @@ class XeroJournalPivotView(APIView):
         )
 
     @staticmethod
-    def _with_consolidations(leaves, depth, ncols):
-        """Emit each parent consolidation immediately before its children."""
+    def _with_consolidations(leaves, depth, ncols, levels=None):
+        """Emit each parent consolidation immediately before its children.
+
+        `levels` is the set of prefix lengths that should produce a subtotal
+        row. None means every level, which is what this did before the totals
+        became optional. A level that is switched off still has its children
+        emitted -- turning off a subtotal hides the summary line, it does not
+        hide the data underneath it.
+        """
         if depth <= 1:
             return [{'keys': list(rk), 'depth': 0, 'is_total': False, 'cells': vec}
                     for rk, vec in leaves]
@@ -474,6 +565,8 @@ class XeroJournalPivotView(APIView):
         emitted = set()
         for rk, vec in leaves:
             for d in range(1, depth):
+                if levels is not None and d not in levels:
+                    continue
                 prefix = rk[:d]
                 if prefix not in emitted:
                     emitted.add(prefix)

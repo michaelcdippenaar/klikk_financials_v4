@@ -491,6 +491,30 @@
     };
   }
 
+  /* rtotals / ctotals — which fields carry a total.
+
+     Each is sent ONLY when it differs from the server's default, so an
+     unchanged cube produces the same request it always did. rtotals is
+     omitted while every row level still shows its subtotal; ctotals is
+     omitted while no column field asks for one. */
+  function totalsParams(spec) {
+    var t = (spec && spec.totals) || {};
+    var rows = spec.rows || [], cols = spec.cols || [];
+    function on(k, zone) {
+      return Object.prototype.hasOwnProperty.call(t, k) ? !!t[k] : zone === 'rows';
+    }
+    var out = {};
+    var parents = rows.slice(0, -1);
+    if (parents.some(function (k) { return !on(k, 'rows'); })) {
+      var keep = parents.filter(function (k) { return on(k, 'rows'); });
+      // An empty value is meaningful here: "no row subtotals at all".
+      out.rtotals = keep.length ? keep.join(',') : '__none__';
+    }
+    var ct = cols.slice(0, -1).filter(function (k) { return on(k, 'cols'); });
+    if (ct.length) out.ctotals = ct.join(',');
+    return out;
+  }
+
   /* {dimf: '{"fin_year":["FY2026"]}'} — omitted entirely when nothing is
      narrowed, so an unfiltered cube's URL and comment anchors stay as they
      were before filters existed. */
@@ -887,7 +911,8 @@
     key:     '<circle cx="8" cy="14" r="4"/><path d="M11 11l9-9M17 5l3 3M14 8l3 3"/>',
     save:    '<path d="M5 3h11l3 3v15H5z"/><path d="M8 3v6h8M8 21v-6h8v6"/>',
     trash:   '<path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14"/>',
-    play:    '<path d="M6 4l14 8-14 8z"/>'
+    play:    '<path d="M6 4l14 8-14 8z"/>',
+    total:   '<path d="M18 4H6l7 8-7 8h12"/>'   // sigma
   };
 
   function svgIcon(name, size) {
@@ -905,6 +930,14 @@
   // dimension key -> array of selected labels. Empty array = the field is
   // on Filters but not yet narrowed, which passes everything through.
   var filterVals = {};
+  /* Which fields show a total.
+
+     Rows default ON (every level has always had a subtotal) and columns
+     default OFF (stacked columns never had one), so an unset field behaves
+     exactly as it did before this option existed. Only an explicit choice is
+     stored, which is also what keeps a saved view meaning the same thing after
+     the defaults are read again. */
+  var totalVals = {};
   var memberCache = {};
 
   function populateCube(cat) {
@@ -1020,6 +1053,17 @@
         acts.appendChild(btn('left', 'left', 'Move earlier'));
         acts.appendChild(btn('right', 'right', 'Move later'));
         acts.appendChild(btn('pick', 'subset', 'Subset — choose which values appear'));
+        /* A total on the innermost field would repeat the field itself, so the
+           toggle only appears where it means something -- on a field that has
+           another field stacked beneath it. */
+        if (idx < wells[zone].length - 1) {
+          var on = totalOn(key, zone);
+          var tb = btn('total', 'total', on
+            ? 'Total for each ' + dimLabel(key) + ' — on. Click to hide it.'
+            : 'Total for each ' + dimLabel(key) + ' — off. Click to show it.');
+          if (on) tb.className += ' chip__b--on';
+          acts.appendChild(tb);
+        }
         acts.appendChild(btn('remove', 'remove', 'Remove'));
       }
       chip.appendChild(acts);
@@ -1116,7 +1160,8 @@
         var key = chip.dataset.key, zone = chip.dataset.zone;
         var idx = parseInt(chip.dataset.idx, 10);
         var act = b.dataset.act;
-        if (act === 'pick') openPicker(key);
+        if (act === 'total') toggleTotal(key, zone);
+        else if (act === 'pick') openPicker(key);
         else if (act === 'toFilt') moveField(key, zone, 'filt', -1);
         else if (act === 'toRows') moveField(key, zone, 'rows', -1);
         else if (act === 'toCols') moveField(key, zone, 'cols', -1);
@@ -1180,6 +1225,21 @@
       ptr = null;
       clearDragUI();
     });
+  }
+
+  /* Rows have always shown a subtotal per level; stacked columns never had
+     one. Keep both defaults so nobody's existing sheet changes shape until
+     they ask it to. */
+  function totalOn(key, zone) {
+    if (Object.prototype.hasOwnProperty.call(totalVals, key)) return !!totalVals[key];
+    return zone === 'rows';
+  }
+
+  function toggleTotal(key, zone) {
+    totalVals[key] = !totalOn(key, zone);
+    reflowWells();
+    rememberCubeSpec();
+    if (el.autoBuild.checked && wells.rows.length) run(buildCube);
   }
 
   function moveField(key, from, to, at) {
@@ -1550,6 +1610,7 @@
       cols: wells.cols.slice(),
       measure: el.measure.value || 'amount',
       filt: wells.filt.slice(),
+      totals: JSON.parse(JSON.stringify(totalVals)),
       filters: JSON.parse(JSON.stringify(filterVals)),
       suppress: el.suppress.checked,
       outline: el.outline.checked
@@ -1561,6 +1622,7 @@
     wells.cols = (spec.cols || []).slice();
     wells.filt = (spec.filt || []).slice();
     filterVals = spec.filters ? JSON.parse(JSON.stringify(spec.filters)) : {};
+    totalVals = spec.totals ? JSON.parse(JSON.stringify(spec.totals)) : {};
     el.measure.value = spec.measure || 'amount';
     el.suppress.checked = !!spec.suppress;
     if (typeof spec.outline === 'boolean') el.outline.checked = spec.outline;
@@ -1586,7 +1648,7 @@
       cols: spec.cols.join(','),
       measure: spec.measure,
       suppress: spec.suppress ? '1' : '0'
-    }, dimfParam(spec));
+    }, dimfParam(spec), totalsParams(spec));
     return apiGet('/xero/data/journals/pivot/', params);
   }
 

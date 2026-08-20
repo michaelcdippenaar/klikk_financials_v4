@@ -550,3 +550,11 @@ textarea:focus-visible {
 
 .modal__head strong { font-size: 13px; }
 .xfer__lbl { display: flex; align-items: center; gap: 5px; }
+
+/* An active toggle has to be visible at a glance on a chip that already
+   carries three other buttons. */
+.chip__b--on {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+.chip__b--on:hover { background: var(--accent); color: var(--accent-ink); filter: brightness(1.08); }
