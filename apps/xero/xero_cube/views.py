@@ -18,8 +18,9 @@ from apps.xero.xero_sync.api_call_logging import log_xero_api_calls
 # endpoints are internet-exposed via the Caddy edge (console.8-bit.space/backend/*) and
 # one of them mutates financial data (trial-balance rebuild). They are consumed ONLY by
 # the frontend, which sends a Bearer JWT (klikk_portal src/api/client.js). The MCP does
-# NOT call /xero/cube/*. Do NOT revert to AllowAny. NOTE: xero_data/* is still AllowAny
-# because the MCP calls it without KLIKK_API_TOKEN — lock that only after the MCP has a token.
+# NOT call /xero/cube/*. Do NOT revert to AllowAny. (2026-08-20: the caveat that once
+# lived here is resolved — the MCP now has KLIKK_API_TOKEN, xero_data/* is gated, and
+# the project-wide DRF default is IsAuthenticated.)
 class XeroProcessDataView(APIView):
     permission_classes = [IsAuthenticated]
 

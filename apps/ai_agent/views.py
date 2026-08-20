@@ -1663,7 +1663,7 @@ class MCPAgentChatView(APIView):
 
 class AgentRunningStatusView(APIView):
     """Polled by the frontend to get real-time agent status (what tool it's running, etc.)."""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         key = request.query_params.get('key', 'default')
@@ -1689,7 +1689,11 @@ class WebSocketBroadcastView(APIView):
     Body: { "session_id": "...", "role": "user"|"assistant", "content": "...",
             "username": "...", "tool_calls": [...], "skills_routed": [...], ... }
     """
-    permission_classes = [AllowAny]  # Internal service call; restrict via network/firewall
+    # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny "internal service
+    # call". No FastAPI container runs in the compose stack today; if it returns,
+    # it must send Authorization: Bearer <KLIKK_API_TOKEN> (ServiceTokenAuthentication
+    # is global, so IsAuthenticated accepts it).
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         from .consumers import broadcast_message

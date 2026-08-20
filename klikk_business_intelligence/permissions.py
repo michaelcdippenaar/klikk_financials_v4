@@ -17,8 +17,10 @@ The pair below is deliberately narrow:
   request that is not carrying exactly the configured token, so ``JWTAuthentication``
   still gets its turn and every other endpoint in the project behaves exactly as it did
   before this module existed.
-* ``HasServiceToken`` only tightens unsafe methods. Reads pass through untouched, because
-  the project default is ``AllowAny`` and the views this is applied to serve reads too.
+* ``HasServiceToken`` requires an authenticated caller for every method. Until 2026-08-20
+  reads passed through untouched because the project default was ``AllowAny``; the default
+  is now ``IsAuthenticated`` (SECURITY-NOTE.md lockdown) and this class must not be the one
+  loophole that keeps pricelist reads anonymous.
 
 Applied to the three ``apps/pricelist`` write actions. See ``docs/pricelist.md`` §4.
 """
@@ -116,17 +118,19 @@ class ServiceTokenAuthentication(BaseAuthentication):
 
 
 class HasServiceToken(BasePermission):
-    """Write access to the endpoint requires either the shared service token or a logged-in user."""
+    """Access requires the shared service token or a logged-in user.
 
-    message = ('Writes to this endpoint require Authorization: Bearer <KLIKK_API_TOKEN> '
+    Since the 2026-08-20 lockdown reads are gated too: an explicit
+    ``permission_classes`` REPLACES the project default rather than adding to it,
+    so if this class kept its old pass-through for SAFE_METHODS the pricelist
+    reads would remain the only anonymous data endpoints in the project.
+    """
+
+    message = ('This endpoint requires Authorization: Bearer <KLIKK_API_TOKEN> '
                'or an authenticated session.')
 
     def has_permission(self, request, view) -> bool:
-        if request.method in SAFE_METHODS:
-            # Reads stay open. The project default is AllowAny and these views serve reads
-            # on the same URL as the writes; this class must not narrow them.
-            return True
-        if not _configured_token():
+        if request.method not in SAFE_METHODS and not _configured_token():
             _warn_missing_token_once()
         user = getattr(request, 'user', None)
         if isinstance(user, ServiceAccount):

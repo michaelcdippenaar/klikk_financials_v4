@@ -860,7 +860,21 @@ class ApiTestBase(TestCase):
         return reverse(f'pricelist:{name}', kwargs={'code': code}) if code else reverse(f'pricelist:{name}')
 
 
-class ItemsListApiTests(ApiTestBase):
+class AuthedApiTestBase(ApiTestBase):
+    """Behaviour tests run as a logged-in user: since the 2026-08-20 lockdown
+    (SECURITY-NOTE.md) every pricelist endpoint, reads included, requires an
+    authenticated caller. The anonymous-401 contract is pinned in
+    apps/user/test_auth_lockdown.py and in ServiceTokenReadRegressionTests."""
+
+    def setUp(self):
+        super().setUp()
+        from django.contrib.auth import get_user_model
+        self.user = get_user_model().objects.create_user(
+            username='pricelist-reader', email='pr@example.com', password='pw-not-logged')
+        self.client.force_authenticate(self.user)
+
+
+class ItemsListApiTests(AuthedApiTestBase):
     def test_url_mounts_at_api_pricelist(self):
         """The app must be mounted at /api/pricelist/ (the MCP server hard-codes this path)."""
         self.assertEqual(self.items_url, '/api/pricelist/items/')
@@ -1246,7 +1260,7 @@ class ItemPricesApiTests(ApiTestBase):
         self.assertEqual(PriceListPrice.objects.filter(item=self.top, price_type='LIST').count(), 2)
 
 
-class QuoteApiTests(ApiTestBase):
+class QuoteApiTests(AuthedApiTestBase):
     def test_quote_happy_path(self):
         """POST /quote/ returns the full quote shape with string money."""
         r = self.client.post(self._url('quote'), {
@@ -1331,7 +1345,7 @@ class QuoteApiTests(ApiTestBase):
         self.assertEqual(self.client.get(self._url('quote')).status_code, 405)
 
 
-class ExportApiTests(ApiTestBase):
+class ExportApiTests(AuthedApiTestBase):
     def _rows(self, response):
         text = response.content.decode('utf-8')
         return list(csv.reader(io.StringIO(text)))
@@ -2050,69 +2064,64 @@ class ServiceTokenReadRegressionTests(ServiceTokenTestBase):
         ('export', None),
     )
 
-    def test_all_reads_stay_open_with_no_header_token_set_and_unset(self):
-        """(12) Every GET must be 200 with NO Authorization header, whether or not
-        KLIKK_API_TOKEN is configured."""
+    def test_all_reads_are_closed_to_anonymous_callers_token_set_and_unset(self):
+        """(12, INVERTED 2026-08-20) Every GET must be 401 with NO Authorization header,
+        whether or not KLIKK_API_TOKEN is configured. This is the opposite of the original
+        contract: SECURITY-NOTE.md's lockdown made IsAuthenticated the project default and
+        HasServiceToken now gates reads too. A 200 here means the general-ledger-era
+        anonymous surface is creeping back."""
         for token_setting in (SERVICE_TOKEN, ''):
             for name, code in self.READ_CASES:
                 with self.subTest(KLIKK_API_TOKEN=token_setting or '<unset>', endpoint=name):
                     with override_settings(KLIKK_API_TOKEN=token_setting):
                         r = self.client.get(self._url(name, code))
-                    self.assertEqual(r.status_code, 200,
-                                     f'GET {name} regressed to {r.status_code}: {r.content[:200]!r}')
+                    self.assertEqual(r.status_code, 401,
+                                     f'GET {name} answered {r.status_code} anonymously: '
+                                     f'{r.content[:200]!r}')
 
-    def test_quote_stays_open_without_any_authorization_header(self):
-        """(13) POST /quote/ is a write-shaped method on a read-only calculation. A blanket
-        "unsafe method ⇒ needs a token" rule applied at the wrong level (settings-wide
-        DEFAULT_PERMISSION_CLASSES, or the decorator pasted onto quote_view) breaks the
-        console's quote builder for every anonymous caller. This is the regression."""
+    def test_quote_closed_anonymously_but_works_with_service_token(self):
+        """(13, INVERTED 2026-08-20) POST /quote/ persists nothing, but it prices the rate
+        card, so it is data disclosure all the same. Anonymous → 401; the service token
+        (or a console JWT) still gets the calculation."""
+        body = {'lines': [{'code': 'DB-V10P', 'qty': 4, 'days': 3},
+                          {'code': 'DB-D40', 'qty': 1, 'days': 3}],
+                'date': '2026-02-01'}
         for token_setting in (SERVICE_TOKEN, ''):
             with self.subTest(KLIKK_API_TOKEN=token_setting or '<unset>'):
                 with override_settings(KLIKK_API_TOKEN=token_setting):
-                    r = self.client.post(
-                        self._url('quote'),
-                        {'lines': [{'code': 'DB-V10P', 'qty': 4, 'days': 3},
-                                   {'code': 'DB-D40', 'qty': 1, 'days': 3}],
-                         'date': '2026-02-01'},
-                        format='json',
-                    )
-                self.assertEqual(r.status_code, 200,
-                                 f'POST /quote/ regressed to {r.status_code}: {r.content[:300]!r}')
-                self.assertEqual(r.json()['lines'][0]['unit_price'], '850.00')
+                    r = self.client.post(self._url('quote'), body, format='json')
+                self.assertEqual(r.status_code, 401,
+                                 f'anonymous POST /quote/ answered {r.status_code}: '
+                                 f'{r.content[:300]!r}')
+        with override_settings(KLIKK_API_TOKEN=SERVICE_TOKEN):
+            r = self.client.post(self._url('quote'), body, format='json', **self._bearer())
+        self.assertEqual(r.status_code, 200, r.content)
+        self.assertEqual(r.json()['lines'][0]['unit_price'], '850.00')
         self.assertEqual(PriceListPrice.objects.count(), 4, '/quote/ must persist nothing')
 
     def test_quote_400_path_is_still_a_400_not_an_auth_error(self):
-        """A bad /quote/ body must still be the app's 400, not a 401/403 — proof the request
-        reached the view rather than being stopped by a permission class."""
+        """A bad /quote/ body from an AUTHENTICATED caller must still be the app's 400 —
+        proof the request reached the view rather than being stopped by a permission
+        class."""
         with override_settings(KLIKK_API_TOKEN=SERVICE_TOKEN):
-            r = self.client.post(self._url('quote'), {'lines': []}, format='json')
+            r = self.client.post(self._url('quote'), {'lines': []}, format='json',
+                                 **self._bearer())
         self.assertEqual(r.status_code, 400, r.content)
         self.assertIn('lines', r.json()['detail'])
 
     @override_settings(KLIKK_API_TOKEN=SERVICE_TOKEN)
     def test_get_with_a_garbage_bearer_header_documented_behaviour(self):
-        """(14) KNOWN CONSEQUENCE, not a wish.
-
-        A GET is permitted by HasServiceToken (SAFE_METHODS), but AUTHENTICATION runs before
-        PERMISSIONS. ServiceTokenAuthentication returns None on a non-matching token so the
-        chain falls through to JWTAuthentication, which RAISES on a non-JWT bearer value
-        rather than returning None. That exception short-circuits the request, so an open
-        read endpoint answers 401 when the caller volunteers a junk Bearer header.
-
-        That is DRF's documented authenticator contract (raise = stop the chain), it predates
-        this feature, and it only affects callers who send a broken credential they did not
-        need to send. Asserted here so the behaviour is pinned rather than discovered in
-        production; if it ever becomes 200 that is a change worth noticing, not a silent win.
-        """
+        """(14) A junk Bearer value 401s from JWTAuthentication (raise = stop the chain,
+        DRF's documented authenticator contract). Since the 2026-08-20 lockdown a GET with
+        no header at all ALSO 401s — from the permission layer instead. Both paths closed,
+        different layers; pinned so a change in either is noticed."""
         r = self.client.get(self.items_url, **self._bearer('garbage'))
         self.assertEqual(
             r.status_code, 401,
             f'expected the documented 401 from JWTAuthentication on a junk Bearer header; '
             f'got {r.status_code} {r.content[:300]!r}',
         )
-        # ...and it is genuinely the authenticator, not the permission class: the same GET
-        # with no header at all is fine.
-        self.assertEqual(self.client.get(self.items_url).status_code, 200)
+        self.assertEqual(self.client.get(self.items_url).status_code, 401)
 
 
 # --------------------------------------------------------------------------- #

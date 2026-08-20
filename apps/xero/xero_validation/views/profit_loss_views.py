@@ -7,7 +7,7 @@ API views for Profit & Loss report operations including:
 - Exporting reports
 """
 from rest_framework import status
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -27,12 +27,7 @@ from .common import (
 
 class ImportProfitLossView(APIView):
     """Import Profit and Loss report from Xero API. Supports both GET (query params) and POST (body)."""
-    # Gated 2026-08-20: pulls a live report from Xero, so any anonymous
-    # internet caller could burn the tenant's 1,000/day budget
-    # (SECURITY-NOTE.md §3). Missed in the first gating pass and caught by the
-    # anti-regression sweep in xero_sync/test_trigger_auth.py. Console sends
-    # its JWT; MCP uses the shared service token.
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         """Allow GET with query params: tenant_id, from_date, to_date, periods, timeframe."""
@@ -80,7 +75,7 @@ class ImportProfitLossView(APIView):
 
 class CompareProfitLossView(APIView):
     """Compare Xero Profit and Loss report with database trail balance (per month for 12-month period)."""
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def post(self, request):
         try:
@@ -109,7 +104,7 @@ class CompareProfitLossView(APIView):
 
 class ExportProfitLossCompleteView(APIView):
     """Export Profit and Loss report: both raw JSON and parsed lines to files."""
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def post(self, request):
         try:

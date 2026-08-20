@@ -179,9 +179,23 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.TokenAuthentication',  # Keep for backward compatibility
         'rest_framework.authentication.SessionAuthentication',
     ],
+    # SECURITY (2026-08-20): flipped from AllowAny after SECURITY-NOTE.md documented
+    # ~90 anonymously reachable endpoints (full GL, Investec bank data, personal
+    # expenses) on the public internet. Every DRF view is now authenticated by
+    # default. The ONLY views that may declare AllowAny are the credential
+    # bootstrap paths (login/refresh/token, the nginx auth_request check) and the
+    # Xero OAuth callback — each carries a comment saying why. Do NOT add more.
     'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.AllowAny',  # Views can override with IsAuthenticated if needed
+        'rest_framework.permissions.IsAuthenticated',
     ],
+    # Anonymous callers share one modest bucket (they can only reach login/token
+    # endpoints and the Xero callback now). Authenticated traffic is unthrottled.
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {
+        'anon': '60/min',
+    },
 }
 
 # JWT Configuration

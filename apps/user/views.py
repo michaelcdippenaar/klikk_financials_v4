@@ -6,7 +6,7 @@ import logging
 from rest_framework import status, generics
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAdminUser
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
 from rest_framework_simplejwt.exceptions import TokenError
@@ -22,11 +22,14 @@ logger = logging.getLogger(__name__)
 
 class RegisterView(generics.CreateAPIView):
     """
-    User registration endpoint.
-    
-    Creates a new user account and returns JWT tokens.
-    
-    POST /api/auth/register/
+    User creation endpoint — ADMIN ONLY since 2026-08-20.
+
+    This was AllowAny and handed a working JWT to any anonymous caller, which
+    made every IsAuthenticated gate in the project theatre (SECURITY-NOTE.md §3,
+    "load-bearing" finding). It now requires a logged-in staff user. Accounts
+    can also be created with `manage.py createsuperuser` or the Django admin.
+
+    POST /api/auth/register/   (Authorization: Bearer <staff JWT>)
     {
         "username": "user123",
         "email": "user@example.com",
@@ -36,7 +39,7 @@ class RegisterView(generics.CreateAPIView):
         "last_name": "Doe"     # Optional
     }
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAdminUser]
     queryset = User.objects.all()
     
     def post(self, request, *args, **kwargs):
@@ -149,7 +152,7 @@ class LoginView(TokenObtainPairView):
     
     Note: You can use either username or email to login.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [AllowAny]  # Credential bootstrap: must stay public or nobody can log in.
     
     def post(self, request, *args, **kwargs):
         username_or_email = request.data.get('username') or request.data.get('email')
@@ -224,7 +227,7 @@ class NginxAuthCheckView(APIView):
     Reads JWT from the klikk_token cookie and verifies it.
     Returns 200 if valid, 401 if missing/invalid.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [AllowAny]  # It IS the auth check; nginx calls it before any auth exists.
     authentication_classes = []
 
     def get(self, request):
@@ -247,7 +250,7 @@ class RefreshTokenView(generics.GenericAPIView):
         "refresh": "your_refresh_token_here"
     }
     """
-    permission_classes = [AllowAny]
+    permission_classes = [AllowAny]  # Credential bootstrap: the access token being refreshed is expired.
     
     def post(self, request, *args, **kwargs):
         refresh_token = request.data.get('refresh')

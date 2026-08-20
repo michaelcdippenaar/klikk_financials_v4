@@ -28,6 +28,15 @@ def make_txn(account, description, amount='100.00', ttype='CardPurchases',
     )
 
 
+
+def _authed_user():
+    """Reads require authentication since the 2026-08-20 lockdown (SECURITY-NOTE.md);
+    behaviour tests run as a logged-in user. Anonymous 401s are pinned in
+    apps/user/test_auth_lockdown.py."""
+    from django.contrib.auth import get_user_model
+    user, _ = get_user_model().objects.get_or_create(username='test-authed-caller')
+    return user
+
 class ClassifierServiceTests(TestCase):
     def setUp(self):
         self.account = make_account()
@@ -105,6 +114,7 @@ class ClassifierServiceTests(TestCase):
 class ReportApiTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.client.force_authenticate(_authed_user())
         self.mc = make_account(owner='MC', account_id='acc-mc', number='1001')
         self.wife = make_account(owner='Wife', account_id='acc-wife', number='2002')
         self.groceries = Category.objects.create(type=Category.TYPE_PERSONAL, name='Groceries')
@@ -146,6 +156,7 @@ class ReportApiTests(TestCase):
 class OverrideApiTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.client.force_authenticate(_authed_user())
         self.account = make_account()
         self.groceries = Category.objects.create(type=Category.TYPE_PERSONAL, name='Groceries')
         self.kids = Category.objects.create(type=Category.TYPE_PERSONAL, name='Kids')
@@ -187,6 +198,7 @@ class OverrideApiTests(TestCase):
 class RulesApiTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.client.force_authenticate(_authed_user())
         self.cat = Category.objects.create(type=Category.TYPE_PERSONAL, name='Groceries')
         self.cat2 = Category.objects.create(type=Category.TYPE_PERSONAL, name='Takeaway')
 

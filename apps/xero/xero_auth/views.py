@@ -29,7 +29,7 @@ FRONTEND_URL = getattr(settings, 'FRONTEND_URL', 'http://localhost:9000')
 
 
 class XeroAuthInitiateView(APIView):
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         """Initiate Xero OAuth2 flow by returning the authorization URL."""
@@ -63,7 +63,14 @@ class XeroAuthInitiateView(APIView):
 
 
 class XeroCallbackView(APIView):
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    # MUST stay AllowAny: Xero's OAuth redirect lands the user's browser here
+    # (XERO_REDIRECT_URI = https://console.8-bit.space/xero/callback/) with no
+    # Authorization header. Gating it breaks Xero reconnection entirely.
+    # Residual risk, accepted 2026-08-20: this view does NOT validate an OAuth
+    # `state` parameter — an anonymous GET without a valid ?code= only bounces
+    # to the frontend error page, and a forged ?code= fails Xero's token
+    # exchange. Adding state validation is the proper fix if this is revisited.
+    permission_classes = [AllowAny]
 
     def _redirect_error(self, message):
         """Redirect to frontend with error message."""
@@ -241,7 +248,7 @@ class XeroCallbackView(APIView):
 
 class XeroConnectionStatusView(APIView):
     """Return the current Xero connection status for all tenants."""
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         try:
@@ -309,7 +316,7 @@ class XeroConnectionStatusView(APIView):
 
 class XeroCredentialsView(APIView):
     """Save or update Xero API credentials (client_id, client_secret)."""
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     # Default Xero OAuth2 URLs
     XERO_AUTH_URL = 'https://login.xero.com/identity/connect/authorize'

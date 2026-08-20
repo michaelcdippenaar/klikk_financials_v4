@@ -4,14 +4,14 @@ Xero core views - tenant management.
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated
 
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_auth.models import XeroClientCredentials, XeroTenantToken
 
 
 class XeroTenantListView(APIView):
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         """List all tenants connected to the user's credentials."""

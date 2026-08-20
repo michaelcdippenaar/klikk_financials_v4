@@ -4,7 +4,7 @@ Xero sync views - data synchronization endpoints.
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated
 
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_sync.api_call_logging import get_api_call_stats
@@ -69,7 +69,7 @@ class XeroApiCallStatsView(APIView):
     total_today (locally logged calls -- the under-counting fallback for
     when quota.day_remaining is None).
     """
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         tenant_id = request.query_params.get('tenant_id')
@@ -116,7 +116,7 @@ class XeroProcessStatusView(APIView):
           }
         }
     """
-    permission_classes = [AllowAny]  # matches sibling views in this module
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     # Stage id (matches the frontend PipelineStatusStrip / KOperationCard ids)
     # -> XeroLastUpdate end_point(s). The latest date across the group wins.

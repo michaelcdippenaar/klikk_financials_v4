@@ -232,32 +232,35 @@ class JwtHappyPathTests(_Base):
             m.assert_called_once()
 
 
-class NegativeControlsStayOpenTests(_Base):
-    """Deliberately-anonymous reads must stay 200. If gating leaked onto these
-    the quota widget / process page silently dies. None of these hit Xero."""
+class FormerNegativeControlsNowGatedTests(_Base):
+    """CONTRACT INVERTED 2026-08-20. When the triggers were gated (19 Aug)
+    these read endpoints were deliberately left anonymous so the quota widget
+    / process page kept working. The full lockdown (SECURITY-NOTE.md,
+    DEFAULT_PERMISSION_CLASSES=IsAuthenticated) closed them the next day; the
+    console now sends a JWT everywhere. Anonymous must be 401, authenticated
+    must get past the permission layer."""
 
-    def test_api_call_stats_open(self):
-        resp = self.client.get(reverse("xero_sync:xero-api-call-stats"))
-        self.assertEqual(resp.status_code, 200)
+    GATED_READS = ["xero_sync:xero-api-call-stats", "xero_sync:xero-process-status",
+                   "xero_data:aged_payables_list", "xero_data:aged_receivables_list",
+                   "xero_data:quotes_list", "xero_data:invoices_list"]
 
-    def test_process_status_open(self):
-        resp = self.client.get(reverse("xero_sync:xero-process-status"))
-        self.assertEqual(resp.status_code, 200)
-
-    def test_list_gets_open(self):
-        # These stay anonymous. They read local DB only. Some require a
-        # tenant_id query param and answer 400 without it -- a 400 still proves
-        # the request passed the permission layer (not 401/403), which is the
-        # negative-control property we assert.
-        for name in ["xero_data:aged_payables_list", "xero_data:aged_receivables_list",
-                     "xero_data:quotes_list", "xero_data:invoices_list"]:
+    def test_reads_now_401_anonymously(self):
+        for name in self.GATED_READS:
             with self.subTest(endpoint=name):
                 resp = self.client.get(reverse(name))
-                self.assertNotIn(
-                    resp.status_code, REJECTED,
-                    f"{name} answered {resp.status_code}: gating leaked onto a "
-                    f"negative-control list endpoint",
+                self.assertEqual(
+                    resp.status_code, 401,
+                    f"{name} answered {resp.status_code} to an anonymous "
+                    f"caller: the lockdown regressed",
                 )
+
+    def test_reads_pass_the_gate_for_an_authenticated_user(self):
+        # Some require a tenant_id query param and answer 400 without it --
+        # a 400 still proves the request passed the permission layer.
+        self.client.force_authenticate(self.user)
+        for name in self.GATED_READS:
+            with self.subTest(endpoint=name):
+                resp = self.client.get(reverse(name))
                 self.assertIn(resp.status_code, (200, 400))
 
 
@@ -291,21 +294,22 @@ _ALLOWED_OPEN_XERO_ROUTES = {
     "xero/sync/process-status/",
 }
 
-# CLOSED 2026-08-20. These two were found ungated by the sweep below: both are
-# AllowAny-shaped triggers that pull live report data from Xero, so any
-# anonymous internet caller could burn the tenant's 1,000/day budget. They were
-# missed by the first gating pass (they live in the same xero_validation app as
-# the ReconcileReportsView that WAS gated). senior-dev gated both; what was a
-# "these are still open" tripwire is now a POSITIVE assertion that they stay
-# gated, which is what the tripwire was built to become.
-_FORMERLY_UNGATED_NOW_GATED = {
-    # route: (reverse_name, view_class_name, why it burns budget)
-    "xero/validation/import-profit-loss/": (
-        "xero_validation:import_profit_loss", "ImportProfitLossView",
-        "GET+POST, calls import_profit_loss_from_xero()"),
-    "xero/validation/balance-sheet/": (
-        "xero_validation:validate_complete", "ValidateBalanceSheetCompleteView",
-        "POST, calls import_trail_balance_from_xero()"),
+# KNOWN, UNFIXED HOLES as of 2026-08-20. Each is AllowAny AND pulls live report
+# data from Xero when it runs, so any anonymous internet caller can burn the
+# tenant's 1,000/day budget -- exactly the class of hole the gating pass was
+# meant to close, but these two were MISSED (they live in the same
+# xero_validation app as the ReconcileReportsView that WAS gated).
+# Reported to senior-dev. The living sweep subtracts these so it stays green
+# and keeps biting on genuinely-new triggers; the tripwire below asserts they
+# are still open, and will FAIL the moment they are gated -- forcing this list
+# to be trimmed when the fix lands.
+_KNOWN_UNGATED_HOLES = {
+    # route: (reverse_name, view_class_name, why)
+    # EMPTIED 2026-08-20. Both entries -- xero_validation:import_profit_loss and
+    # xero_validation:validate_complete -- were closed by the SECURITY-NOTE.md
+    # lockdown, and this tripwire is what caught it. Keep the dict (and the
+    # tripwire) in place: it is the mechanism that stops a future AllowAny
+    # exemption from becoming permanent and forgotten.
 }
 
 
@@ -323,13 +327,13 @@ class AntiRegressionSweepTests(TestCase):
 
     def test_no_new_ungated_xero_triggers(self):
         """LIVING GUARD: every trigger-shaped path under xero/ must NOT be
-        AllowAny, EXCEPT the documented negative controls. A newly-added
-        ungated Xero trigger fails here."""
+        AllowAny, EXCEPT the documented negative controls and the two known,
+        reported holes. A NEWLY-added ungated Xero trigger fails here."""
         violations = []
         for route, cls in _iter_routes(get_resolver()):
             if not route.startswith("xero/"):
                 continue
-            if route in _ALLOWED_OPEN_XERO_ROUTES:
+            if route in _ALLOWED_OPEN_XERO_ROUTES or route in _KNOWN_UNGATED_HOLES:
                 continue
             if not TRIGGER_RE.search(route):
                 continue
@@ -353,20 +357,21 @@ class AntiRegressionSweepTests(TestCase):
         cls = getattr(match.func, "cls", None) or getattr(match.func, "view_class", None)
         self.assertNotIn(AllowAny, getattr(cls, "permission_classes", []))
 
-    def test_formerly_ungated_triggers_stay_gated(self):
-        """POSITIVE assertion for the two holes this sweep originally caught.
-
-        Both pull live Xero reports, so an anonymous caller reaching either one
-        spends the tenant's daily budget. They are gated now; if anything ever
-        reverts one to AllowAny this fails and names it."""
-        regressed = []
-        for route, (name, view_name, why) in _FORMERLY_UNGATED_NOW_GATED.items():
+    def test_known_holes_are_still_open_tripwire(self):
+        """TRIPWIRE. Asserts every entry in _KNOWN_UNGATED_HOLES is STILL
+        AllowAny, so a hole that gets fixed must be removed from the list
+        rather than lingering as a stale exemption. The list is empty as of
+        2026-08-20 -- this test now also asserts it STAYS empty, which is the
+        stronger property: a new AllowAny exemption has to be added here
+        deliberately, in a diff someone reviews."""
+        fixed = []
+        for route, (name, view_name, _why) in _KNOWN_UNGATED_HOLES.items():
             match = resolve(reverse(name))
             cls = getattr(match.func, "cls", None) or getattr(match.func, "view_class", None)
-            if AllowAny in getattr(cls, "permission_classes", []):
-                regressed.append(f"{route} -> {view_name} is AllowAny again ({why})")
+            if AllowAny not in getattr(cls, "permission_classes", []):
+                fixed.append(f"{name} ({view_name}) now appears GATED")
         self.assertEqual(
-            regressed, [],
-            "A previously-closed Xero budget hole has REGRESSED to AllowAny:\n  "
-            + "\n  ".join(regressed),
+            fixed, [],
+            "A known hole looks fixed -- remove it from _KNOWN_UNGATED_HOLES:\n  "
+            + "\n  ".join(fixed),
         )

@@ -12,9 +12,19 @@ from apps.financial_investments.services_extra import fetch_news
 from apps.investec.models import InvestecJsePortfolio, InvestecJseShareNameMapping, InvestecJseTransaction
 
 
+
+def _authed_user():
+    """Reads require authentication since the 2026-08-20 lockdown (SECURITY-NOTE.md);
+    behaviour tests run as a logged-in user. Anonymous 401s are pinned in
+    apps/user/test_auth_lockdown.py."""
+    from django.contrib.auth import get_user_model
+    user, _ = get_user_model().objects.get_or_create(username='test-authed-caller')
+    return user
+
 class SymbolBuyTransactionsTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.client.force_authenticate(_authed_user())
         self.mapping = InvestecJseShareNameMapping.objects.create(
             share_name='KALGROUP',
             share_name2='KAL',
@@ -148,6 +158,7 @@ class NewsFetchTests(TestCase):
 class SymbolArticleVectorizationTests(TestCase):
     def setUp(self):
         self.client = APIClient()
+        self.client.force_authenticate(_authed_user())
         self.symbol = Symbol.objects.create(
             symbol='BOX.JO',
             name='Boxer Retail Ltd',

@@ -6,7 +6,7 @@ from django.contrib.auth.decorators import login_required
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_metadata.models import XeroAccount
@@ -103,7 +103,7 @@ from apps.xero.xero_metadata.models import XeroContacts, XeroTracking  # noqa: E
 
 class XeroContactListView(APIView):
     """GET /xero/metadata/contacts/?tenant_id=&q=&is_supplier=&is_customer=&limit=&offset="""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         tenant_id = request.query_params.get('tenant_id')
@@ -148,7 +148,7 @@ class XeroContactListView(APIView):
 
 class XeroTrackingListView(APIView):
     """GET /xero/metadata/tracking/?tenant_id=&active=&limit=&offset="""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         tenant_id = request.query_params.get('tenant_id')
@@ -184,7 +184,7 @@ class XeroTrackingListView(APIView):
 
 class XeroAccountListView(APIView):
     """GET /xero/metadata/accounts/?tenant_id=&q=&type=&limit=&offset="""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         tenant_id = request.query_params.get('tenant_id')

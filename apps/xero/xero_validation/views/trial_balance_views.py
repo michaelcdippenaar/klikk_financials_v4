@@ -9,7 +9,7 @@ API views for Trial Balance report operations including:
 - Adding income statement entries
 """
 from rest_framework import status
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -45,12 +45,7 @@ class ValidateBalanceSheetCompleteView(APIView):
     - export_line_items: Export line items to CSV
     - add_income_statement: Add income statement to report
     """
-    # Gated 2026-08-20: pulls a live report from Xero, so any anonymous
-    # internet caller could burn the tenant's 1,000/day budget
-    # (SECURITY-NOTE.md §3). Missed in the first gating pass and caught by the
-    # anti-regression sweep in xero_sync/test_trigger_auth.py. Console sends
-    # its JWT; MCP uses the shared service token.
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def post(self, request):
         try:
@@ -102,7 +97,7 @@ class ValidateBalanceSheetCompleteView(APIView):
 
 class ImportTrailBalanceView(APIView):
     """Import trail balance report from Xero API."""
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def post(self, request):
         try:
@@ -129,7 +124,7 @@ class ImportTrailBalanceView(APIView):
 
 class CompareTrailBalanceView(APIView):
     """Compare Xero trail balance report with database trail balance."""
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def post(self, request):
         try:
@@ -158,7 +153,7 @@ class CompareTrailBalanceView(APIView):
 
 class TrailBalanceComparisonDetailsView(APIView):
     """Get detailed comparison results for a specific report."""
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request, report_id):
         try:
@@ -204,7 +199,7 @@ class TrailBalanceComparisonDetailsView(APIView):
 
 class ImportAndExportTrailBalanceView(APIView):
     """Temporary view to import trail balance report and export to files (testing purposes only)."""
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def post(self, request):
         try:
@@ -226,7 +221,7 @@ class ImportAndExportTrailBalanceView(APIView):
 
 class ValidateBalanceSheetAccountsView(APIView):
     """Validate balance sheet accounts from Xero trail balance report against database (cumulative YTD)."""
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def post(self, request):
         try:
@@ -258,7 +253,7 @@ class ValidateBalanceSheetAccountsView(APIView):
 
 class ExportLineItemsView(APIView):
     """Export all line items from a trial balance report to CSV."""
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def post(self, request):
         try:
@@ -280,7 +275,7 @@ class ExportLineItemsView(APIView):
 
 class ExportTrailBalanceCompleteView(APIView):
     """Export Trail Balance report: both raw JSON and parsed lines to files."""
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def post(self, request):
         try:
@@ -311,7 +306,7 @@ class ExportTrailBalanceCompleteView(APIView):
 
 class AddIncomeStatementToReportView(APIView):
     """Add income statement (P&L) entries to a trial balance report (uses latest report if report_id not provided)."""
-    permission_classes = [AllowAny]  # TODO: Change to IsAuthenticated for production
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def post(self, request):
         try:

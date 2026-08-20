@@ -24,11 +24,21 @@ def make_portfolio(company='Test Co', share_code='TST', portfolio_date=None):
     )
 
 
+
+def _authed_user():
+    """Reads require authentication since the 2026-08-20 lockdown (SECURITY-NOTE.md);
+    behaviour tests run as a logged-in user. Anonymous 401s are pinned in
+    apps/user/test_auth_lockdown.py."""
+    from django.contrib.auth import get_user_model
+    user, _ = get_user_model().objects.get_or_create(username='test-authed-caller')
+    return user
+
 class PortfolioListViewTests(TestCase):
     """Tests for GET /api/investec/portfolio/"""
 
     def setUp(self):
         self.client = APIClient()
+        self.client.force_authenticate(_authed_user())
         for i in range(1, 6):
             make_portfolio(company=f'Company {i}', share_code=f'CO{i}')
 
@@ -94,6 +104,7 @@ class JseTransactionListViewCoverageTests(TestCase):
 
     def setUp(self):
         self.client = APIClient()
+        self.client.force_authenticate(_authed_user())
         InvestecJseTransaction.objects.create(
             date=date(2024, 1, 15),
             account_number='10011910139',
@@ -131,6 +142,7 @@ class BankTransactionAccountFilterTests(TestCase):
 
     def setUp(self):
         self.client = APIClient()
+        self.client.force_authenticate(_authed_user())
         self.account_a = InvestecBankAccount.objects.create(
             account_id='acc-a',
             account_number='10011910139',
@@ -184,6 +196,7 @@ class BankCostReportTests(TestCase):
 
     def setUp(self):
         self.client = APIClient()
+        self.client.force_authenticate(_authed_user())
         self.account_a = InvestecBankAccount.objects.create(
             account_id='cost-a',
             account_number='10011910139',

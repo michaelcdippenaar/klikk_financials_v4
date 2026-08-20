@@ -1,7 +1,7 @@
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import IsAuthenticated
 
 from apps.planning_analytics.models import TM1ServerConfig, TM1ProcessConfig, UserTM1Credentials
 from apps.planning_analytics.services.tm1_client import execute_process, test_connection
@@ -119,7 +119,7 @@ class TM1TestConnectionView(APIView):
 
 class TM1ConfigView(APIView):
     """GET / POST the active TM1 server configuration."""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         cfg = TM1ServerConfig.get_active()
@@ -162,7 +162,7 @@ class TM1ConfigView(APIView):
 
 class TM1ProcessListView(APIView):
     """GET / POST the list of TM1 TI processes."""
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]  # Gated 2026-08-20 (SECURITY-NOTE.md lockdown); was AllowAny
 
     def get(self, request):
         qs = TM1ProcessConfig.objects.all()

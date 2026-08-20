@@ -3,6 +3,23 @@
 *Written 19 August 2026 on branch `feature/pricelist`, alongside the change that put a shared service token in front of the three pricelist **write** endpoints.*
 *Status: **escalation, not a fix**. Nothing in this note has been implemented. It needs a decision from MC.*
 
+> **STATUS UPDATE — 2026-08-20: CLOSED at the application layer.** The lockdown
+> described in §4 Step 2 is implemented:
+> `DEFAULT_PERMISSION_CLASSES = IsAuthenticated` project-wide; every explicit
+> `AllowAny` removed except the credential bootstrap paths (`/api/auth/login/`,
+> `/api/auth/refresh/`, `/api/auth/token/*`, `/api/auth/nginx-check/`,
+> `/api-token-auth/`) and `/xero/callback/`; `POST /api/auth/register/` is
+> `IsAdminUser`; the deploy webhook route is deleted (`apps/deployment/urls.py`);
+> anonymous throttling is on (60/min). The HMAC-signed slip viewer
+> `/audit/slip/<sha256>/?s=` remains public **by design** (see
+> `apps/audit/slip_view.py`). Machine callers: the MCP sends
+> `Bearer KLIKK_API_TOKEN` (ServiceTokenAuthentication), the Excel add-in its
+> per-user DRF authtoken; all crons use `manage.py`, none call HTTP. Regression
+> suite: `apps/user/test_auth_lockdown.py` + `excel_addin/README.md` curl loop.
+> Still open from this note: the edge allow-list (§4 Step 1, proposal with MC),
+> secret rotation for the DB password in git history, OAuth `state` validation
+> on the callback, and the POPIA §19/§22 historic-exposure question (with CCO).
+
 ---
 
 ## 1. Why this file exists

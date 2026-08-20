@@ -210,6 +210,12 @@ class ApiCallStatsEndpointTests(TestCase):
 
     def setUp(self):
         self.api = APIClient()
+        # Gated 2026-08-20 (SECURITY-NOTE.md lockdown): the stats endpoint now
+        # requires auth like everything else. Anonymous 401 is pinned in
+        # apps/user/test_auth_lockdown.py.
+        from django.contrib.auth import get_user_model
+        user, _ = get_user_model().objects.get_or_create(username='stats-authed-caller')
+        self.api.force_authenticate(user)
         self.url = reverse('xero_sync:xero-api-call-stats')
 
     def test_url_is_the_documented_path(self):
