@@ -53,8 +53,10 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework.authtoken',
     'rest_framework_simplejwt',  # JWT authentication
+    'strawberry_django',
     # Local apps
     'apps.user',
+    'apps.web_api_v2',  # Authenticated GraphQL boundary for the Vue portal
     'apps.deployment',  # GitHub webhook for automatic deployment
     # Xero apps
     'apps.xero.xero_auth',
@@ -169,6 +171,13 @@ SLIP_VIEW_BASE_URL = os.environ.get('SLIP_VIEW_BASE_URL', 'https://console.8-bit
 # Django user. Consumed by klikk_business_intelligence.permissions.ServiceTokenAuthentication.
 # Unset => service-token writes are denied (a warning is logged once).
 KLIKK_API_TOKEN = (os.environ.get('KLIKK_API_TOKEN') or '').strip()
+
+# Web GraphQL transport limits. Variables and document contents must never be
+# written to application logs.
+WEB_API_V2_MAX_REQUEST_BYTES = int(os.environ.get('WEB_API_V2_MAX_REQUEST_BYTES', str(256 * 1024)))
+WEB_API_V2_MAX_QUERY_DEPTH = int(os.environ.get('WEB_API_V2_MAX_QUERY_DEPTH', '8'))
+WEB_API_V2_MAX_QUERY_TOKENS = int(os.environ.get('WEB_API_V2_MAX_QUERY_TOKENS', '1000'))
+WEB_API_V2_MAX_FIELD_SELECTIONS = int(os.environ.get('WEB_API_V2_MAX_FIELD_SELECTIONS', '50'))
 
 # REST Framework Configuration
 REST_FRAMEWORK = {

@@ -1,0 +1,52 @@
+enum EntityCapability {
+  VIEW_FINANCIALS
+}
+
+type EntityOption {
+  id: ID!
+  name: String!
+  role: EntityRole!
+  active: Boolean!
+  status: EntityStatus!
+  capabilities: [EntityCapability!]!
+}
+
+enum EntityRole {
+  OWNER
+  ADMIN
+  REVIEWER
+  VIEWER
+}
+
+enum EntitySelectionState {
+  READY
+  NO_ACCESSIBLE_ENTITIES
+}
+
+enum EntityStatus {
+  AVAILABLE
+  REAUTHORIZATION_REQUIRED
+}
+
+type Query {
+  viewerContext: ViewerContext!
+}
+
+type Viewer {
+  id: ID!
+  username: String!
+  displayName: String!
+  email: String
+}
+
+type ViewerContext {
+  user: Viewer!
+  entities: [EntityOption!]!
+  entitySelectionState: EntitySelectionState!
+  preferences: ViewerPreferences!
+}
+
+type ViewerPreferences {
+  defaultEntityId: ID
+  defaultFinancialYear: Int
+}

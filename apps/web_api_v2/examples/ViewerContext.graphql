@@ -1,0 +1,23 @@
+query ViewerContext {
+  viewerContext {
+    user {
+      id
+      username
+      displayName
+      email
+    }
+    entitySelectionState
+    entities {
+      id
+      name
+      role
+      active
+      status
+      capabilities
+    }
+    preferences {
+      defaultEntityId
+      defaultFinancialYear
+    }
+  }
+}
