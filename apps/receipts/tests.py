@@ -543,7 +543,9 @@ class ListFilterTests(ReceiptsFixtureMixin, TestCase):
         self.assertEqual(a['review']['updated_by'], 'mc')
         b = rows[self.NAMES['b_fy26_auto']]
         self.assertEqual(b['comment_count'], 0)
-        self.assertEqual(b['review'], {'to_process': False, 'decision': '', 'note': '', 'updated_by': '', 'updated_at': None})
+        self.assertEqual(b['review'], {'to_process': False, 'decision': '', 'note': '',
+                                       'archived': False, 'archived_at': None, 'archived_by': '',
+                                       'updated_by': '', 'updated_at': None})
 
 
 # --------------------------------------------------------------------------- #
@@ -950,7 +952,7 @@ class ReviewPatchTests(ReceiptsFixtureMixin, TestCase):
         self.assertEqual(len(rows), 2)
         hdr = rows[0]
         rec = dict(zip(hdr, rows[1]))
-        self.assertEqual(rec['decision'], 'DUPLICATE')
+        self.assertNotIn('decision', hdr, 'v4: decision column left the export (the filter above still applied)')
         self.assertEqual(rec['to_process'], 'True')
         self.assertEqual(rec['note'], 'dup of x')
 
@@ -1046,8 +1048,10 @@ class CommentPostTests(ReceiptsFixtureMixin, TestCase):
 # 7. Export
 # --------------------------------------------------------------------------- #
 class ExportTests(ReceiptsFixtureMixin, TestCase):
+    # v4 contract: `decision` left the export (the console stopped surfacing it; PATCH/bulk
+    # still accept it), `archived` and `comments` (comment_count) arrived.
     EXPECTED_HEADER = ['date', 'supplier', 'total', 'category', 'xero_status', 'status_group', 'journal_number',
-                       'synced', 'to_process', 'decision', 'note', 'filename', 'sha256', 'view_url']
+                       'synced', 'to_process', 'archived', 'note', 'comments', 'filename', 'sha256', 'view_url']
 
     def test_csv_default_headers_and_row_count(self):
         resp = self.export()
@@ -1058,7 +1062,7 @@ class ExportTests(ReceiptsFixtureMixin, TestCase):
         rows = self.csv_rows(resp)
         self.assertEqual(rows[0], self.EXPECTED_HEADER)
         self.assertEqual(len(rows), 12 + 1)
-        self.assertEqual(len({r[12] for r in rows[1:]}), 12, 'duplicate sha rows in export')
+        self.assertEqual(len({r[13] for r in rows[1:]}), 12, 'duplicate sha rows in export')  # sha256 is column 13 in v4
 
     def test_csv_view_url_populated_and_valid(self):
         rows = self.csv_rows(self.export())
@@ -1098,7 +1102,9 @@ class ExportTests(ReceiptsFixtureMixin, TestCase):
         self.assertEqual(len(rows), 2)
         rec = dict(zip(rows[0], rows[1]))
         self.assertEqual(rec['to_process'], 'True')
-        self.assertEqual(rec['decision'], 'CAPTURE')
+        self.assertNotIn('decision', rec, 'v4: decision column left the export')
+        self.assertEqual(rec['archived'], 'False')
+        self.assertEqual(rec['comments'], '0')
         self.assertEqual(rec['note'], 'line1\nline2, "quoted"')
         self.assertEqual(rec['synced'], 'True')
         self.assertEqual(rec['journal_number'], '697')
@@ -1110,7 +1116,9 @@ class ExportTests(ReceiptsFixtureMixin, TestCase):
         self.assertEqual(rec['date'], '')
         self.assertEqual(rec['total'], '15.00')
         self.assertEqual(rec['to_process'], 'False')
-        self.assertEqual(rec['decision'], '')
+        self.assertNotIn('decision', rec, 'v4: decision column left the export')
+        self.assertEqual(rec['archived'], 'False')
+        self.assertEqual(rec['comments'], '0')
 
     def test_xlsx_export(self):
         from openpyxl import load_workbook
@@ -1563,11 +1571,11 @@ class JournalTypeAndOrgScopeTests(ReceiptsFixtureMixin, TestCase):
         self.assertEqual(Decimal(hits[0]['journal']['amount']), Decimal('500.25'))
         rows = self.csv_rows(self.export())
         self.assertEqual(len(rows), 13 + 1, 'export must have one row per slip, no fan-out')
-        self.assertEqual(sum(1 for r in rows[1:] if r[12] == sha(430)), 1)
+        self.assertEqual(sum(1 for r in rows[1:] if r[13] == sha(430)), 1)  # sha256 is column 13 in v4
 
     def test_export_journal_number_column_agrees_with_detail(self):
         rows = self.csv_rows(self.export())
-        by_sha = {r[12]: dict(zip(rows[0], r)) for r in rows[1:]}
+        by_sha = {r[13]: dict(zip(rows[0], r)) for r in rows[1:]}  # sha256 is column 13 in v4
         # resolving slip: export column == detail journal.journal_number == slip journal_number
         detail_a = self.detail(self.NAMES['a_fy26'])
         self.assertEqual(detail_a['journal']['journal_number'], 697)

@@ -5,10 +5,15 @@ Slippies register (``whatsapp.klikk_slips``), consumed by the console.
 GET   /audit/receipts/                         [JWT] list (filters, ordering, pagination, whole-filter totals)
 GET   /audit/receipts/?ids_only=1              [JWT] matching sha256s only — no rows, no pagination
 GET   /audit/receipts/<sha256>/                [JWT] one slip + full ocr + items + comments
-PATCH /audit/receipts/<sha256>/review/         [JWT] upsert {to_process, decision, note}
+PATCH /audit/receipts/<sha256>/review/         [JWT] upsert {to_process, decision, note, archived}
 POST  /audit/receipts/<sha256>/comments/       [JWT] add {text}
-POST  /audit/receipts/bulk/                    [JWT] apply review fields and/or a comment to many sha256s
+POST  /audit/receipts/bulk/                    [JWT] apply review fields (incl. set_archived) and/or a comment to many sha256s
 GET   /audit/receipts/export/?format=csv|xlsx  [JWT] every matching row, no pagination
+
+Archived slips ("dealt with" — soft, reversible, never a delete) are EXCLUDED from the
+list, ids_only and export by DEFAULT: the ``archived`` query param is three-way
+(absent/false = hide archived, true = only archived, all = both) and lives in
+``services.build_filters``, so every read path inherits it.
 
 **Every** endpoint requires an authenticated user (401 otherwise). The project's
 DRF default is ``AllowAny``, so each view opts in explicitly: the five DRF views
@@ -34,6 +39,7 @@ import math
 
 from django.db import transaction
 from django.http import HttpResponse, JsonResponse
+from django.utils import timezone
 from django.views.decorators.http import require_GET
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -69,11 +75,15 @@ def _nul_error(field: str, *values: str):
 
 BULK_MAX = 500  # sha256s per bulk request, counted AFTER de-duplication
 
+# `decision` was dropped from the export in v4 — the UI stopped surfacing it (the API still
+# accepts it on review/bulk; the contract is used elsewhere). `archived` resolves via the
+# review dict and `comment_count` via the shaped row, both attached by attach_review_state
+# before _export_rows flattens them into one namespace.
 EXPORT_COLUMNS = [
     ('slip_ts', 'date'), ('supplier', 'supplier'), ('total', 'total'), ('category', 'category'),
     ('xero_status', 'xero_status'), ('status_group', 'status_group'), ('journal_number', 'journal_number'),
-    ('synced_to_xero', 'synced'), ('to_process', 'to_process'), ('decision', 'decision'), ('note', 'note'),
-    ('filename', 'filename'), ('sha256', 'sha256'), ('view_url', 'view_url'),
+    ('synced_to_xero', 'synced'), ('to_process', 'to_process'), ('archived', 'archived'), ('note', 'note'),
+    ('comment_count', 'comments'), ('filename', 'filename'), ('sha256', 'sha256'), ('view_url', 'view_url'),
 ]
 
 
@@ -195,10 +205,22 @@ def receipt_review_view(request, sha256):
             return Response({'detail': f'decision must be one of {list(DECISION_VALUES)}'},
                             status=status.HTTP_400_BAD_REQUEST)
         fields['decision'] = decision
+    if 'archived' in data:
+        raw = data['archived']
+        # Same coercion + rejection contract as to_process, for the same reason.
+        flag = _bool(raw)
+        if flag is None and raw is not None:
+            return Response({'detail': 'archived must be a boolean (true/false, 1/0, yes/no, on/off)'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        # Archiving stamps who/when; un-archiving clears both, so a later re-archive can never
+        # show a stale actor or timestamp.
+        fields['archived'] = bool(flag)
+        fields['archived_at'] = timezone.now() if flag else None
+        fields['archived_by'] = _username(request) if flag else ''
     if 'note' in data:
         fields['note'] = str(data['note'] or '')
     if not fields:
-        return Response({'detail': 'nothing to update (expected to_process, decision and/or note)'},
+        return Response({'detail': 'nothing to update (expected to_process, decision, archived and/or note)'},
                         status=status.HTTP_400_BAD_REQUEST)
     bad_nul = _nul_error('note', fields.get('note', ''))
     if bad_nul is not None:
@@ -275,6 +297,16 @@ def receipts_bulk_view(request):
             return Response({'detail': f'decision must be one of {list(DECISION_VALUES)}'},
                             status=status.HTTP_400_BAD_REQUEST)
         fields['decision'] = decision
+    if 'set_archived' in data:
+        raw = data['set_archived']
+        # Same coercion + who/when stamping as the single-slip review endpoint.
+        flag = _bool(raw)
+        if flag is None and raw is not None:
+            return Response({'detail': 'set_archived must be a boolean (true/false, 1/0, yes/no, on/off)'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        fields['archived'] = bool(flag)
+        fields['archived_at'] = timezone.now() if flag else None
+        fields['archived_by'] = _username(request) if flag else ''
     if 'note' in data:
         fields['note'] = str(data['note'] or '')
     comment = None
@@ -284,7 +316,8 @@ def receipts_bulk_view(request):
             return Response({'detail': 'comment must not be empty'}, status=status.HTTP_400_BAD_REQUEST)
     if not fields and comment is None:
         # Key PRESENCE decides, not truthiness — {"note": ""} is a legitimate "clear the note".
-        return Response({'detail': 'nothing to do (expected set_to_process, decision, note and/or comment)'},
+        return Response({'detail': 'nothing to do (expected set_to_process, decision, note, '
+                                   'set_archived and/or comment)'},
                         status=status.HTTP_400_BAD_REQUEST)
     bad_nul = _nul_error('note/comment', fields.get('note', ''), comment or '')
     if bad_nul is not None:
@@ -314,6 +347,9 @@ def receipts_bulk_view(request):
 
 
 def _export_rows(params):
+    # Goes through build_filters, so the export inherits the archived default-exclusion (and
+    # the archived=true / archived=all overrides) exactly like the list. Do not special-case
+    # archived here — one filter builder, one truth.
     where, args = build_filters(params)
     rows = attach_review_state(query_slips(where, args, resolve_ordering(params.get('ordering'))))
     out = []

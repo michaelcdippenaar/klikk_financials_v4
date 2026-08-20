@@ -25,6 +25,13 @@ class SlipReview(models.Model):
     to_process = models.BooleanField(default=False)
     decision = models.CharField(max_length=20, blank=True, default='', choices=DECISION_CHOICES)
     note = models.TextField(blank=True, default='')
+    # Archive = "dealt with, clear it from the working list" — soft and reversible, never a
+    # delete (the register itself is untouched; this only hides the row from the default
+    # list filter). Indexed because EVERY list/export call filters on it (services.build_filters
+    # excludes archived rows unless asked otherwise).
+    archived = models.BooleanField(default=False, db_index=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
+    archived_by = models.CharField(max_length=150, blank=True, default='')
     updated_by = models.CharField(max_length=150, blank=True, default='')
     updated_at = models.DateTimeField(auto_now=True)
 

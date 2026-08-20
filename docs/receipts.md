@@ -1,12 +1,14 @@
 # Klikk Financials — Audit → Receipts (Slippies review workflow)
 *Living document. Describes the `apps.receipts` app (backend) and the console page `Audit → Receipts` (portal) as of branch `feature/receipts`, backend commit `1460497`. Written from the code, not from intent — where the code and this page disagree, the code wins and this page needs fixing.*
-*Version 3 — 20 Aug 2026. Adds bulk actions (`POST …/bulk/`, §3.6), the `ids_only` list mode that feeds "select all N filtered" (§3.1), and a 200-row page size on the console table (§8). Version 2 (19 Aug) added the auth gate (§3, §7) and the journal-type discriminator (§5).*
+*Version 4 — 20 Aug 2026. Adds **archive** — a soft, reversible "dealt with" flag on `SlipReview` (`archived`/`archived_at`/`archived_by`, migration `0002`), a three-way `archived` filter whose **default excludes archived rows** (§3.1), `archived` on the review PATCH (§3.3) and `set_archived` on bulk (§3.6), and swaps the export's `decision` column for `archived` + `comments` (§3.5). Version 3 (20 Aug) added bulk actions (`POST …/bulk/`, §3.6), the `ids_only` list mode that feeds "select all N filtered" (§3.1), and a 200-row page size on the console table (§8). Version 2 (19 Aug) added the auth gate (§3, §7) and the journal-type discriminator (§5).*
 
 ---
 
 ## 0. What it is
 
 A review workflow over the WhatsApp Slippies receipt register so MC and the bookkeeper can triage which receipts still need capturing into Xero. It lists every slip in `whatsapp.klikk_slips`, shows the receipt image/PDF next to its OCR fields and (where found) the matched Xero journal, and lets a reviewer flag a slip **to process** or record a **decision** that closes it out, with a note and a comment thread. The bookkeeper filters to the flagged slips, exports CSV/XLSX and captures those into Xero.
+
+**The `decision` control was removed from the console UI on 20 Aug 2026** (MC was not using it and it was crowding the triage row). The model field, the PATCH parameter and the bulk parameter all remain and still hold previously-captured values — only the UI stopped surfacing it, and the console deliberately never sends `decision` on a save so it cannot blank stored data. Archiving (§3.1) is what closes a slip out now.
 
 **Nothing in this feature writes to Xero.** It is a register and a worklist only. The only tables it writes are its own two review tables (§2). The register itself is never written.
 
@@ -53,7 +55,7 @@ Columns (from `information_schema`, 19 Aug 2026):
 
 ---
 
-## 2. The two managed tables (`receipts/0001_initial`)
+## 2. The two managed tables (`receipts/0001_initial` + `0002_slipreview_archived`)
 
 Both keyed on `sha256` as a **loose key** — no FK to `klikk_slips`, because the register is not a Django model and must never be altered. Writes check `slip_exists(sha256)` first (404 otherwise).
 
@@ -65,6 +67,9 @@ Both keyed on `sha256` as a **loose key** — no FK to `klikk_slips`, because th
 | `to_process` | bool, default `false` | "needs capturing in Xero" flag |
 | `decision` | char(20), default `''` | enum below |
 | `note` | text, default `''` | free text for the bookkeeper / auditor |
+| `archived` | bool, default `false`, **indexed** | "dealt with — hide from the default list" (§3.1). Soft and reversible; nothing is ever deleted, and the register row is untouched. Indexed because every list/export call filters on it. Existing rows defaulted to `false` on migration |
+| `archived_at` | timestamptz, nullable | stamped when archived; cleared (NULL) on un-archive so a re-archive never shows a stale timestamp |
+| `archived_by` | char(150), default `''` | username of the JWT user who archived; cleared on un-archive |
 | `updated_by` | char(150), default `''` | username of the JWT user at last write (empty if unauthenticated — can't happen via the API, writes are gated) |
 | `updated_at` | timestamptz, `auto_now` | |
 
@@ -84,7 +89,7 @@ The raw SQL never joins these tables. Review state is attached after the query b
 
 The console sends a simplejwt Bearer token on every call including the export (`rest_framework_simplejwt.authentication.JWTAuthentication` is first in `DEFAULT_AUTHENTICATION_CLASSES`; `TokenAuthentication` and `SessionAuthentication` are also enabled project-wide and satisfy the check too). The signed slip viewer (§7) is the one deliberate exception and stays public — a browser `<img>` / `<iframe>` cannot carry a Bearer token, and exported spreadsheets link to it; its guard is the HMAC in `?s=`.
 
-**NUL bytes (0x00).** JSON and query strings both permit ` `; a Postgres `text` column cannot store it, and psycopg raises *"A string literal cannot contain NUL"* while **binding the parameter**, before the statement is ever sent. Unguarded, that is a raw 500 from pure client input — found by the adversarial bulk suite on 20 Aug 2026, on three live paths (a `sha256s` entry, `note`/`comment`, and `?q=`, the last of which also affected the list and the export and predated the bulk work).
+**NUL bytes (0x00).** JSON and query strings both permit ``; a Postgres `text` column cannot store it, and psycopg raises *"A string literal cannot contain NUL"* while **binding the parameter**, before the statement is ever sent. Unguarded, that is a raw 500 from pure client input — found by the adversarial bulk suite on 20 Aug 2026, on three live paths (a `sha256s` entry, `note`/`comment`, and `?q=`, the last of which also affected the list and the export and predated the bulk work).
 
 The split is deliberate: **reads scrub, writes reject.** `services.strip_nul` strips NUL from `q` and `category`, consistent with this endpoint's contract that unparseable filter values are ignored rather than rejected (and a NUL in a search box is never intentional). Every write path — `bulk/`, `review/`, `comments/` — returns **400** via `_nul_error` instead, because silently dropping bytes out of a note the caller sent is worse than telling them it was malformed.
 
@@ -101,6 +106,7 @@ All filters are optional and combine with AND. Unparseable values are **ignored*
 | `date_from` / `date_to` | ISO date | inclusive, on the local date of `slip_ts` |
 | `to_process` | bool | `true` = sha256 in `SlipReview(to_process=True)`; `false` = not in that set (includes slips with no review row) |
 | `decision` | `NONE` / `UNDECIDED` · or an enum value | `NONE`/`UNDECIDED` = no review row OR `decision=''`; enum = exactly that decision. Unknown values are ignored. The console sends `decision=NONE` for "Undecided" |
+| `archived` | three-way: bool or `all` | **the one filter whose default adds a clause** — see below. Absent / `false`-y / unrecognised = archived rows **excluded**; `true`-y = **only** archived rows; `all` (case-insensitive) = no archived clause (both) |
 | `category` | text | `ocr->>'category' ilike %s` (exact text, case-insensitive; no wildcard added) |
 | `min_total` / `max_total` | decimal | on `TOTAL_SQL` |
 | `ordering` | `slip_ts`, `-slip_ts` (default), `total`, `-total`, `supplier`, `-supplier`, `xero_status`, `-xero_status` | whitelist only; anything else → default |
@@ -109,6 +115,8 @@ All filters are optional and combine with AND. Unparseable values are **ignored*
 | `ids_only` | bool | returns just the matching sha256s (below) instead of rows |
 
 `totals` is computed over the **whole filter**, not the page.
+
+**`archived` — the default is an exclusion.** Every other filter here is additive-when-present; `archived` is the one exception, and deliberately so: archiving exists so MC can clear a receipt he has dealt with off the working list *without deleting anything*, which only works if the plain, no-params list hides archived rows. So: param absent, any false-y value (`false/0/no/off`) or any unrecognised value → `not (s.sha256 = any(…))` over the archived sha256s; `true/1/yes/on` → only archived; `archived=all` → both. This applies to the row list, `ids_only`, **and the export** — one filter builder (`build_filters`), one truth. A slip with **no** `SlipReview` row is never archived (the review-dict default is `archived: false`). Implementation note: `all` must not be routed through the `_bool(…) is not None` pattern `to_process` uses — `_bool('all')` is `None`, which would silently collapse `all` into the exclude branch.
 
 #### `ids_only=1` — the sha256s for the whole filter
 
@@ -165,7 +173,8 @@ Response (shape from `_shape_row` + `attach_review_state`; values from a real ro
         "account_name": "…",
         "contact_name": "…"
       },
-      "review": {"to_process": false, "decision": "", "note": "", "updated_by": "", "updated_at": null},
+      "review": {"to_process": false, "decision": "", "note": "", "archived": false,
+                 "archived_at": null, "archived_by": "", "updated_by": "", "updated_at": null},
       "comment_count": 0
     }
   ]
@@ -180,7 +189,7 @@ Same row as the list plus `ocr` (full jsonb object), `items` (`[{description, am
 
 ### 3.3 `PATCH /audit/receipts/<sha256>/review/` — **auth required**
 
-Body: any subset of `{to_process, decision, note}`; at least one must be present (else 400 `nothing to update …`). `to_process` is truthy on `true, 1, "1", "true", "True", "yes", "on"`; anything else is `false`. `decision` is upper-cased and must be in the enum (else 400 `decision must be one of […]`). `updated_by` is set from the request user on every write.
+Body: any subset of `{to_process, decision, note, archived}`; at least one must be present (else 400 `nothing to update …`). `to_process` is truthy on `true, 1, "1", "true", "True", "yes", "on"`; anything else is `false`. `decision` is upper-cased and must be in the enum (else 400 `decision must be one of […]`) — still accepted here even though the console UI and the export no longer surface it. `archived` takes the same boolean coercion as `to_process` and 400s on an unrecognised value (`archived must be a boolean (true/false, 1/0, yes/no, on/off)`); setting it `true` stamps `archived_at` (now) and `archived_by` (request user), setting it `false` clears both to `null`/`''`. `updated_by` is set from the request user on every write.
 
 ```
 PATCH /audit/receipts/a56aae…/review/
@@ -189,6 +198,7 @@ Authorization: Bearer <jwt>
 
 200
 {"to_process": true, "decision": "", "note": "Office Crew print job — capture to 429 Printing & Stationery",
+ "archived": false, "archived_at": null, "archived_by": "",
  "updated_by": "mc", "updated_at": "2026-08-19T18:42:11.120334+00:00"}
 ```
 
@@ -200,7 +210,7 @@ Body `{"text": "…"}` (trimmed, required → 400 `text is required`). Returns 2
 
 Same filter and `ordering` params as the list; **no pagination** — every matching row. Default `format=csv`; anything other than `csv`/`xlsx` → 400. Filename `receipts-YYYY-MM-DD.csv|xlsx` via `Content-Disposition: attachment`. XLSX uses `openpyxl` (in `requirements.txt`); if the import fails the view degrades to CSV and sets `X-Export-Note: openpyxl unavailable; degraded to csv`.
 
-Columns, in order: `date` (= `slip_ts`), `supplier`, `total`, `category`, `xero_status`, `status_group`, `journal_number`, `synced`, `to_process`, `decision`, `note`, `filename`, `sha256`, **`view_url`**.
+Columns, in order: `date` (= `slip_ts`), `supplier`, `total`, `category`, `xero_status`, `status_group`, `journal_number`, `synced`, `to_process`, `archived`, `note`, `comments` (comment count), `filename`, `sha256`, **`view_url`**. (v4: `decision` dropped — the UI stopped surfacing it, though the API still accepts it on review/bulk; `archived` and `comments` added.) The export goes through the same `build_filters` as the list, so it **excludes archived rows by default** and honours `archived=true`/`archived=all` (§3.1).
 
 **Why it is a plain Django view.** `receipts_export_view` is `@require_GET`, not `@api_view`, on purpose: DRF content negotiation treats `?format=` as a renderer override and would 404 on `csv`/`xlsx` before the view ran. Consequence: it cannot use DRF permission classes, so auth is explicit — `@drf_login_required`, outermost (§3). Auth is checked **before** the `format` validation, so an anonymous caller gets the same 401 for `format=csv`, `format=xlsx` and `format=exe` and cannot probe the endpoint.
 
@@ -224,9 +234,10 @@ Authorization: Bearer <jwt>
 | `set_to_process` | no | sets `SlipReview.to_process` |
 | `decision` | no | sets `SlipReview.decision`; must be in the enum, and `''` **clears** it |
 | `note` | no | sets `SlipReview.note`; `''` is a legitimate "clear the note" |
+| `set_archived` | no | sets `SlipReview.archived`; same boolean coercion + 400 as `set_to_process` (`set_archived must be a boolean …`); `true` stamps `archived_at`/`archived_by`, `false` clears them (§3.3) |
 | `comment` | no | adds exactly **one** `SlipComment` per receipt, authored by the request user |
 
-At least one of the four action keys must be **present** (400 otherwise). The check is on key presence, not truthiness, so `{"note": ""}` is a valid clear.
+At least one of the five action keys must be **present** (400 otherwise). The check is on key presence, not truthiness, so `{"note": ""}` is a valid clear.
 
 - `updated` counts `SlipReview` upserts (0 when only `comment` was sent); `commented` counts `SlipComment` rows created (0 when no `comment` was sent). `updated_by` / `author` come from the JWT user, as everywhere else.
 - **Unknown sha256s are reported, never fatal.** Any id not present in `whatsapp.klikk_slips` is returned in `unknown` and skipped; the known ones are still applied. Even if *every* id is unknown the response is **200** with `updated: 0`, not a 404 — a bulk call is a set operation, and failing the whole batch because one slip was deleted by the sync mid-review would be worse than the partial success the caller can see and act on.
@@ -284,6 +295,8 @@ The Review block saves `to_process` immediately on toggle; `decision` + `note` s
 
 The bookkeeper then filters **`to_process = true`** (Flagged to process), optionally by FY, and presses **Export CSV** or **Export XLSX**. The export contains every matching row, not just the page, and **carries a `view_url` column** — a signed, permanent link to the receipt image (§7) — so every spreadsheet row opens the original receipt in one click without needing console access. The bookkeeper captures those rows into Xero from the spreadsheet, with `supplier`, `total`, `category`, `note` and the image to hand.
 
+**Archiving** is the third move: once a slip is fully dealt with — captured, or closed out by a decision — the reviewer archives it and it disappears from the default list (and the default export) without anything being deleted. `archived=true` / `archived=all` on the list bring archived rows back at any time, and un-archiving clears the `archived_at`/`archived_by` stamp.
+
 Closing the loop is manual today: once a slip is captured, the reviewer either flips `to_process` off and sets `decision = ALREADY_IN_XERO`, or waits for the next Slippies recon run to set `synced_to_xero = true` / `xero_status = MATCHED` on the register row. The feature does not detect that itself. **Nothing here writes to Xero** — the register and the review tables are the only state; Xero capture happens in Xero, by the bookkeeper, under the usual Xero-write rule (MC's explicit instruction, logged in `audit.xero_writes` if done by Claude).
 
 ---
@@ -332,7 +345,7 @@ Portal worktree: route `audit/receipts` (name `audit-receipts`) in `src/router/r
 | Views (list + `ids_only`, detail, review, comments, bulk, export) | `apps/receipts/views.py` |
 | `SlipReview`, `SlipComment`, `DECISION_CHOICES` | `apps/receipts/models.py` |
 | URLs | `apps/receipts/urls.py` (`app_name = 'receipts'`), mounted from `klikk_business_intelligence/urls.py` |
-| Migration | `apps/receipts/migrations/0001_initial.py` |
+| Migrations | `apps/receipts/migrations/0001_initial.py`, `0002_slipreview_archived.py` |
 | Signed viewer + `slip_url()` | `apps/audit/slip_view.py`, `apps/audit/urls.py` |
 | `SLIP_VIEW_BASE_URL` | `klikk_business_intelligence/settings/base.py` |
 | App registration | `INSTALLED_APPS` → `'apps.receipts'` |
@@ -347,6 +360,7 @@ Portal worktree: route `audit/receipts` (name `audit-receipts`) in `src/router/r
 - Deploy recipe: merge `feature/receipts` in both repos → `docker compose up -d --build klikk-financials` (the entrypoint runs `migrate`) → `docker compose up -d --build klikk-financials-console`.
 - Post-deploy checks: `GET /backend/audit/receipts/` returns **401** anonymously; `POST /backend/audit/receipts/bulk/` returns **401** anonymously; a signed `/backend/audit/slip/<sha>/?s=…` still returns **200** anonymously; the console serves the `audit/receipts` route.
 - The bulk endpoint (v3) added **no migration** — it reuses `SlipReview` / `SlipComment` unchanged, so it is a code-only deploy on the backend side.
+- The archive feature (v4) adds migration `receipts/0002_slipreview_archived` — three additive columns on `receipts_slipreview` (existing rows get `archived = false`), nothing dropped, nothing on the register. **Until it is applied, the v4 code must not serve traffic**: `build_filters` now queries `SlipReview.archived` on every list call and would 500 against the old schema. The entrypoint's `migrate --noinput` handles that on a normal deploy.
 - **Warning:** the backend image's ENTRYPOINT (`scripts/docker-entrypoint.sh`) runs `python manage.py migrate --noinput` on **every** container start against the live DB. Any `docker run` / `docker compose run` of that image without `--entrypoint python` (or similar override) will apply this migration as a side effect. Do not start the image casually from a worktree that contains the unapplied migration.
 - `SLIP_VIEW_BASE_URL` must match the public prefix nginx serves the backend under (default `https://console.8-bit.space/backend`); if it is wrong every `view_url` in every export is dead.
 - The feature depends on `openpyxl` for XLSX (already in `requirements.txt`); CSV needs nothing extra.

@@ -265,6 +265,26 @@ def build_filters(params) -> tuple[str, list[Any]]:
         clauses.append('s.sha256 = any(%s)' if to_process else 'not (s.sha256 = any(%s))')
         args.append(flagged)
 
+    # ``archived`` is THREE-WAY, and — surprisingly, unlike every other filter in this module —
+    # its DEFAULT (param absent) ADDS a clause: archived rows are EXCLUDED unless explicitly
+    # asked for. That asymmetry is the point of the feature: archiving clears a slip from the
+    # working list without deleting anything, so the plain list must never show archived rows.
+    #   absent / false-y (false/0/no/off) / unrecognised  -> exclude archived rows
+    #   true-y (true/1/yes/on)                            -> ONLY archived rows
+    #   'all' (case-insensitive)                          -> no archived clause at all (both)
+    # Read the param ONCE and branch. Deliberately NOT routed through the `_bool(...) is not
+    # None` pattern `to_process` uses: _bool returns None for 'all', which that pattern would
+    # silently collapse into the exclude branch.
+    archived_param = params.get('archived')
+    archived_raw = str(archived_param).strip().lower() if archived_param is not None else ''
+    if archived_raw != 'all':
+        archived_shas = list(SlipReview.objects.filter(archived=True).values_list('sha256', flat=True))
+        if _bool(archived_raw) is True:
+            clauses.append('s.sha256 = any(%s)')
+        else:  # explicit false, absent, or unparseable all mean the same: hide archived
+            clauses.append('not (s.sha256 = any(%s))')
+        args.append(archived_shas)
+
     decision = (params.get('decision') or '').strip().upper()
     if decision in ('UNDECIDED', 'NONE'):
         decided = list(SlipReview.objects.exclude(decision='').values_list('sha256', flat=True))
@@ -439,12 +459,19 @@ def _shape_row(r: dict[str, Any]) -> dict[str, Any]:
 
 
 def review_to_dict(review: SlipReview | None) -> dict[str, Any]:
+    # The None branch must say archived=False explicitly: a slip with no SlipReview row is
+    # never "archived", and the list's default filter treats archived as a hard exclusion.
     if review is None:
-        return {'to_process': False, 'decision': '', 'note': '', 'updated_by': '', 'updated_at': None}
+        return {'to_process': False, 'decision': '', 'note': '',
+                'archived': False, 'archived_at': None, 'archived_by': '',
+                'updated_by': '', 'updated_at': None}
     return {
         'to_process': review.to_process,
         'decision': review.decision,
         'note': review.note,
+        'archived': review.archived,
+        'archived_at': _iso(review.archived_at),
+        'archived_by': review.archived_by,
         'updated_by': review.updated_by,
         'updated_at': _iso(review.updated_at),
     }
