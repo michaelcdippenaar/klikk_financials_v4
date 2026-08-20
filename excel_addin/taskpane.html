@@ -216,8 +216,11 @@
 
       <label for="commentAuthor">Your name</label>
       <input type="text" id="commentAuthor" spellcheck="false" placeholder="e.g. MC">
+      <label class="chk"><input type="checkbox" id="markCells" checked>
+        Also write it as an Excel comment on the cell</label>
       <div class="row">
-        <button class="btn btn--primary" id="btnSyncComments" disabled>Sync comments</button>
+        <button class="btn" id="btnPushComments" disabled>Show all on sheet</button>
+        <button class="btn" id="btnSyncComments" disabled>Import sheet comments</button>
       </div>
       <p class="msg" id="commentMsg"></p>
     </section>
