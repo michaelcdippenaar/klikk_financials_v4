@@ -1077,92 +1077,30 @@
 
   async function addNativePivot() {
     if (!activeSheet.binding || activeSheet.binding.kind !== 'detail') {
-      throw new Error('Open a detail sheet first, then add the PivotTable.');
+      throw new Error('Open a detail sheet first.');
     }
-    var sourceId = activeSheet.id;
-    var sourceName = activeSheet.name;
-    var newPivot = null;
 
-    // 1. Find the source range from the sheet's table, and check its size.
-    var srcAddress = null;
-    var srcRows = 0;
+    // Select the source table so Insert > PivotTable picks it up with no typing.
+    var addr = null, rows = 0;
     await Excel.run(async function (ctx) {
-      var src = ctx.workbook.worksheets.getItem(sourceId);
+      var src = ctx.workbook.worksheets.getItem(activeSheet.id);
       var tables = src.tables;
       tables.load('items/name');
       await ctx.sync();
 
-      var range = tables.items.length
-        ? tables.items[0].getRange()
-        : src.getUsedRange();
+      var range = tables.items.length ? tables.items[0].getRange() : src.getUsedRange();
       range.load('address,rowCount');
+      src.activate();
+      range.select();
       await ctx.sync();
-      srcAddress = range.address;
-      srcRows = range.rowCount;
+      addr = range.address;
+      rows = range.rowCount;
     });
 
-    if (srcRows > PIVOT_ROW_CEILING) {
-      throw new Error(fmtNum(srcRows) + ' rows on this sheet. Excel on this machine '
-        + 'will struggle to pivot that — narrow the filters and reload, or use the '
-        + 'cube view, which aggregates server-side.');
-    }
-
-    // 2. Create the empty pivot on its own sheet, and stop.
-    var pivotName = null;
-    try {
-      await Excel.run(async function (ctx) {
-        var dest = ctx.workbook.worksheets.add(await uniqueSheetName(ctx, 'Pivot'));
-        dest.load('id,name');
-        await ctx.sync();
-
-        pivotName = 'KlikkPivot_' + dest.name.replace(/[^A-Za-z0-9]/g, '_');
-        dest.pivotTables.add(pivotName, srcAddress, dest.getRangeByIndexes(0, 0, 1, 1));
-        await ctx.sync();
-
-        newPivot = { sheetId: dest.id, name: dest.name, pivotName: pivotName };
-      });
-    } catch (e) {
-      throw new Error('Excel could not create the PivotTable ('
-        + (e && e.message ? e.message : e) + '). The cube view does the same job server-side.');
-    }
-
-    // 3. Add the fields one at a time, each its own round trip.
-    var fields = [
-      { axis: 'row', name: 'Acct class' },
-      { axis: 'row', name: 'Account' },
-      { axis: 'column', name: 'Fin year' },
-      { axis: 'data', name: 'Amount' }
-    ];
-    var added = 0;
-    for (var i = 0; i < fields.length; i++) {
-      var f = fields[i];
-      try {
-        await Excel.run(async function (ctx) {
-          var sheet = ctx.workbook.worksheets.getItem(newPivot.sheetId);
-          var pivot = sheet.pivotTables.getItem(newPivot.pivotName);
-          var h = pivot.hierarchies.getItem(f.name);
-          if (f.axis === 'row') pivot.rowHierarchies.add(h);
-          else if (f.axis === 'column') pivot.columnHierarchies.add(h);
-          else pivot.dataHierarchies.add(h);
-          await ctx.sync();
-        });
-        added += 1;
-      } catch (e) {
-        // Missing column or a field Excel will not place — leave it out and
-        // carry on; the user can drag it in themselves.
-      }
-    }
-
-    await Excel.run(async function (ctx) {
-      ctx.workbook.worksheets.getItem(newPivot.sheetId).activate();
-      await ctx.sync();
-    });
-
-    await bindQuery(newPivot.sheetId, activeSheet.binding.query, 0, 'pivot',
-      { pivotName: newPivot.pivotName, sourceSheet: sourceId });
-    await inspectActiveSheet();
-    el.countLine.textContent = 'PivotTable on ' + newPivot.name + ' over ' + sourceName
-      + ' (' + fmtNum(srcRows) + ' rows, ' + added + ' of 4 fields placed) — drag fields in Excel.';
+    el.countLine.innerHTML = '<strong>' + fmtNum(rows) + ' rows selected (' + addr
+      + ').</strong><br>Now use Excel\'s own <strong>Insert &rsaquo; PivotTable</strong>. '
+      + 'Build it however you like — then come back here and <strong>Sync comments</strong> '
+      + 'to pin notes to its cells.';
   }
 
   /* ── the selected cell ─────────────────────────────────── */
@@ -1193,8 +1131,6 @@
     await renderRows(null, got.rows, qy);
     await inspectActiveSheet();
     await addNativePivot();
-    el.countLine.innerHTML = 'PivotTable over <strong>' + fmtNum(got.rows.length)
-      + '</strong> rows — the complete result for these filters.';
   }
 
   function watchSelection() {
