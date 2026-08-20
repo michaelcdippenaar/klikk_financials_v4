@@ -129,7 +129,9 @@
       'detailPanel', 'btnPivot', 'cubePanel', 'measure', 'btnResetComments',
       'queryPanel', 'refreshPanel', 'commentPanel', 'settingsPanel',
       'suppress', 'btnCube', 'cubeMsg', 'btnReload', 'wellAvail', 'wellRows',
-      'wellCols', 'autoBuild', 'outline',
+      'wellCols', 'wellFilt', 'autoBuild', 'outline',
+      'picker', 'pickerTitle', 'pickerClose', 'pickerSearch', 'pickerAll',
+      'pickerNone', 'pickerCount', 'pickerList',
       'commentPanel', 'commentAuthor', 'btnSyncComments', 'commentMsg',
       'btnFullPivot', 'selNone', 'selHas', 'selPath', 'selVal', 'selComment',
       'btnSaveComment', 'btnDeleteComment', 'selBox', 'markCells', 'btnPushComments',
@@ -426,8 +428,23 @@
       date_from: qy.date_from, date_to: qy.date_to,
       account: qy.account, contact: qy.contact,
       reference: qy.reference, description: qy.description,
-      amount: qy.amount, q: qy.q
+      amount: qy.amount, q: qy.q,
+      // Part of the comment anchor on purpose: the same row and column under a
+      // different dimension filter is a different figure.
+      dimf: qy.dimf || ''
     };
+  }
+
+  /* {dimf: '{"fin_year":["FY2026"]}'} — omitted entirely when nothing is
+     narrowed, so an unfiltered cube's URL and comment anchors stay as they
+     were before filters existed. */
+  function dimfParam(spec) {
+    var f = spec && spec.filters ? spec.filters : {};
+    var live = {};
+    Object.keys(f).forEach(function (k) {
+      if (f[k] && f[k].length) live[k] = f[k].slice().sort();
+    });
+    return Object.keys(live).length ? { dimf: JSON.stringify(live) } : {};
   }
 
   function describe(qy) {
@@ -632,6 +649,8 @@
    * through Excel's own Insert > PivotTable lands on a sheet Excel created, so
    * it carries no binding of ours -- we adopt it below and inherit the filter
    * context from here, because a comment's anchor is meaningless without it. */
+  var lastInspected = null;
+
   async function inspectActiveSheet() {
     var adopt = null;
     try {
@@ -667,6 +686,13 @@
       activeSheet.orphanPivot = adopt;
     } else {
       activeSheet.orphanPivot = null;
+    }
+
+    // Landing on a different cube sheet re-points the wells at it. Guarded on
+    // an actual sheet change so it never overwrites edits mid-typing.
+    if (activeSheet.id && activeSheet.id !== lastInspected) {
+      lastInspected = activeSheet.id;
+      if (DIMS.length) syncCubeToSheet();
     }
     paintRefreshPanel();
   }
@@ -772,8 +798,12 @@
      grid, so this is the closest equivalent: drag chips between Fields, Rows and
      Columns, drop to reorder, and the sheet rebuilds from the resulting spec. */
   var DIMS = [];
-  var wells = { avail: [], rows: [], cols: [] };
-  var MAX = { rows: 4, cols: 3 };
+  var wells = { avail: [], rows: [], cols: [], filt: [] };
+  var MAX = { rows: 4, cols: 3, filt: 6 };
+  // dimension key -> array of selected labels. Empty array = the field is
+  // on Filters but not yet narrowed, which passes everything through.
+  var filterVals = {};
+  var memberCache = {};
 
   function populateCube(cat) {
     DIMS = cat.dimensions || [];
@@ -785,11 +815,20 @@
     if (!el.measure.value) el.measure.value = 'amount';
 
     if (!wells.rows.length && !wells.cols.length) {
-      wells.rows = ['account_class', 'account'];
-      wells.cols = ['fin_year'];
+      // The sheet in front wins; then what you last had; then a sane default.
+      if (!syncCubeToSheet()) {
+        var saved = recallCubeSpec();
+        if (saved && (saved.rows || []).length) {
+          applyCubeSpec(saved);
+        } else {
+          wells.rows = ['account_class', 'account'];
+          wells.cols = ['fin_year'];
+        }
+      }
     }
     reflowWells();
     wireWells();
+    wirePicker();
   }
 
   function dimLabel(key) {
@@ -798,14 +837,15 @@
   }
 
   function reflowWells() {
-    var used = wells.rows.concat(wells.cols);
+    var used = wells.rows.concat(wells.cols).concat(wells.filt);
     wells.avail = DIMS.map(function (d) { return d.key; })
       .filter(function (k) { return used.indexOf(k) === -1; });
-    ['avail', 'rows', 'cols'].forEach(renderWell);
+    ['avail', 'rows', 'cols', 'filt'].forEach(renderWell);
   }
 
   function renderWell(zone) {
-    var host = zone === 'avail' ? el.wellAvail : (zone === 'rows' ? el.wellRows : el.wellCols);
+    var host = { avail: el.wellAvail, rows: el.wellRows,
+                 cols: el.wellCols, filt: el.wellFilt }[zone];
     host.innerHTML = '';
     wells[zone].forEach(function (key, idx) {
       var chip = document.createElement('span');
@@ -816,7 +856,14 @@
 
       var txt = document.createElement('span');
       txt.className = 'chip__t';
-      txt.textContent = dimLabel(key);
+      if (zone === 'filt') {
+        var sel = filterVals[key] || [];
+        txt.textContent = dimLabel(key) + (sel.length
+          ? ' · ' + (sel.length === 1 ? sel[0] : sel.length + ' selected')
+          : ' · all');
+      } else {
+        txt.textContent = dimLabel(key);
+      }
       chip.appendChild(txt);
 
       var acts = document.createElement('span');
@@ -833,6 +880,10 @@
       if (zone === 'avail') {
         acts.appendChild(btn('toRows', 'R', 'Move to Rows'));
         acts.appendChild(btn('toCols', 'C', 'Move to Columns'));
+        acts.appendChild(btn('toFilt', 'F', 'Move to Filters'));
+      } else if (zone === 'filt') {
+        acts.appendChild(btn('pick', '\u25be', 'Choose values'));
+        acts.appendChild(btn('remove', '\u00d7', 'Remove'));
       } else {
         acts.appendChild(btn('left', '\u2039', 'Move earlier'));
         acts.appendChild(btn('right', '\u203a', 'Move later'));
@@ -849,21 +900,82 @@
     var k = arr.splice(from, 1)[0];
     arr.splice(to, 0, k);
     reflowWells();
+    rememberCubeSpec();
     if (el.autoBuild.checked && wells.rows.length) run(buildCube);
   }
 
-  /* Interaction deliberately does NOT use HTML5 drag-and-drop: dragstart/drop
-     do not fire reliably in Excel's macOS webview, which left the wells looking
-     interactive but inert. Every action has a button, and dragging is done with
-     pointer events, which the webview does support. */
+  /* Dragging.
+
+     Not HTML5 drag-and-drop: dragstart/drop do not fire reliably in Excel's
+     macOS webview, which is what left the wells looking interactive but inert.
+     Pointer events do work, so the drag is built by hand -- which also means
+     it has to draw its own feedback, since there is no native drag image.
+
+     A chip only becomes a drag after DRAG_SLOP pixels, so a tap that jitters
+     is still a tap and still hits the R / C / F buttons.
+
+     Every action also has a button. Dragging is the fast path, not the only
+     path. */
+  var DRAG_SLOP = 5;
   var ptr = null;
+  var ghost = null;
   var wellsWired = false;
+
+  function wellHosts() {
+    return [el.wellAvail, el.wellRows, el.wellCols, el.wellFilt];
+  }
+
+  function makeGhost(chip, x, y) {
+    ghost = chip.cloneNode(true);
+    ghost.className = 'chip chip--ghost';
+    ghost.style.width = chip.offsetWidth + 'px';
+    document.body.appendChild(ghost);
+    moveGhost(x, y);
+  }
+
+  function moveGhost(x, y) {
+    if (!ghost) return;
+    ghost.style.left = (x - ghost.offsetWidth / 2) + 'px';
+    ghost.style.top = (y - ghost.offsetHeight / 2) + 'px';
+  }
+
+  function clearDragUI() {
+    if (ghost && ghost.parentNode) ghost.parentNode.removeChild(ghost);
+    ghost = null;
+    wellHosts().forEach(function (h) { h.classList.remove('well--over'); });
+    Array.prototype.forEach.call(document.querySelectorAll('.chip.is-drag,.chip--before'),
+      function (c) { c.classList.remove('is-drag'); c.classList.remove('chip--before'); });
+  }
+
+  /* Where a drop at (x,y) would land: the well under the cursor, and the index
+     to insert at -- before the chip whose left half the cursor is over. */
+  function dropTarget(x, y) {
+    var over = document.elementFromPoint(x, y);
+    var well = over && over.closest ? over.closest('.well') : null;
+    if (!well) return null;
+    var chip = over.closest('.chip');
+    var at = -1;
+    if (chip && chip !== ghost && chip.dataset.zone === well.dataset.zone) {
+      var box = chip.getBoundingClientRect();
+      at = parseInt(chip.dataset.idx, 10) + (x > box.left + box.width / 2 ? 1 : 0);
+    }
+    return { well: well, zone: well.dataset.zone, at: at, chip: chip };
+  }
+
+  function paintDropTarget(t) {
+    wellHosts().forEach(function (h) { h.classList.remove('well--over'); });
+    Array.prototype.forEach.call(document.querySelectorAll('.chip--before'),
+      function (c) { c.classList.remove('chip--before'); });
+    if (!t) return;
+    t.well.classList.add('well--over');
+    if (t.chip && t.chip !== ghost) t.chip.classList.add('chip--before');
+  }
 
   function wireWells() {
     if (wellsWired) return;
     wellsWired = true;
 
-    [el.wellAvail, el.wellRows, el.wellCols].forEach(function (host) {
+    wellHosts().forEach(function (host) {
       host.addEventListener('click', function (e) {
         var b = e.target.closest && e.target.closest('.chip__b');
         if (!b) return;
@@ -871,7 +983,9 @@
         var key = chip.dataset.key, zone = chip.dataset.zone;
         var idx = parseInt(chip.dataset.idx, 10);
         var act = b.dataset.act;
-        if (act === 'toRows') moveField(key, zone, 'rows', -1);
+        if (act === 'pick') openPicker(key);
+        else if (act === 'toFilt') moveField(key, zone, 'filt', -1);
+        else if (act === 'toRows') moveField(key, zone, 'rows', -1);
         else if (act === 'toCols') moveField(key, zone, 'cols', -1);
         else if (act === 'remove') moveField(key, zone, 'avail', -1);
         else if (act === 'left') reorder(zone, idx, idx - 1);
@@ -882,35 +996,65 @@
         if (e.target.closest && e.target.closest('.chip__b')) return;
         var chip = e.target.closest && e.target.closest('.chip');
         if (!chip) return;
-        ptr = { key: chip.dataset.key, from: chip.dataset.zone, moved: false };
-        chip.classList.add('is-drag');
+        ptr = {
+          key: chip.dataset.key,
+          from: chip.dataset.zone,
+          chip: chip,
+          x0: e.clientX, y0: e.clientY,
+          dragging: false
+        };
+        // Keep receiving moves even when the cursor leaves the pane.
+        if (host.setPointerCapture) {
+          try { host.setPointerCapture(e.pointerId); ptr.host = host; ptr.id = e.pointerId; }
+          catch (err) { /* capture unsupported: document handlers still fire */ }
+        }
       });
     });
 
-    document.addEventListener('pointermove', function () {
-      if (ptr) ptr.moved = true;
+    document.addEventListener('pointermove', function (e) {
+      if (!ptr) return;
+      if (!ptr.dragging) {
+        if (Math.abs(e.clientX - ptr.x0) < DRAG_SLOP
+          && Math.abs(e.clientY - ptr.y0) < DRAG_SLOP) return;
+        ptr.dragging = true;
+        ptr.chip.classList.add('is-drag');
+        makeGhost(ptr.chip, e.clientX, e.clientY);
+      }
+      moveGhost(e.clientX, e.clientY);
+      // The ghost sits under the cursor, so hide it while asking what is below.
+      ghost.style.display = 'none';
+      var t = dropTarget(e.clientX, e.clientY);
+      ghost.style.display = '';
+      paintDropTarget(t);
+      if (e.cancelable) e.preventDefault();
     });
 
     document.addEventListener('pointerup', function (e) {
-      if (!ptr) {
-        return;
-      }
-      var over = document.elementFromPoint(e.clientX, e.clientY);
-      var well = over && over.closest ? over.closest('.well') : null;
-      if (well && ptr.moved) {
-        var chip = over.closest('.chip');
-        var at = (chip && chip.dataset.zone === well.dataset.zone)
-          ? parseInt(chip.dataset.idx, 10) : -1;
-        moveField(ptr.key, ptr.from, well.dataset.zone, at);
-      }
-      Array.prototype.forEach.call(document.querySelectorAll('.chip.is-drag'),
-        function (c) { c.classList.remove('is-drag'); });
+      if (!ptr) return;
+      var p = ptr;
       ptr = null;
+      if (p.host && p.host.releasePointerCapture) {
+        try { p.host.releasePointerCapture(p.id); } catch (err) { /* already gone */ }
+      }
+      if (!p.dragging) { clearDragUI(); return; }   // a tap, not a drag
+      if (ghost) ghost.style.display = 'none';
+      var t = dropTarget(e.clientX, e.clientY);
+      clearDragUI();
+      if (t) moveField(p.key, p.from, t.zone, t.at);
+    });
+
+    document.addEventListener('pointercancel', function () {
+      ptr = null;
+      clearDragUI();
     });
   }
 
   function moveField(key, from, to, at) {
     if (from === to && at < 0) return;
+    // Leaving Filters drops the selection with it, rather than keeping a
+    // hidden constraint alive on a field that is no longer shown as filtered.
+    if (from === 'filt' && to !== 'filt') delete filterVals[key];
+    if (to === 'filt' && !filterVals[key]) filterVals[key] = [];
     wells[from] = wells[from].filter(function (k) { return k !== key; });
     if (to !== 'avail') {
       if (wells[to].length >= MAX[to]) {
@@ -924,9 +1068,159 @@
       else wells[to].push(key);
     }
     reflowWells();
+    rememberCubeSpec();
     el.cubeMsg.textContent = '';
     el.cubeMsg.className = 'msg';
     if (el.autoBuild.checked && wells.rows.length) run(buildCube);
+  }
+
+  /* Value picker for one filtered dimension.
+
+     Members come from the server under the CURRENT journal filters, so the
+     list is what is really in the data rather than a catalogue of everything
+     that ever existed. Cached per dimension+query for the session. */
+  var pickerKey = null;
+
+  async function openPicker(key) {
+    pickerKey = key;
+    el.pickerTitle.textContent = dimLabel(key);
+    el.pickerSearch.value = '';
+    el.picker.hidden = false;
+    el.pickerList.innerHTML = '<p class="hint">Loading values…</p>';
+
+    var qy = readQuery();
+    var ck = key + '::' + JSON.stringify(toParams(qy));
+    try {
+      if (!memberCache[ck]) {
+        memberCache[ck] = await apiGet('/xero/data/journals/pivot/members/',
+          Object.assign({}, toParams(qy), { dim: key }));
+      }
+      renderPicker();
+    } catch (e) {
+      el.pickerList.innerHTML = '<p class="msg msg--err">' + esc(e.message) + '</p>';
+    }
+  }
+
+  function pickerData() {
+    var qy = readQuery();
+    return memberCache[pickerKey + '::' + JSON.stringify(toParams(qy))];
+  }
+
+  function renderPicker() {
+    var data = pickerData();
+    if (!data) return;
+    var term = (el.pickerSearch.value || '').toLowerCase();
+    var chosen = filterVals[pickerKey] || [];
+    var frag = document.createDocumentFragment();
+    var shown = 0;
+
+    data.members.forEach(function (m) {
+      if (term && m.value.toLowerCase().indexOf(term) === -1) return;
+      shown++;
+      var row = document.createElement('label');
+      row.className = 'pick';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = chosen.indexOf(m.value) !== -1;
+      cb.dataset.value = m.value;
+      var t = document.createElement('span');
+      t.className = 'pick__t';
+      t.textContent = m.value;
+      var n = document.createElement('span');
+      n.className = 'pick__n';
+      n.textContent = fmtNum(m.lines);
+      row.appendChild(cb); row.appendChild(t); row.appendChild(n);
+      frag.appendChild(row);
+    });
+
+    el.pickerList.innerHTML = '';
+    if (!shown) {
+      el.pickerList.innerHTML = '<p class="hint">Nothing matches.</p>';
+    } else {
+      el.pickerList.appendChild(frag);
+    }
+    el.pickerCount.textContent = chosen.length
+      ? fmtNum(chosen.length) + ' of ' + fmtNum(data.count) + ' selected'
+      : 'all ' + fmtNum(data.count) + (data.truncated ? '+ (list capped)' : '');
+  }
+
+  function setPicked(key, values) {
+    filterVals[key] = values;
+    reflowWells();
+    renderPicker();
+    rememberCubeSpec();
+    if (el.autoBuild.checked && wells.rows.length) run(buildCube);
+  }
+
+  function wirePicker() {
+    el.pickerClose.addEventListener('click', function () {
+      el.picker.hidden = true;
+      pickerKey = null;
+    });
+    el.pickerSearch.addEventListener('input', renderPicker);
+
+    el.pickerList.addEventListener('change', function (e) {
+      var cb = e.target;
+      if (!cb || cb.type !== 'checkbox' || !pickerKey) return;
+      var cur = (filterVals[pickerKey] || []).slice();
+      var v = cb.dataset.value;
+      var i = cur.indexOf(v);
+      if (cb.checked && i === -1) cur.push(v);
+      if (!cb.checked && i !== -1) cur.splice(i, 1);
+      setPicked(pickerKey, cur);
+    });
+
+    el.pickerAll.addEventListener('click', function () {
+      var data = pickerData();
+      if (!data || !pickerKey) return;
+      var term = (el.pickerSearch.value || '').toLowerCase();
+      // "All" means all VISIBLE — with a search term active, that is the
+      // useful meaning and the only one that matches what is on screen.
+      setPicked(pickerKey, data.members
+        .filter(function (m) { return !term || m.value.toLowerCase().indexOf(term) !== -1; })
+        .map(function (m) { return m.value; }));
+    });
+
+    el.pickerNone.addEventListener('click', function () {
+      if (pickerKey) setPicked(pickerKey, []);
+    });
+  }
+
+  var CUBE_SPEC_KEY = 'klikkCubeSpec';
+
+  /* The wells survive a pane reload.
+
+     Excel reloads the task pane freely -- switching sheets, reopening the
+     pane, restarting -- and the wells were rebuilt from defaults every time,
+     so a layout took several drags to get back. Kept in localStorage rather
+     than document.settings: it is a personal working preference, not part of
+     the workbook, and should not travel to whoever the file is shared with. */
+  function rememberCubeSpec() {
+    try { localStorage.setItem(CUBE_SPEC_KEY, JSON.stringify(readCubeSpec())); }
+    catch (e) { /* private mode or quota: the wells just will not persist */ }
+  }
+
+  function recallCubeSpec() {
+    try {
+      var raw = localStorage.getItem(CUBE_SPEC_KEY);
+      return raw ? JSON.parse(raw) : null;
+    } catch (e) { return null; }
+  }
+
+  /* Point the wells at whatever the sheet in front actually is.
+
+     A cube sheet carries its own spec in its binding, so returning to it
+     restores the exact rows, columns, filters and measure that built it --
+     rather than leaving the pane describing a different sheet, which made
+     Build overwrite the sheet with the wrong layout. */
+  function syncCubeToSheet() {
+    var b = activeSheet.binding;
+    if (b && b.kind === 'cube' && b.spec) {
+      applyCubeSpec(b.spec);
+      applyQuery(b.query);
+      return true;
+    }
+    return false;
   }
 
   function readCubeSpec() {
@@ -934,6 +1228,8 @@
       rows: wells.rows.slice(),
       cols: wells.cols.slice(),
       measure: el.measure.value || 'amount',
+      filt: wells.filt.slice(),
+      filters: JSON.parse(JSON.stringify(filterVals)),
       suppress: el.suppress.checked,
       outline: el.outline.checked
     };
@@ -942,6 +1238,8 @@
   function applyCubeSpec(spec) {
     wells.rows = (spec.rows || []).slice();
     wells.cols = (spec.cols || []).slice();
+    wells.filt = (spec.filt || []).slice();
+    filterVals = spec.filters ? JSON.parse(JSON.stringify(spec.filters)) : {};
     el.measure.value = spec.measure || 'amount';
     el.suppress.checked = !!spec.suppress;
     if (typeof spec.outline === 'boolean') el.outline.checked = spec.outline;
@@ -960,12 +1258,14 @@
   }
 
   async function fetchCube(qy, spec) {
+    // dimfParam(spec) is the authority; toParams(qy) only carries dimf so it
+    // reaches the comment anchor. Spec wins if they ever disagree.
     var params = Object.assign({}, toParams(qy), {
       rows: spec.rows.join(','),
       cols: spec.cols.join(','),
       measure: spec.measure,
       suppress: spec.suppress ? '1' : '0'
-    });
+    }, dimfParam(spec));
     return apiGet('/xero/data/journals/pivot/', params);
   }
 
@@ -1005,7 +1305,7 @@
 
     var matrix = head.concat(body, [blanks(width)], [totalRow]);
     var headerRowIdx = 3;
-    var firstDataRow = 4;
+    var firstDataRow = CUBE_FIRST_DATA_ROW;
 
     var sheetId = targetId;
     var sheetName = '';
@@ -1158,6 +1458,13 @@
     el.cubeMsg.className = 'msg';
 
     var qy = readQuery();
+    /* The dimension filters ride on the query, not just the spec, because the
+       comment anchor is built from the query. Without this, the same row under
+       "FY2026 only" and under no filter would share an anchor -- two different
+       figures, one comment. */
+    var df = dimfParam(spec);
+    qy.dimf = df.dimf || '';
+
     progress(0, 1, 'Aggregating in Postgres…');
     var cube = await fetchCube(qy, spec);
     if (cancelFlag.cancelled) { el.cubeMsg.textContent = 'Cancelled.'; return; }
@@ -1192,36 +1499,19 @@
    * field is also added independently so a missing column degrades to a
    * partial pivot instead of taking the whole operation down. */
   var PIVOT_ROW_CEILING = 100000;
-  // Comment sync walks the pivot's value cells to learn what each one means.
-  // Three proxy loads per cell, flushed every PIVOT_SYNC_CHUNK cells so no
-  // single round trip carries thousands of them.
-  /* PivotTable cell resolution is DISABLED.
+  /* Why this file never calls PivotLayout.getPivotItems.
    *
-   * Office.js PivotLayout.getPivotItems traps Excel for Mac -- a native
-   * EXC_BAD_INSTRUCTION, not a catchable JS error -- when handed a cell it
-   * does not consider a leaf data cell. Bounds-checking against
-   * getDataBodyRange() is not sufficient: re-laying out a pivot (moving a
-   * field to the header, collapsing a level) creates SUBTOTAL rows that sit
-   * geometrically inside the body but resolve to no single item. Walking the
-   * body then hits them and Excel dies.
+   * It traps Excel for Mac -- a native EXC_BAD_INSTRUCTION, not a catchable
+   * JS error -- when handed a cell it does not consider a leaf data cell.
+   * Bounds-checking against getDataBodyRange() does NOT save you: re-laying
+   * out a pivot creates SUBTOTAL rows that sit geometrically inside the body
+   * but resolve to no single item, so a walk over the body reaches one and
+   * Excel dies. That was diagnosed and "fixed" three times before the real
+   * shape of it was clear.
    *
-   * I have guessed at this three times and been wrong each time, so the API
-   * is now off entirely rather than fenced again. Cube sheets are unaffected
-   * -- they never touch it; their intersections are computed in memory from
-   * the cube we already hold, which is why cube comments work and pivot
-   * comments do not.
-   *
-   * The durable fix is to reconstruct pivot row/column paths by READING THE
-   * RENDERED LABEL CELLS, the way the cube path already does, and never ask
-   * Excel what a cell means. Until that is written and proven, this stays
-   * false. */
-  var PIVOT_RESOLUTION_ENABLED = false;
-  var PIVOT_OFF_MSG = 'PivotTable comments are switched off: the Excel API that maps '
-    + 'a pivot cell to its meaning crashes Excel for Mac on subtotal rows. Use a '
-    + 'cube sheet for commenting — it resolves cells in memory and is unaffected.';
-
-  var PIVOT_CELL_CEILING = 5000;
-  var PIVOT_SYNC_CHUNK = 100;
+   * readPivotGrid replaces it: read the labels the pivot has already drawn
+   * and reconstruct the paths, exactly as cellToIntersection does for a cube.
+   * Never ask Excel what a cell means. Do not reintroduce the API. */
 
   async function addNativePivot() {
     if (!activeSheet.binding || activeSheet.binding.kind !== 'detail') {
@@ -1254,6 +1544,8 @@
   /* ── the selected cell ─────────────────────────────────── */
 
   var lastCube = {};
+  // Title, blank, column headers, blank -> data starts on row index 4.
+  var CUBE_FIRST_DATA_ROW = 4;
   var selection = null;
   var commentCache = null;
 
@@ -1283,13 +1575,11 @@
 
   /* Selection handling.
    *
-   * PivotLayout.getPivotItems is NOT resolved automatically on selection any
-   * more. Excel for Mac hard-crashes (EXC_BAD_INSTRUCTION, no catchable JS
-   * error) when that API is handed a cell it does not consider part of the
-   * PivotTable's data body -- a row header, a filter cell, a subtotal, a blank
-   * cell beside the pivot. Since onSelectionChanged fires on every click and
-   * arrow key, the passive path was calling it constantly with exactly those
-   * cells. Cube sheets keep live resolution: that path only reads plain range
+   * Pivot cells resolve on selection again, now that resolution reads the
+   * rendered grid instead of calling getPivotItems. A stale grid read is the
+   * only cost of a re-layout, and re-reading is cheap -- two range reads for
+   * the whole pivot. Debounce and single-flight stay: onSelectionChanged
+   * fires on every click and arrow key. Cube sheets read plain range
    * values and has no such surface.
    *
    * Pivot cells are now resolved only when the user asks, via the button, and
@@ -1329,60 +1619,152 @@
     }
   }
 
+  /* Read a PivotTable's meaning off the RENDERED GRID.
+   *
+   * Replaces PivotLayout.getPivotItems, which takes Excel for Mac down with a
+   * native trap on any cell it does not consider a leaf data cell -- subtotal
+   * rows being the case that finally proved fencing it was hopeless. Nothing
+   * here asks Excel what a cell means. It reads the label cells the pivot has
+   * already drawn and reconstructs the paths the same way cellToIntersection
+   * does for a cube.
+   *
+   * Two range reads and one sync for the entire pivot, regardless of size --
+   * cheaper than the old per-cell walk by orders of magnitude, which is why
+   * the 5,000-cell ceiling is gone with it.
+   *
+   * Labels carry forward: in compact and outline form Excel writes a label
+   * once and leaves the cells beneath it blank, so a blank means "same as
+   * above", not "no value". Subtotal rows inherit their parent's path, which
+   * is the honest reading -- a subtotal IS its parent at that level. */
+  async function readPivotGrid(sheetId, pivotName) {
+    var g = null;
+    await Excel.run(async function (ctx) {
+      var sheet = ctx.workbook.worksheets.getItem(sheetId);
+      var pivot = sheet.pivotTables.getItem(pivotName);
+      var whole = pivot.layout.getRange();
+      var body = pivot.layout.getDataBodyRange();
+      var dh = pivot.dataHierarchies;
+      whole.load('values,rowIndex,columnIndex,rowCount,columnCount');
+      body.load('rowIndex,columnIndex,rowCount,columnCount');
+      dh.load('items/name');
+      await ctx.sync();
+
+      var labelCols = body.columnIndex - whole.columnIndex;   // row-label columns
+      var headerRows = body.rowIndex - whole.rowIndex;        // column-header rows
+      var v = whole.values || [];
+
+      function txt(r, c) {
+        var row = v[r]; if (!row) return '';
+        var x = row[c];
+        return (x === null || x === undefined) ? '' : String(x).trim();
+      }
+
+      // Row paths: carry the last non-blank label down each label column.
+      var rowPaths = [], carry = [];
+      for (var i = 0; i < body.rowCount; i++) {
+        var path = [];
+        for (var j = 0; j < labelCols; j++) {
+          var t = txt(headerRows + i, j);
+          if (t) carry[j] = t;
+          if (carry[j]) path.push(carry[j]);
+        }
+        rowPaths.push(path);
+      }
+
+      // Column paths: same carry, along each header row.
+      var colPaths = [];
+      for (var k = 0; k < body.columnCount; k++) {
+        var cpath = [];
+        for (var h = 0; h < headerRows; h++) {
+          var ct = txt(h, labelCols + k);
+          if (!ct) {
+            for (var back = k - 1; back >= 0 && !ct; back--) ct = txt(h, labelCols + back);
+          }
+          if (ct) cpath.push(ct);
+        }
+        colPaths.push(cpath);
+      }
+
+      g = {
+        r0: body.rowIndex, c0: body.columnIndex,
+        rows: body.rowCount, cols: body.columnCount,
+        rowPaths: rowPaths, colPaths: colPaths,
+        measure: (dh.items && dh.items.length && dh.items[0].name) || 'Amount',
+        valueAt: function (rr, cc) {
+          var x = txt(headerRows + rr, labelCols + cc);
+          var n = parseFloat(String(x).replace(/[^0-9.\-]/g, ''));
+          return isFinite(n) ? n : null;
+        }
+      };
+    });
+    return g;
+  }
+
+  /* One pivot body cell -> the anchor it represents. Sheet coordinates in,
+     null out if the cell is outside the body. */
+  function pivotAnchorAt(g, b, r, c) {
+    if (!g) return null;
+    var rr = r - g.r0, cc = c - g.c0;
+    if (rr < 0 || rr >= g.rows || cc < 0 || cc >= g.cols) return null;
+    var rp = g.rowPaths[rr] || [];
+    if (!rp.length) return null;
+    return {
+      measure: g.measure,
+      // Same dim naming the old resolver used, so comments stored before this
+      // rewrite still resolve to the same anchor.
+      row_dims: rp.map(function (_, i) { return 'pivot_row_' + (i + 1); }),
+      row_path: rp,
+      col_dims: ['pivot_col'],
+      col_path: (g.colPaths[cc] || []).join(' | ') || 'Total',
+      value: g.valueAt(rr, cc),
+      r: r, c: c,
+      query: b.query
+    };
+  }
+
   async function resolvePivotSelection(b) {
-    if (!PIVOT_RESOLUTION_ENABLED) return null;
-    if (!Office.context.requirements.isSetSupported('ExcelApi', '1.12')) return null;
+    var g = await readPivotGrid(activeSheet.id, b.spec.pivotName);
+    if (!g) return null;
     var out = null;
     await Excel.run(async function (ctx) {
-      var sheet = ctx.workbook.worksheets.getItem(activeSheet.id);
-      var pivot = sheet.pivotTables.getItem(b.spec.pivotName);
       var cell = ctx.workbook.getSelectedRange();
       var cellSheet = cell.worksheet;
-      var body = pivot.layout.getDataBodyRange();
-      cell.load('values,cellCount,rowIndex,columnIndex,address');
+      cell.load('cellCount,rowIndex,columnIndex,address');
       cellSheet.load('id');
-      body.load('address,rowIndex,columnIndex,rowCount,columnCount');
       await ctx.sync();
-
       if (cell.cellCount !== 1) return;
-
-      /* Hard preconditions before touching getPivotItems. Handing it a cell
-       * outside the data body -- a header, a subtotal, a cell on another
-       * sheet -- takes Excel for Mac down with a native trap that no
-       * try/catch here can intercept. Prove the cell is inside the body
-       * first; if it is not, say so rather than ask. */
       if (cellSheet.id !== activeSheet.id) return;
-      var inBody = cell.rowIndex >= body.rowIndex
-        && cell.rowIndex < body.rowIndex + body.rowCount
-        && cell.columnIndex >= body.columnIndex
-        && cell.columnIndex < body.columnIndex + body.columnCount;
-      if (!inBody) { out = { outsideBody: true, address: cell.address }; return; }
-
-      var rows = pivot.layout.getPivotItems(Excel.PivotAxis.row, cell);
-      var cols = pivot.layout.getPivotItems(Excel.PivotAxis.column, cell);
-      var data = pivot.layout.getDataHierarchy(cell);
-      rows.load('items/name'); cols.load('items/name'); data.load('name');
-      await ctx.sync();
-
-      var rp = rows.items.map(function (x) { return x.name; });
-      if (!rp.length) return;
-      out = {
-        measure: data.name || 'Amount',
-        row_dims: rp.map(function (_, i) { return 'pivot_row_' + (i + 1); }),
-        row_path: rp,
-        col_dims: ['pivot_col'],
-        col_path: cols.items.map(function (x) { return x.name; }).join(' | ') || 'Total',
-        value: (cell.values && cell.values[0]) ? cell.values[0][0] : null,
-        r: cell.rowIndex, c: cell.columnIndex,
-        query: b.query
-      };
+      var pa = pivotAnchorAt(g, b, cell.rowIndex, cell.columnIndex);
+      out = pa || { outsideBody: true, address: cell.address };
     });
     return out;
   }
 
+  /* The cube behind a sheet, refetching if this pane has never seen it.
+
+     lastCube is memory-only, so it is empty after a pane reload, after Excel
+     restarts, and whenever the workbook was built in another session. It used
+     to just return null there, which is why leaving a cube sheet and coming
+     back made commenting quietly stop working -- the sheet was fine, the pane
+     had simply forgotten what its cells meant. The binding holds the query and
+     the spec, and the layout is deterministic (firstDataRow is a constant,
+     nRowDims comes from the cube), so the exact same grid can be recovered
+     without touching the sheet. */
+  async function ensureCube(sheetId, b) {
+    if (lastCube[sheetId]) return lastCube[sheetId];
+    if (!b || b.kind !== 'cube' || !b.spec) return null;
+    var cube = await fetchCube(b.query, b.spec);
+    lastCube[sheetId] = {
+      cube: cube,
+      firstDataRow: CUBE_FIRST_DATA_ROW,
+      nRowDims: cube.row_dims.length
+    };
+    return lastCube[sheetId];
+  }
+
   async function resolveCubeSelection(b) {
-    var cached = lastCube[activeSheet.id];
-    if (!cached) return null;                 // rebuilt in another session
+    var cached = await ensureCube(activeSheet.id, b);
+    if (!cached) return null;
     var out = null;
     await Excel.run(async function (ctx) {
       var cell = ctx.workbook.getSelectedRange();
@@ -1658,7 +2040,7 @@
     var sent = 0, skipped = 0;
 
     if (b.kind === 'cube') {
-      var cached = lastCube[activeSheet.id];
+      var cached = await ensureCube(activeSheet.id, b);
       if (!cached) throw new Error('Rebuild this cube sheet first, then try again.');
       for (var n = 0; n < notes.length; n++) {
         var note = notes[n];
@@ -1675,55 +2057,15 @@
         sent++;
       }
     } else {
-      if (!PIVOT_RESOLUTION_ENABLED) throw new Error(PIVOT_OFF_MSG);
-      if (!PIVOT_RESOLUTION_ENABLED) throw new Error(PIVOT_OFF_MSG);
-      if (!Office.context.requirements.isSetSupported('ExcelApi', '1.12')) {
-        throw new Error('Needs ExcelApi 1.12 to locate PivotTable cells by meaning.');
-      }
-      // Only the commented cells are resolved, not the whole body -- a handful
-      // of notes should not cost an 825-cell walk.
-      var anchors = [];
-      await Excel.run(async function (ctx) {
-        var sheet = ctx.workbook.worksheets.getItem(activeSheet.id);
-        var pivot = sheet.pivotTables.getItem(b.spec.pivotName);
-        var body = pivot.layout.getDataBodyRange();
-        body.load('rowIndex,columnIndex,rowCount,columnCount');
-        await ctx.sync();
-
-        var pend = [];
-        notes.forEach(function (note) {
-          // getPivotItems traps on out-of-body cells, so bounds-check first.
-          var inBody = note.r >= body.rowIndex && note.r < body.rowIndex + body.rowCount
-            && note.c >= body.columnIndex && note.c < body.columnIndex + body.columnCount;
-          if (!inBody) { anchors.push(null); return; }
-          var cell = sheet.getRangeByIndexes(note.r, note.c, 1, 1);
-          var pr = pivot.layout.getPivotItems(Excel.PivotAxis.row, cell);
-          var pc = pivot.layout.getPivotItems(Excel.PivotAxis.column, cell);
-          var pd = pivot.layout.getDataHierarchy(cell);
-          var vals = cell;
-          vals.load('values');
-          pr.load('items/name'); pc.load('items/name'); pd.load('name');
-          anchors.push({ pr: pr, pc: pc, pd: pd, vals: vals });
-          pend.push(1);
-        });
-        await ctx.sync();
-      });
-
+      var g = await readPivotGrid(activeSheet.id, b.spec.pivotName);
+      if (!g) throw new Error('Could not read that PivotTable.');
       for (var k = 0; k < notes.length; k++) {
-        var a = anchors[k];
-        if (!a) { skipped++; continue; }
-        var rp = a.pr.items.map(function (z) { return z.name; });
-        if (!rp.length) { skipped++; continue; }
+        var pa = pivotAnchorAt(g, b, notes[k].r, notes[k].c);
+        // A note on a header or off the body has no figure behind it; say so
+        // rather than guess an anchor.
+        if (!pa) { skipped++; continue; }
         progress(k + 1, notes.length, 'Sending ' + (k + 1) + ' of ' + notes.length + '…');
-        await postComment({
-          measure: a.pd.name || 'Amount',
-          row_dims: rp.map(function (_, z) { return 'pivot_row_' + (z + 1); }),
-          row_path: rp,
-          col_dims: ['pivot_col'],
-          col_path: a.pc.items.map(function (z) { return z.name; }).join(' | ') || 'Total',
-          value: (a.vals.values && a.vals.values[0]) ? a.vals.values[0][0] : null,
-          query: b.query
-        }, notes[k].t);
+        await postComment(pa, notes[k].t);
         sent++;
       }
     }
@@ -1781,78 +2123,22 @@
     var placed = 0, unplaced = 0;
 
     if (b.kind === 'cube') {
-      var cached = lastCube[activeSheet.id];
+      var cached = await ensureCube(activeSheet.id, b);
       if (!cached) throw new Error('Rebuild this cube sheet first, then try again.');
       placed = await placeCubeComments(activeSheet.id, cached, b.spec, b.query);
     } else {
-      // A PivotTable's cells only reveal their meaning one at a time, so walk
-      // the data body and resolve as we go. Bounded, and it reports what it
-      // could not reach rather than pretending it covered everything.
-      if (!PIVOT_RESOLUTION_ENABLED) throw new Error(PIVOT_OFF_MSG);
-      if (!Office.context.requirements.isSetSupported('ExcelApi', '1.12')) {
-        throw new Error('Needs ExcelApi 1.12 to locate PivotTable cells by meaning.');
-      }
+      // Whole pivot read in one pass off the rendered grid; no per-cell
+      // interrogation of Excel, so no ceiling and no trap.
+      var g = await readPivotGrid(activeSheet.id, b.spec.pivotName);
+      if (!g) throw new Error('Could not read that PivotTable.');
       var found = [];
-      await Excel.run(async function (ctx) {
-        var sheet = ctx.workbook.worksheets.getItem(activeSheet.id);
-        var pivot = sheet.pivotTables.getItem(b.spec.pivotName);
-        var body = pivot.layout.getDataBodyRange();
-        body.load('rowIndex,columnIndex,rowCount,columnCount');
-        await ctx.sync();
-
-        var total = body.rowCount * body.columnCount;
-        /* The real constraint is how many proxy loads ride in ONE sync, not
-         * how many cells exist -- each cell costs three loads, so we chunk and
-         * sync as we go. 600 was a guess made while chasing a crash that
-         * turned out to be unrelated (it was getPivotItems on out-of-body
-         * cells); an 825-cell pivot is ordinary and must work. Cells here are
-         * derived FROM getDataBodyRange, so they are in-body by construction
-         * and cannot hit that trap. */
-        if (total > PIVOT_CELL_CEILING) {
-          unplaced = total;
-          return;
+      for (var rr = 0; rr < g.rows; rr++) {
+        for (var cc = 0; cc < g.cols; cc++) {
+          var pa = pivotAnchorAt(g, b, g.r0 + rr, g.c0 + cc);
+          if (!pa) continue;
+          var pt = want[anchorKey(pa)];
+          if (pt) found.push({ r: pa.r, c: pa.c, t: pt });
         }
-        progress(0, total, 'Reading ' + fmtNum(total) + ' pivot cells…');
-        // Sync every 150 cells rather than queueing thousands of proxy loads
-        // into a single round trip.
-        var probes = [];
-        var pending = [];
-        for (var rr = 0; rr < body.rowCount; rr++) {
-          for (var cc = 0; cc < body.columnCount; cc++) {
-            var cell = sheet.getRangeByIndexes(body.rowIndex + rr, body.columnIndex + cc, 1, 1);
-            var pr = pivot.layout.getPivotItems(Excel.PivotAxis.row, cell);
-            var pc = pivot.layout.getPivotItems(Excel.PivotAxis.column, cell);
-            var pd = pivot.layout.getDataHierarchy(cell);
-            pr.load('items/name'); pc.load('items/name'); pd.load('name');
-            pending.push({ r: body.rowIndex + rr, c: body.columnIndex + cc, pr: pr, pc: pc, pd: pd });
-            if (pending.length >= PIVOT_SYNC_CHUNK) {
-              await ctx.sync();
-              probes = probes.concat(pending);
-              pending = [];
-              // Report and give the UI a turn — this can be several thousand
-              // cells and a frozen pane looks like a hang.
-              progress(probes.length, total, 'Reading pivot cells… '
-                + fmtNum(probes.length) + ' of ' + fmtNum(total));
-              if (cancelFlag.cancelled) return;
-            }
-          }
-        }
-        if (pending.length) {
-          await ctx.sync();
-          probes = probes.concat(pending);
-        }
-        probes.forEach(function (pb) {
-          var rp = pb.pr.items.map(function (x) { return x.name; });
-          if (!rp.length) return;
-          var key = (pb.pd.name || 'Amount') + '\u001e' + rp.join('\u001f') + '\u001e'
-            + (pb.pc.items.map(function (x) { return x.name; }).join(' | ') || 'Total');
-          if (want[key]) found.push({ r: pb.r, c: pb.c, t: want[key] });
-        });
-      });
-      if (unplaced) {
-        throw new Error('This PivotTable has ' + fmtNum(unplaced) + ' value cells (limit '
-          + fmtNum(PIVOT_CELL_CEILING) + ') — too many '
-          + 'to resolve one by one. Collapse or filter it, then try again.');
       }
       await writeCellComments(activeSheet.id, found);
       placed = found.length;

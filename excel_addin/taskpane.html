@@ -177,8 +177,28 @@
       <label for="measure">Values</label>
       <select id="measure"></select>
 
-      <label>Fields <span class="lbl-note">tap R or C, or drag</span></label>
+      <label>Fields <span class="lbl-note">drag a chip, or tap R / C / F</span></label>
       <div class="well well--src" id="wellAvail" data-zone="avail"></div>
+
+      <label>Filters <span class="lbl-note">drop a field, then pick values</span></label>
+      <div class="well well--filt" id="wellFilt" data-zone="filt"></div>
+
+      <!-- Value picker for one filtered dimension. Inline rather than a
+           dialog: Office dialogs are a separate runtime, and this needs the
+           pane's own state. -->
+      <div class="picker" id="picker" hidden>
+        <div class="picker__head">
+          <strong id="pickerTitle">Values</strong>
+          <button class="btn btn--tiny" id="pickerClose" type="button">Done</button>
+        </div>
+        <input type="search" id="pickerSearch" placeholder="Find a value…">
+        <div class="picker__acts">
+          <button class="btn btn--tiny" id="pickerAll" type="button">All</button>
+          <button class="btn btn--tiny" id="pickerNone" type="button">None</button>
+          <span class="picker__n" id="pickerCount"></span>
+        </div>
+        <div class="picker__list" id="pickerList"></div>
+      </div>
 
       <div class="wellrow">
         <div class="wellcol">

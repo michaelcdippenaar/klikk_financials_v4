@@ -12,6 +12,8 @@ here ties to the ledger and to Xero without an adjustment step.
 """
 import logging
 
+import json
+
 from django.db.models import Q, Sum, Count, Value, CharField
 from django.db.models.functions import Coalesce, ExtractYear, ExtractQuarter, ExtractMonth
 from django.utils.dateparse import parse_date
@@ -104,6 +106,8 @@ def _plain(alias):
 
 # key -> (label for the UI, {annotation alias: expression or None for a plain field}, labeller)
 # A `None` expression means the alias is already a real ORM path and needs no annotate().
+MAX_MEMBERS = 2000
+
 DIMENSIONS = {
     'entity':             ('Entity',              {'organisation__tenant_name': None},          _plain('organisation__tenant_name')),
     'report':             ('Report (IS / BS)',    {'account__grouping': None},                  _label_report),
@@ -152,6 +156,36 @@ def _labeller(key):
     if key == 'account':
         return _label_account
     return DIMENSIONS[key][2]
+
+
+def parse_dim_filters(p):
+    """Dimension filters: ?dimf={"fin_year":["FY2026"],"entity":["Klikk"]}
+
+    Distinct from apply_journal_filters, which speaks the journal search
+    vocabulary (tenant, account, date range). This filters on the DIMENSION
+    LABELS the cube itself renders -- "FY2026", "Income Statement" -- which is
+    what the user is actually looking at, and the only thing that works for
+    computed dimensions like fin_year whose label has no column behind it.
+
+    Returns {dim: set(labels)}. Raises ValueError on an unknown dimension.
+    """
+    raw = (p.get('dimf') or '').strip()
+    if not raw:
+        return {}
+    try:
+        obj = json.loads(raw)
+    except (TypeError, ValueError):
+        raise ValueError('dimf must be JSON')
+    if not isinstance(obj, dict):
+        raise ValueError('dimf must be a JSON object of dimension -> [values]')
+    out = {}
+    for k, v in obj.items():
+        if k not in DIMENSIONS:
+            raise ValueError('unknown dimension in dimf: %s' % k)
+        vals = [str(x) for x in (v or []) if str(x) != '']
+        if vals:
+            out[k] = set(vals)
+    return out
 
 
 def apply_journal_filters(qs, p):
@@ -244,14 +278,24 @@ class XeroJournalPivotView(APIView):
             return Response({'error': 'unknown measure: %s' % measure},
                             status=status.HTTP_400_BAD_REQUEST)
 
+        try:
+            dim_filters = parse_dim_filters(p)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
         qs = apply_journal_filters(XeroJournals.objects.all(), p)
 
-        annotations = _dim_annotations(row_dims + col_dims)
+        # A filtered dimension must be GROUPED on even when it is on neither
+        # axis, otherwise there is no label to test. It is then aggregated away
+        # by the cells dict below, so the surviving totals are exact rather
+        # than approximated after the fact.
+        filter_dims = [d for d in dim_filters if d not in row_dims + col_dims]
+        annotations = _dim_annotations(row_dims + col_dims + filter_dims)
         if annotations:
             qs = qs.annotate(**annotations)
 
         group_aliases = []
-        for d in row_dims + col_dims:
+        for d in row_dims + col_dims + filter_dims:
             for a in _dim_aliases(d):
                 if a not in group_aliases:
                     group_aliases.append(a)
@@ -261,9 +305,15 @@ class XeroJournalPivotView(APIView):
         row_label = [_labeller(d) for d in row_dims]
         col_label = [_labeller(d) for d in col_dims]
 
+        filter_tests = [(_labeller(d), dim_filters[d]) for d in dim_filters]
+
         cells = {}
         row_keys, col_keys = set(), set()
+        excluded = 0
         for rec in grouped.iterator(chunk_size=2000):
+            if filter_tests and any(f(rec) not in keep for f, keep in filter_tests):
+                excluded += 1
+                continue
             rk = tuple(f(rec) for f in row_label)
             ck = tuple(f(rec) for f in col_label) if col_dims else ('Total',)
             row_keys.add(rk)
@@ -320,6 +370,8 @@ class XeroJournalPivotView(APIView):
         return Response({
             'measure': measure,
             'measure_label': MEASURES[measure][0],
+            'dim_filters': {k: sorted(v) for k, v in dim_filters.items()},
+            'excluded_groups': excluded,
             'row_dims': [{'key': d, 'label': DIMENSIONS[d][0]} for d in row_dims],
             'col_dims': [{'key': d, 'label': DIMENSIONS[d][0]} for d in col_dims],
             'cols': [' | '.join(c) for c in ordered_cols],
@@ -401,4 +453,48 @@ class XeroJournalPivotDimensionsView(APIView):
             'measures': [{'key': k, 'label': v[0]} for k, v in MEASURES.items()],
             'max_leaf_rows': MAX_LEAF_ROWS,
             'max_cols': MAX_COLS,
+        })
+
+
+class XeroCubeMembersView(APIView):
+    """GET /xero/data/journals/pivot/members/?dim=fin_year
+
+    The distinct values a dimension actually takes under the CURRENT journal
+    filters -- so the Filters well offers what is really in the data, not a
+    catalogue of everything that ever existed. Same filter vocabulary as the
+    pivot itself.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        p = request.query_params
+        dim = (p.get('dim') or '').strip()
+        if dim not in DIMENSIONS:
+            return Response({'error': 'unknown dimension: %s' % dim},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        qs = apply_journal_filters(XeroJournals.objects.all(), p)
+        ann = _dim_annotations([dim])
+        if ann:
+            qs = qs.annotate(**ann)
+        grouped = (qs.values(*_dim_aliases(dim))
+                     .annotate(_n=Count('id'))
+                     .order_by())
+
+        label = _labeller(dim)
+        counts = {}
+        for rec in grouped.iterator(chunk_size=2000):
+            key = label(rec)
+            counts[key] = counts.get(key, 0) + (rec['_n'] or 0)
+
+        members = sorted(counts.items())
+        truncated = len(members) > MAX_MEMBERS
+        if truncated:
+            members = members[:MAX_MEMBERS]
+        return Response({
+            'dim': dim,
+            'label': DIMENSIONS[dim][0],
+            'count': len(members),
+            'truncated': truncated,
+            'members': [{'value': k, 'lines': n} for k, n in members],
         })

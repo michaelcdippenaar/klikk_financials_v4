@@ -356,3 +356,44 @@ input:focus, select:focus {
   font-weight: 600;
 }
 .navbtn:disabled { opacity: .4; cursor: default; }
+
+/* ── filters well + value picker ─────────────────────────── */
+
+.well--filt { min-height: 34px; }
+
+/* Dragging draws its own feedback: the webview gives us no native drag image,
+   so without this the chip appeared to do nothing while being dragged. */
+.chip--ghost {
+  position: fixed;
+  z-index: 999;
+  pointer-events: none;
+  opacity: .9;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .28);
+  transform: scale(1.04);
+}
+.chip.is-drag { opacity: .35; }
+.chip--before { box-shadow: inset 3px 0 0 0 var(--accent, #2b7de9); }
+.well--over {
+  outline: 2px dashed var(--accent, #2b7de9);
+  outline-offset: -2px;
+  background: rgba(43, 125, 233, .06);
+}
+/* Without this the webview claims the gesture for panning and the drag never
+   starts on a trackpad. */
+.well, .chip { touch-action: none; }
+
+.picker {
+  border: 1px solid var(--line, #d8d8d8);
+  border-radius: 6px;
+  padding: 8px;
+  margin: 6px 0 10px;
+  background: var(--panel, #fafafa);
+}
+.picker__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.picker__acts { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+.picker__n { font-size: 11px; opacity: .7; margin-left: auto; }
+.picker__list { max-height: 190px; overflow-y: auto; }
+.picker input[type="search"] { width: 100%; box-sizing: border-box; margin-top: 6px; }
+.pick { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 12px; }
+.pick__t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick__n { opacity: .55; font-variant-numeric: tabular-nums; }
