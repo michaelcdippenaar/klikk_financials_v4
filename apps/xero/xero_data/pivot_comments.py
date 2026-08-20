@@ -58,20 +58,54 @@ def _ensure_table():
     _ready = True
 
 
+def _norm_measure(m):
+    """'Sum of Amount', 'amount', 'Amount' -> 'amount'.
+
+    A PivotTable names its measure the way Excel labels it; the cube names it
+    by key. Same figure either way, so the anchor must not care.
+    """
+    m = (m or '').strip().lower()
+    for prefix in ('sum of ', 'count of ', 'total of '):
+        if m.startswith(prefix):
+            m = m[len(prefix):]
+    return m.strip() or 'amount'
+
+
+def _coords(row_dims, row_path, col_dims, col_path):
+    """The intersection as {dimension: value}, independent of axis.
+
+    A cell is identified by WHICH dimensions take WHICH values -- not by
+    whether the user dragged a field to rows or to columns. Anchoring on the
+    axis meant moving Financial year from columns to rows silently orphaned
+    every comment on the sheet: same number, different key. (app.cube_comments
+    ids 35 and 37 are the same figure stored twice, which is how this was
+    found.)
+    """
+    c = {}
+    for d, v in zip(list(row_dims or []), list(row_path or [])):
+        c[str(d)] = str(v)
+    cp = (col_path or '').strip()
+    if cp and cp != 'Total':
+        parts = cp.split(' | ')
+        for d, v in zip(list(col_dims or []), parts):
+            c[str(d)] = str(v)
+    return c
+
+
 def _cell_key(tenant, measure, row_dims, row_path, col_dims, col_path, filters):
     """Stable identity for an intersection.
 
-    Deliberately includes the filter context: the same row/column path under a
-    different journal_type or date window is a different number, so a comment
-    written about one must not silently reattach to the other.
+    Deliberately includes the filter context: the same coordinates under a
+    different journal_type, date window or dimension filter is a different
+    number, so a comment written about one must not silently reattach to the
+    other.
+
+    Deliberately EXCLUDES the axis layout, for the reason in _coords.
     """
     payload = json.dumps({
         'tenant': tenant or '',
-        'measure': measure,
-        'row_dims': list(row_dims),
-        'row_path': list(row_path),
-        'col_dims': list(col_dims),
-        'col_path': col_path or '',
+        'measure': _norm_measure(measure),
+        'coords': _coords(row_dims, row_path, col_dims, col_path),
         'filters': {k: v for k, v in sorted((filters or {}).items()) if v not in (None, '')},
     }, sort_keys=True, separators=(',', ':'))
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()

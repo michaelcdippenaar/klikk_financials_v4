@@ -1644,9 +1644,11 @@
       var whole = pivot.layout.getRange();
       var body = pivot.layout.getDataBodyRange();
       var dh = pivot.dataHierarchies;
+      var rh = pivot.rowHierarchies;
+      var ch = pivot.columnHierarchies;
       whole.load('values,rowIndex,columnIndex,rowCount,columnCount');
       body.load('rowIndex,columnIndex,rowCount,columnCount');
-      dh.load('items/name');
+      dh.load('items/name'); rh.load('items/name'); ch.load('items/name');
       await ctx.sync();
 
       var labelCols = body.columnIndex - whole.columnIndex;   // row-label columns
@@ -1685,7 +1687,16 @@
         colPaths.push(cpath);
       }
 
+      // Real field names, so a pivot comment anchors to WHICH dimension holds
+      // a value rather than to which slot it sat in. pivot_row_1/pivot_col
+      // meant reordering the rows orphaned every comment on the sheet.
+      // Same call shape as dataHierarchies above -- a plain collection load,
+      // not the per-cell resolution that traps.
+      var rNames = (rh.items || []).map(function (h) { return h.name; });
+      var cNames = (ch.items || []).map(function (h) { return h.name; });
+
       g = {
+        rowFields: rNames, colFields: cNames,
         r0: body.rowIndex, c0: body.columnIndex,
         rows: body.rowCount, cols: body.columnCount,
         rowPaths: rowPaths, colPaths: colPaths,
@@ -1700,6 +1711,24 @@
     return g;
   }
 
+  /* A PivotTable field name -> the cube dimension key it corresponds to.
+
+     Excel names a field the way the detail sheet's column header reads
+     ("Account class"); the cube names it by key ("account_class"). Mapping
+     them means a comment written on a PivotTable and one written on a cube
+     land on the SAME anchor when they refer to the same figure. Unmatched
+     names pass through unchanged rather than being forced into a key that
+     might belong to a different dimension. */
+  function dimKeyForField(name) {
+    var n = String(name || '').trim().toLowerCase();
+    if (!n) return name;
+    for (var i = 0; i < DIMS.length; i++) {
+      if (String(DIMS[i].label).toLowerCase() === n) return DIMS[i].key;
+      if (String(DIMS[i].key).toLowerCase() === n) return DIMS[i].key;
+    }
+    return name;
+  }
+
   /* One pivot body cell -> the anchor it represents. Sheet coordinates in,
      null out if the cell is outside the body. */
   function pivotAnchorAt(g, b, r, c) {
@@ -1708,14 +1737,17 @@
     if (rr < 0 || rr >= g.rows || cc < 0 || cc >= g.cols) return null;
     var rp = g.rowPaths[rr] || [];
     if (!rp.length) return null;
+    var cp = g.colPaths[cc] || [];
     return {
       measure: g.measure,
-      // Same dim naming the old resolver used, so comments stored before this
-      // rewrite still resolve to the same anchor.
-      row_dims: rp.map(function (_, i) { return 'pivot_row_' + (i + 1); }),
+      row_dims: rp.map(function (_, i) {
+        return g.rowFields[i] ? dimKeyForField(g.rowFields[i]) : ('pivot_row_' + (i + 1));
+      }),
       row_path: rp,
-      col_dims: ['pivot_col'],
-      col_path: (g.colPaths[cc] || []).join(' | ') || 'Total',
+      col_dims: cp.map(function (_, i) {
+        return g.colFields[i] ? dimKeyForField(g.colFields[i]) : 'pivot_col';
+      }),
+      col_path: cp.join(' | ') || 'Total',
       value: g.valueAt(rr, cc),
       r: r, c: c,
       query: b.query
