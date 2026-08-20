@@ -136,8 +136,10 @@ def finding_to_dict(f: AuditFinding, *, counts: bool = True) -> dict:
         # fall back to per-row queries on the detail path.
         cc = getattr(f, 'comment_count', None)
         ac = getattr(f, 'attachment_count', None)
+        lc = getattr(f, 'link_count', None)
         d['comment_count'] = cc if cc is not None else f.comments.count()
         d['attachment_count'] = ac if ac is not None else f.attachments.count()
+        d['link_count'] = lc if lc is not None else f.links.count()
     return d
 
 

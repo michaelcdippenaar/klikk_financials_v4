@@ -180,7 +180,8 @@ def findings_view(request):
     # finding_to_dict falls back to per-row .count() queries without these annotations —
     # 2 x page_size extra queries per page. distinct=True because the two joins multiply.
     qs = qs.annotate(comment_count=Count('comments', distinct=True),
-                     attachment_count=Count('attachments', distinct=True))
+                     attachment_count=Count('attachments', distinct=True),
+                     link_count=Count('links', distinct=True))
     rows = qs[(page - 1) * page_size:page * page_size]
     return Response({
         'count': totals['count'],

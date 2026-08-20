@@ -29,7 +29,7 @@ import json
 import logging
 
 from django.db import Error as DatabaseError
-from django.db.models import Q
+from django.db.models import Max, Min, Q
 from django.test import RequestFactory
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -40,6 +40,8 @@ from rest_framework.response import Response
 from apps.xero.xero_data.pivot_views import DIMENSIONS, MEASURES, XeroJournalPivotView
 
 from .findings_views import actor
+from apps.audit.findings_links_views import split_tenant_ref
+from apps.xero.xero_data.models import XeroJournals
 from .models import AuditFinding
 from .services import fy_bounds
 
@@ -290,6 +292,31 @@ def finding_cube_data_view(request, pk: int):
     })
 
 
+
+def _journal_date_bounds(refs):
+    """(date_from, date_to) spanning the linked journals, or None.
+
+    Structured data straight off the journal rows -- no inference. Used to narrow a
+    suggested cube when the pivot cannot filter by journal number.
+    """
+    pairs = [split_tenant_ref(r) for r in refs]
+    tenants = {t for t, _ in pairs}
+    numbers = []
+    for _, n in pairs:
+        try:
+            numbers.append(int(str(n).strip()))
+        except (TypeError, ValueError):
+            continue
+    if not numbers:
+        return None
+    agg = (XeroJournals.objects
+           .filter(organisation_id__in=tenants, journal_number__in=numbers)
+           .aggregate(lo=Min('date'), hi=Max('date')))
+    lo, hi = agg.get('lo'), agg.get('hi')
+    if not lo or not hi:
+        return None
+    return lo.date().isoformat(), hi.date().isoformat()
+
 def _int_or_none(value):
     try:
         return int(str(value).strip())
@@ -304,7 +331,8 @@ def finding_cube_suggest_view(request, pk: int):
 
     Contributions (CONTRACT-2 §2, closed list — prose is never parsed):
     - ``fy``            -> query date range from ``fy_bounds`` + a fin_year label filter
-    - journal link      -> ``query.q = <journal_number>`` (first journal link; q is one search string)
+    - journal link      -> ``query.tenant`` + a date window (the pivot has no
+                           journal_number filter; see _suggest_from_links)
     - xero_document     -> resolved contact name(s) -> ``filters.supplier``
     - bank_transaction  -> its ``transaction_date`` (never posting_date — unreliable
                            on account 363177001) narrows the date range
@@ -336,11 +364,45 @@ def finding_cube_suggest_view(request, pk: int):
 
     journal_refs = [ln.ref for ln in links if ln.kind == 'journal' and ln.ref]
     if journal_refs:
-        query['q'] = journal_refs[0]
-        derived_from.append('link:journal:%s' % journal_refs[0])
+        # The pivot has NO journal_number filter. Its `q` is an icontains across
+        # description / reference / contact name / account code+name / tenant name --
+        # journal_number is not among them. The previous code put the whole
+        # tenant-qualified ref ("<uuid>:171") into q, which could never match anything,
+        # so every suggestion built from a journal-linked finding came back empty.
+        #
+        # What we CAN do honestly: the tenant half is a real pivot filter, and the
+        # journal's own date narrows the window. Both come from structured data, so
+        # neither invents anything. The journal NUMBER is deliberately dropped rather
+        # than smuggled into a text search that cannot match it -- and derived_from
+        # says so, so nobody reads the result as "filtered to that journal".
+        tenant_id, number = split_tenant_ref(journal_refs[0])
+        query['tenant'] = tenant_id
+        derived_from.append('link:journal:%s -> tenant: %s' % (number, tenant_id))
+        bounds = _journal_date_bounds(journal_refs)
+        if bounds:
+            # INTERSECT with the FY window, never overwrite it. The spec already
+            # carries filters.fin_year = [FY<fy>]; replacing the dates with a journal
+            # that falls outside that FY produces a spec that contradicts itself and
+            # returns nothing — the same guaranteed-empty failure this fix exists to
+            # remove. If the journal lies outside the FY, the FY wins and derived_from
+            # says so, because a finding filed against FY N is about FY N.
+            lo = max(bounds[0], query.get('date_from') or bounds[0])
+            hi = min(bounds[1], query.get('date_to') or bounds[1])
+            if lo <= hi:
+                query['date_from'], query['date_to'] = lo, hi
+                derived_from.append('link:journal -> date window %s..%s' % (lo, hi))
+            else:
+                derived_from.append(
+                    'note: the linked journal (%s..%s) falls OUTSIDE FY%s, so the FY '
+                    'window was kept and the journal did not narrow the dates'
+                    % (bounds[0], bounds[1], finding.fy))
+        derived_from.append(
+            'note: the pivot cannot filter by journal number (no such filter; q does not '
+            'search journal_number), so this cube is scoped to the journal\'s ENTITY and '
+            'DATE WINDOW, not to the single journal')
         if len(journal_refs) > 1:
-            derived_from.append(
-                'note: %d journal links; q can carry one — used the first' % len(journal_refs))
+            derived_from.append('note: %d journal links; used the first for the entity'
+                                % len(journal_refs))
 
     doc_refs = [ln.ref for ln in links if ln.kind == 'xero_document' and ln.ref]
     if doc_refs:

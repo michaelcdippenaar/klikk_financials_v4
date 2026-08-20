@@ -101,7 +101,7 @@ FINDING_DICT_KEYS = {
     'id', 'fy', 'ref', 'title', 'severity', 'status', 'category', 'amount',
     'currency', 'description', 'evidence', 'owner', 'due_date', 'source',
     'check_code', 'asana_gid', 'created_by', 'updated_by', 'created_at',
-    'updated_at', 'comment_count', 'attachment_count',
+    'updated_at', 'comment_count', 'attachment_count', 'link_count',
 }
 
 # A production-shaped CSV-injection title: leading '=', comma, double-quote, newline.
