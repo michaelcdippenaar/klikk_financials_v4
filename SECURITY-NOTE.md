@@ -10,15 +10,45 @@
 > `/api/auth/refresh/`, `/api/auth/token/*`, `/api/auth/nginx-check/`,
 > `/api-token-auth/`) and `/xero/callback/`; `POST /api/auth/register/` is
 > `IsAdminUser`; the deploy webhook route is deleted (`apps/deployment/urls.py`);
-> anonymous throttling is on (60/min). The HMAC-signed slip viewer
-> `/audit/slip/<sha256>/?s=` remains public **by design** (see
-> `apps/audit/slip_view.py`). Machine callers: the MCP sends
-> `Bearer KLIKK_API_TOKEN` (ServiceTokenAuthentication), the Excel add-in its
-> per-user DRF authtoken; all crons use `manage.py`, none call HTTP. Regression
-> suite: `apps/user/test_auth_lockdown.py` + `excel_addin/README.md` curl loop.
+> anonymous throttling is on (60/min).
+>
+> **Two surfaces are public by design, and both authenticate the SIGNATURE
+> rather than the caller** — neither is a DRF view with a permission class, so
+> the project-wide `IsAuthenticated` default never applies to them and removing
+> their gate would be silent:
+> * `/audit/slip/<sha256>/?s=` — the slip viewer (`apps/audit/slip_view.py`).
+> * `/xero/data/documents/<id>/file/?s=` — the Xero source-document viewer
+>   (`apps/xero/xero_data/document_views.py`). Verifies the HMAC with
+>   `hmac.compare_digest` **before** any DB lookup, so an unsigned caller
+>   cannot learn which document ids exist. Its sibling
+>   `/xero/data/documents/search/` IS a DRF view and IS `IsAuthenticated`.
+>
+> Machine callers: the MCP sends `Bearer KLIKK_API_TOKEN`
+> (ServiceTokenAuthentication), the Excel add-in its per-user DRF authtoken;
+> all crons use `manage.py`, none call HTTP — **verified 2026-08-20** by
+> reading all four scheduled jobs (`daily-klikk-financials-update.sh`,
+> `daily-tm1-full-refresh.sh`, `xero-doc-backfill.sh`, `klikk-sync.sh`): every
+> one goes through `docker compose exec ... python manage.py`, so DRF
+> permissions are never in the path. Regression suite:
+> `apps/user/test_auth_lockdown.py` + `excel_addin/README.md` curl loop.
 > Still open from this note: the edge allow-list (§4 Step 1, proposal with MC),
 > secret rotation for the DB password in git history, OAuth `state` validation
 > on the callback, and the POPIA §19/§22 historic-exposure question (with CCO).
+>
+> **Also open, raised 2026-08-20 while fixing the credential-resolution 500s:**
+> an authenticated user with no `XeroClientCredentials` row of their own acts
+> through the first active row (`apps/xero/xero_auth/credentials.py`). Not a
+> widening — before this lockdown *any anonymous caller* got that same fallback
+> — but it must become a strict per-user lookup the day a login exists that is
+> not MC's. **MC's call.**
+>
+> **And: the MCP client MC actually runs is NOT configured with a token.** The
+> `klikk-financials` stdio server in the desktop client's config sets only
+> `KLIKK_API_BASE_URL`, so it calls the backend anonymously and now gets 401s.
+> The containerised HTTP MCP (`klikk-financials-mcp`) does have
+> `KLIKK_API_TOKEN` via `klikk_portal/.env` and is unaffected. Placing the
+> token in the client config is MC's decision — it is the shared,
+> write-capable service token.
 
 ---
 
