@@ -714,8 +714,16 @@ class XeroCubeDrillView(APIView):
         for dim, val in coords.items():
             val = '' if val is None else str(val)
             if dim in PUSHDOWN:
-                qs = qs.filter(**{PUSHDOWN[dim]: val}) if val != BLANK else qs.filter(
-                    **{PUSHDOWN[dim] + '__in': ['', None]})
+                if val == BLANK:
+                    # A blank member covers BOTH an empty string and a NULL, and
+                    # they need different SQL. `__in=['', None]` compiles to
+                    # `IN ('', NULL)`, and nothing is ever equal to NULL — so
+                    # every drill on a "(none)" member silently returned no rows
+                    # and looked like the ledger had moved underneath it.
+                    qs = qs.filter(Q(**{PUSHDOWN[dim]: ''})
+                                   | Q(**{PUSHDOWN[dim] + '__isnull': True}))
+                else:
+                    qs = qs.filter(**{PUSHDOWN[dim]: val})
             elif dim == 'account':
                 # Label is "code — name"; the code alone identifies it.
                 code = val.split('—')[0].strip() if '—' in val else val.strip()

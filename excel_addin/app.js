@@ -2482,8 +2482,14 @@
       Object.assign({}, toParams(sel.query), { coords: JSON.stringify(coords), limit: 5000 }));
 
     if (!data.count) {
-      el.commentMsg.textContent = 'No journal lines match that figure — the ledger may have '
-        + 'changed since it was written.';
+      /* Do not blame the data. This said "the ledger may have changed", which
+         was a guess presented as a diagnosis -- and the first time it fired the
+         real cause was a bug in this add-in, not a change in the ledger. State
+         what is true and let the number speak. */
+      el.commentMsg.textContent = 'No journal lines came back for that cell, even though it '
+        + 'shows ' + (typeof sel.value === 'number' ? fmtNum(sel.value) : 'a value')
+        + '. That should not happen — the cell was built from those lines. '
+        + 'Worth reporting rather than working around.';
       el.commentMsg.className = 'msg msg--err';
       return;
     }
