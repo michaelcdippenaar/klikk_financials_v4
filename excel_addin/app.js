@@ -1114,6 +1114,11 @@
    * field is also added independently so a missing column degrades to a
    * partial pivot instead of taking the whole operation down. */
   var PIVOT_ROW_CEILING = 100000;
+  // Comment sync walks the pivot's value cells to learn what each one means.
+  // Three proxy loads per cell, flushed every PIVOT_SYNC_CHUNK cells so no
+  // single round trip carries thousands of them.
+  var PIVOT_CELL_CEILING = 5000;
+  var PIVOT_SYNC_CHUNK = 100;
 
   async function addNativePivot() {
     if (!activeSheet.binding || activeSheet.binding.kind !== 'detail') {
@@ -1475,10 +1480,18 @@
         await ctx.sync();
 
         var total = body.rowCount * body.columnCount;
-        if (total > 600) {
+        /* The real constraint is how many proxy loads ride in ONE sync, not
+         * how many cells exist -- each cell costs three loads, so we chunk and
+         * sync as we go. 600 was a guess made while chasing a crash that
+         * turned out to be unrelated (it was getPivotItems on out-of-body
+         * cells); an 825-cell pivot is ordinary and must work. Cells here are
+         * derived FROM getDataBodyRange, so they are in-body by construction
+         * and cannot hit that trap. */
+        if (total > PIVOT_CELL_CEILING) {
           unplaced = total;
           return;
         }
+        progress(0, total, 'Reading ' + fmtNum(total) + ' pivot cells…');
         // Sync every 150 cells rather than queueing thousands of proxy loads
         // into a single round trip.
         var probes = [];
@@ -1491,10 +1504,15 @@
             var pd = pivot.layout.getDataHierarchy(cell);
             pr.load('items/name'); pc.load('items/name'); pd.load('name');
             pending.push({ r: body.rowIndex + rr, c: body.columnIndex + cc, pr: pr, pc: pc, pd: pd });
-            if (pending.length >= 150) {
+            if (pending.length >= PIVOT_SYNC_CHUNK) {
               await ctx.sync();
               probes = probes.concat(pending);
               pending = [];
+              // Report and give the UI a turn — this can be several thousand
+              // cells and a frozen pane looks like a hang.
+              progress(probes.length, total, 'Reading pivot cells… '
+                + fmtNum(probes.length) + ' of ' + fmtNum(total));
+              if (cancelFlag.cancelled) return;
             }
           }
         }
@@ -1511,7 +1529,8 @@
         });
       });
       if (unplaced) {
-        throw new Error('This PivotTable has ' + fmtNum(unplaced) + ' value cells — too many '
+        throw new Error('This PivotTable has ' + fmtNum(unplaced) + ' value cells (limit '
+          + fmtNum(PIVOT_CELL_CEILING) + ') — too many '
           + 'to resolve one by one. Collapse or filter it, then try again.');
       }
       await writeCellComments(activeSheet.id, found);
