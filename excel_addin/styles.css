@@ -282,3 +282,36 @@ input:focus, select:focus {
 }
 .chip__b:hover { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
 .chip__b[data-act="remove"]:hover { background: var(--danger); border-color: var(--danger); color: #fff; }
+
+
+/* ── Selected-cell comment ──────────────────────────────── */
+.sel {
+  margin-top: 8px;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--raise);
+}
+.sel__none { font-size: 11px; color: var(--ink-faint); }
+.sel__path { font-size: 11px; font-weight: 600; color: var(--ink); line-height: 1.4; word-break: break-word; }
+.sel__val {
+  margin: 3px 0 7px;
+  font-size: 15px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.sel textarea {
+  width: 100%;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  resize: vertical;
+}
+.sel textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+.sel .row { margin-top: 7px; }
+.sel--saved { border-color: var(--ok); }

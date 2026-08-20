@@ -150,6 +150,12 @@
         <button class="btn" id="btnReload" disabled>Reload this sheet</button>
         <button class="btn" id="btnPivot" disabled>Add PivotTable</button>
       </div>
+      <div class="row">
+        <button class="btn btn--primary" id="btnFullPivot">Full data + PivotTable</button>
+      </div>
+      <p class="hint">Pulls every matching line (ignoring the row limit) and drops a
+        native PivotTable on it — Excel's own field pane, drag-drop and drill, over
+        complete data.</p>
       <div class="count" id="countLine">&nbsp;</div>
       <p class="hint">A native PivotTable aggregates only the rows on the sheet.
         For totals over the whole ledger use the cube view below.</p>
@@ -191,9 +197,23 @@
     <!-- ── Comments ───────────────────────────────────────────── -->
     <section class="panel" id="commentPanel" hidden>
       <h2>Comments</h2>
-      <p class="hint">Right-click any cell on a cube sheet → New Comment. Sync
-        pins it to that intersection in Postgres, where an agent can read it and
-        raise to-dos. Syncing also pulls comments made elsewhere back onto the sheet.</p>
+      <p class="hint">Click a value cell — the pane resolves it to its actual row and
+        column items, not its cell address, so the note still means the same thing after
+        you rearrange the pivot. <b>Sync comments</b> below bulk-imports any right-click
+        comments already on the sheet.</p>
+      <div class="sel" id="selBox">
+        <div class="sel__none" id="selNone">Select a value cell in a PivotTable or cube sheet.</div>
+        <div id="selHas" hidden>
+          <div class="sel__path" id="selPath"></div>
+          <div class="sel__val" id="selVal"></div>
+          <textarea id="selComment" rows="3" placeholder="Comment on this figure…"></textarea>
+          <div class="row">
+            <button class="btn btn--primary" id="btnSaveComment">Save comment</button>
+            <button class="btn" id="btnDeleteComment">Clear</button>
+          </div>
+        </div>
+      </div>
+
       <label for="commentAuthor">Your name</label>
       <input type="text" id="commentAuthor" spellcheck="false" placeholder="e.g. MC">
       <div class="row">

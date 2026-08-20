@@ -78,6 +78,8 @@
       'suppress', 'btnCube', 'cubeMsg', 'btnReload', 'wellAvail', 'wellRows',
       'wellCols', 'autoBuild', 'outline',
       'commentPanel', 'commentAuthor', 'btnSyncComments', 'commentMsg',
+      'btnFullPivot', 'selNone', 'selHas', 'selPath', 'selVal', 'selComment',
+      'btnSaveComment', 'btnDeleteComment', 'selBox',
       'refreshPanel', 'sheetInfo', 'btnRefresh', 'btnRestore', 'progressPanel',
       'progressMsg', 'progressFill', 'btnCancel', 'errorMsg'
     ].forEach(function (id) { el[id] = document.getElementById(id); });
@@ -125,6 +127,10 @@
     el.btnPivot.addEventListener('click', function () { run(addNativePivot); });
     el.btnReload.addEventListener('click', function () { run(reloadThisSheet); });
     el.btnSyncComments.addEventListener('click', function () { run(syncComments); });
+    el.btnFullPivot.addEventListener('click', function () { run(pivotFromFullDetail); });
+    el.btnSaveComment.addEventListener('click', function () { run(saveSelectedComment); });
+    el.btnDeleteComment.addEventListener('click', function () { run(deleteSelectedComment); });
+    watchSelection();
     el.btnRefresh.addEventListener('click', function () { run(refreshActiveSheet); });
     el.btnRestore.addEventListener('click', restoreFiltersFromSheet);
     el.btnCancel.addEventListener('click', function () { cancelFlag.cancelled = true; });
@@ -1011,6 +1017,7 @@
       }).catch(function () { /* outlining unsupported; the sheet is still correct */ });
     }
 
+    lastCube[sheetId] = { cube: cube, firstDataRow: firstDataRow, nRowDims: nRowDims };
     await bindQuery(sheetId, qy, cube.rows.length, 'cube', spec);
     return { sheetId: sheetId, sheetName: sheetName };
   }
@@ -1345,6 +1352,178 @@
     el.commentMsg.className = 'msg msg--ok';
   }
 
+  /* ── the selected cell ─────────────────────────────────── */
+
+  var lastCube = {};
+  var selection = null;
+  var commentCache = null;
+
+  /* One button to the optimal path: Excel's own PivotTable is a better pivot
+     than anything an add-in can draw, and its only real weakness is that it
+     aggregates just the rows on its sheet. So pull every matching line first,
+     then hand it to Excel. */
+  async function pivotFromFullDetail() {
+    var qy = readQuery();
+    qy.maxRows = 0;
+
+    var probe = await apiGet('/xero/data/journals/search/',
+      Object.assign({}, toParams(qy), { limit: 1, offset: 0 }));
+    if (probe.count > 250000) {
+      throw new Error(fmtNum(probe.count) + ' rows match. Narrow the filters — a '
+        + 'PivotTable over that many rows will crawl on this machine.');
+    }
+
+    progress(0, 1, 'Pulling all ' + fmtNum(probe.count) + ' rows…');
+    var got = await fetchRows(qy);
+    if (cancelFlag.cancelled) return;
+    await renderRows(null, got.rows, qy);
+    await inspectActiveSheet();
+    await addNativePivot();
+    el.countLine.innerHTML = 'PivotTable over <strong>' + fmtNum(got.rows.length)
+      + '</strong> rows — the complete result for these filters.';
+  }
+
+  function watchSelection() {
+    Excel.run(function (ctx) {
+      ctx.workbook.onSelectionChanged.add(function () { return readSelection(); });
+      return ctx.sync();
+    }).catch(function () { /* host without the event: the buttons still work */ });
+  }
+
+  async function readSelection() {
+    try {
+      var b = activeSheet.binding;
+      if (!b) { return showSelection(null); }
+      if (b.kind === 'pivot') return showSelection(await resolvePivotSelection(b));
+      if (b.kind === 'cube') return showSelection(await resolveCubeSelection(b));
+      return showSelection(null);
+    } catch (e) {
+      return showSelection(null);
+    }
+  }
+
+  async function resolvePivotSelection(b) {
+    if (!Office.context.requirements.isSetSupported('ExcelApi', '1.12')) return null;
+    var out = null;
+    await Excel.run(async function (ctx) {
+      var sheet = ctx.workbook.worksheets.getItem(activeSheet.id);
+      var pivot = sheet.pivotTables.getItem(b.spec.pivotName);
+      var cell = ctx.workbook.getSelectedRange();
+      cell.load('values,cellCount');
+      await ctx.sync();
+      if (cell.cellCount !== 1) return;
+
+      var rows = pivot.layout.getPivotItems(Excel.PivotAxis.row, cell);
+      var cols = pivot.layout.getPivotItems(Excel.PivotAxis.column, cell);
+      var data = pivot.layout.getDataHierarchy(cell);
+      rows.load('items/name'); cols.load('items/name'); data.load('name');
+      await ctx.sync();
+
+      var rp = rows.items.map(function (x) { return x.name; });
+      if (!rp.length) return;
+      out = {
+        measure: data.name || 'Amount',
+        row_dims: rp.map(function (_, i) { return 'pivot_row_' + (i + 1); }),
+        row_path: rp,
+        col_dims: ['pivot_col'],
+        col_path: cols.items.map(function (x) { return x.name; }).join(' | ') || 'Total',
+        value: (cell.values && cell.values[0]) ? cell.values[0][0] : null,
+        query: b.query
+      };
+    });
+    return out;
+  }
+
+  async function resolveCubeSelection(b) {
+    var cached = lastCube[activeSheet.id];
+    if (!cached) return null;                 // rebuilt in another session
+    var out = null;
+    await Excel.run(async function (ctx) {
+      var cell = ctx.workbook.getSelectedRange();
+      cell.load('rowIndex,columnIndex,cellCount,values');
+      await ctx.sync();
+      if (cell.cellCount !== 1) return;
+      var x = cellToIntersection(cached.cube,
+        cell.rowIndex - cached.firstDataRow, cell.columnIndex - cached.nRowDims);
+      if (!x) return;
+      out = {
+        measure: b.spec.measure,
+        row_dims: x.row_dims, row_path: x.row_path,
+        col_dims: x.col_dims, col_path: x.col_path,
+        value: x.cell_value, query: b.query
+      };
+    });
+    return out;
+  }
+
+  async function showSelection(sel) {
+    selection = sel;
+    if (!sel) {
+      el.selHas.hidden = true;
+      el.selNone.hidden = false;
+      el.selBox.className = 'sel';
+      return;
+    }
+    el.selNone.hidden = true;
+    el.selHas.hidden = false;
+    el.selBox.className = 'sel';
+    el.selPath.textContent = sel.row_path.join(' / ') + '  ×  ' + sel.col_path
+      + '   [' + sel.measure + ']';
+    el.selVal.textContent = typeof sel.value === 'number'
+      ? sel.value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+      : (sel.value == null ? '' : String(sel.value));
+
+    var existing = await findComment(sel);
+    el.selComment.value = existing ? existing.comment : '';
+    if (existing) el.selBox.className = 'sel sel--saved';
+  }
+
+  function anchorKey(x) {
+    return x.measure + '\u001e' + x.row_path.join('\u001f') + '\u001e' + x.col_path;
+  }
+
+  async function findComment(sel) {
+    if (!commentCache) {
+      var r = await apiGet(COMMENT_API, { status: 'all', limit: 2000 });
+      commentCache = {};
+      (r.results || []).forEach(function (c) { commentCache[anchorKey(c)] = c; });
+    }
+    return commentCache[anchorKey(sel)] || null;
+  }
+
+  async function saveSelectedComment() {
+    if (!selection) throw new Error('Select a value cell first.');
+    var text = (el.selComment.value || '').trim();
+    if (!text) throw new Error('Nothing to save — use Clear to remove a comment.');
+    await postComment(selection, text);
+    el.selBox.className = 'sel sel--saved';
+    el.commentMsg.textContent = 'Saved against ' + selection.row_path.join(' / ')
+      + ' × ' + selection.col_path + '.';
+    el.commentMsg.className = 'msg msg--ok';
+  }
+
+  async function deleteSelectedComment() {
+    if (!selection) throw new Error('Select a value cell first.');
+    await postComment(selection, '');
+    el.selComment.value = '';
+    el.selBox.className = 'sel';
+    el.commentMsg.textContent = 'Comment cleared.';
+    el.commentMsg.className = 'msg';
+  }
+
+  async function postComment(sel, text) {
+    await apiPost(COMMENT_API, {
+      measure: sel.measure,
+      row_dims: sel.row_dims, row_path: sel.row_path,
+      col_dims: sel.col_dims, col_path: sel.col_path,
+      filters: toParams(sel.query),
+      cell_value: typeof sel.value === 'number' ? sel.value : null,
+      comment: text,
+      author: (el.commentAuthor.value || '').trim()
+    });
+    commentCache = null;                      // force a refresh on next lookup
+  }
+
   /* ── plumbing ──────────────────────────────────────────── */
 
   async function run(fn) {
@@ -1376,6 +1555,7 @@
     el.btnPivot.disabled = !on || !activeSheet.binding || activeSheet.binding.kind !== 'detail';
     el.btnReload.disabled = !on || !activeSheet.binding;
     el.btnSyncComments.disabled = !on || !activeSheet.binding || (activeSheet.binding.kind !== 'cube' && activeSheet.binding.kind !== 'pivot');
+    el.btnFullPivot.disabled = !on;
   }
 
   function progress(done, total, msg) {
