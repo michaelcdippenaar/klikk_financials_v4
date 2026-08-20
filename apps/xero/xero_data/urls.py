@@ -12,6 +12,7 @@ urlpatterns = [
     path('journals/pivot/drill/', pivot_views.XeroCubeDrillView.as_view(), name='journal_pivot_drill'),
     path('journals/pivot/subsets/', cube_saved.XeroCubeSubsetsView.as_view(), name='journal_pivot_subsets'),
     path('journals/pivot/views/', cube_saved.XeroCubeViewsView.as_view(), name='journal_pivot_views'),
+    path('comments/', pivot_comments.CommentsView.as_view(), name='comments'),
     path('journals/pivot/comments/', pivot_comments.XeroCubeCommentsView.as_view(), name='cube_comments'),
     path('journals/pivot/comments/bulk/', pivot_comments.XeroCubeCommentsBulkView.as_view(), name='cube_comments_bulk'),
     path('journals/pivot/comments/<int:comment_id>/status/', pivot_comments.XeroCubeCommentStatusView.as_view(), name='cube_comment_status'),

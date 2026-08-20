@@ -60,6 +60,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS cube_comments_cell_author_uq
 -- how the year-end audit agent pulls exactly its own queue instead of reading
 -- the whole register. GIN because the filter is containment (@>), not equality.
 ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS tags text[] NOT NULL DEFAULT '{}';
+
+-- One register for every kind of subject, not one table per feature.
+--
+-- A comment is a note by someone, about something, that can be tagged, worked
+-- and closed. None of that is specific to a cube cell -- so the SUBJECT became
+-- a pair (type, key) and everything else stayed. A bank transaction, a journal
+-- line, a slip and a cube cell now share one queue, one tag vocabulary, one
+-- status lifecycle and one set of tools.
+--
+-- subject_key must be an identity that SURVIVES A RESYNC. For a cube cell that
+-- is the coordinate hash; for a bank transaction it is Investec's uuid (or the
+-- fallback hash when the API omits one). Never a row id that a reload could
+-- reassign, and never a position in a list.
+ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS subject_type text NOT NULL DEFAULT 'cube_cell';
+ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS subject_key  text NOT NULL DEFAULT '';
+ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS subject_label text NOT NULL DEFAULT '';
+UPDATE app.cube_comments SET subject_key = cell_key WHERE subject_key = '';
+CREATE INDEX IF NOT EXISTS cube_comments_subject_idx ON app.cube_comments (subject_type, subject_key);
+DROP INDEX IF EXISTS app.cube_comments_cell_author_uq;
+CREATE UNIQUE INDEX IF NOT EXISTS cube_comments_subject_author_uq
+    ON app.cube_comments (subject_type, subject_key, author_key);
 CREATE INDEX IF NOT EXISTS cube_comments_tags_gin ON app.cube_comments USING gin (tags);
 """
 
@@ -192,7 +213,7 @@ def _author_identity(request, declared):
     return (declared or 'unattributed'), declared, False
 
 
-COLS = ('id, cell_key, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
+COLS = ('id, cell_key, subject_type, subject_key, subject_label, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
         'filters, cell_value, comment, author, author_key, status, created_at, updated_at, '
         'tags')
 
@@ -215,16 +236,57 @@ def _jsonb(v):
         return {}
 
 
+
+def _cube_label(row_path, col_path):
+    """A cube cell in words, so a mixed queue is readable without joining back."""
+    bits = ' / '.join(str(x) for x in (row_path or []))
+    if col_path and col_path != 'Total':
+        bits += ' \u00d7 ' + str(col_path)
+    return bits[:300]
+
+
+SUBJECT_KINDS = {
+    'cube_cell': 'A figure in a cube or PivotTable',
+    'bank_txn': 'A transaction on a bank account, as the bank sent it',
+    'journal_line': 'One line of a Xero journal',
+    'slip': 'A receipt in the Slippies register',
+    'invoice': 'A Xero invoice',
+}
+
+
+COL_NAMES = [c.strip() for c in COLS.split(',')]
+
+
 def _row_to_dict(r):
+    """Map a row by COLUMN NAME, not by position.
+
+    This was a list of hand-numbered indexes, so adding a column to COLS
+    silently shifted every field after it -- comment text landing in the author
+    field, and so on. Names cost nothing and cannot drift out of step with the
+    SELECT they came from.
+    """
+    d = dict(zip(COL_NAMES, r))
     return {
-        'id': r[0], 'cell_key': r[1], 'tenant_id': r[2], 'measure': r[3],
-        'row_dims': list(r[4] or []), 'row_path': list(r[5] or []),
-        'col_dims': list(r[6] or []), 'col_path': r[7],
-        'filters': _jsonb(r[8]), 'cell_value': float(r[9]) if r[9] is not None else None,
-        'comment': r[10], 'author': r[11], 'author_key': r[12], 'status': r[13],
-        'created_at': r[14].isoformat() if r[14] else None,
-        'updated_at': r[15].isoformat() if r[15] else None,
-        'tags': list(r[16] or []),
+        'id': d['id'],
+        'cell_key': d['cell_key'],
+        'subject_type': d['subject_type'],
+        'subject_key': d['subject_key'],
+        'subject_label': d['subject_label'],
+        'tenant_id': d['tenant_id'],
+        'measure': d['measure'],
+        'row_dims': list(d['row_dims'] or []),
+        'row_path': list(d['row_path'] or []),
+        'col_dims': list(d['col_dims'] or []),
+        'col_path': d['col_path'],
+        'filters': _jsonb(d['filters']),
+        'cell_value': float(d['cell_value']) if d['cell_value'] is not None else None,
+        'comment': d['comment'],
+        'author': d['author'],
+        'author_key': d['author_key'],
+        'status': d['status'],
+        'tags': list(d['tags'] or []),
+        'created_at': d['created_at'].isoformat() if d['created_at'] else None,
+        'updated_at': d['updated_at'].isoformat() if d['updated_at'] else None,
     }
 
 
@@ -246,6 +308,13 @@ class XeroCubeCommentsView(APIView):
         _ensure_table()
         p = request.query_params
         where, args = [], []
+
+        # This endpoint is the CUBE's view of the register. Now that the same
+        # table also holds bank transactions (and will hold more kinds), it has
+        # to say so — otherwise the add-in fetches comments it can never place
+        # on a sheet, and its counts describe a bigger queue than it shows.
+        where.append('subject_type = %s')
+        args.append('cube_cell')
 
         st = (p.get('status') or 'open').strip()
         if st != 'all':
@@ -313,8 +382,9 @@ class XeroCubeCommentsView(APIView):
         # only YOUR note on that cell, never anyone else's.
         if not comment:
             with connection.cursor() as c:
-                c.execute('DELETE FROM app.cube_comments WHERE cell_key = %s AND author_key = %s',
-                          [key, author_key])
+                c.execute('DELETE FROM app.cube_comments WHERE subject_type = %s '
+                          'AND subject_key = %s AND author_key = %s',
+                          ['cube_cell', key, author_key])
                 deleted = c.rowcount
             return Response({'deleted': deleted, 'cell_key': key, 'author_key': author_key})
 
@@ -478,3 +548,130 @@ class XeroCubeCommentsBulkView(APIView):
             'tags': shared_tags,
             'results': results,
         })
+
+
+class CommentsView(APIView):
+    """GET/POST /xero/data/comments/  — the comment register, any subject.
+
+    The generic face of the same table the cube comments live in. A comment is
+    a note by someone, about something, that can be tagged, worked and closed;
+    none of that was ever specific to a cube cell.
+
+        GET  ?subject_type=bank_txn&subject_key=<uuid>
+             ?subject_type=bank_txn            (all of that kind)
+             ?status=open|actioned|dismissed|all  ?tag=  ?tags=a,b  ?author=
+        POST {subject_type, subject_key, subject_label?, comment, author,
+              tags[], status?, context{}}
+
+    `subject_key` must be an identity that survives a resync -- Investec's uuid
+    for a bank transaction, the coordinate hash for a cube cell. A database row
+    id would look stable and quietly point at a different transaction after a
+    reload.
+
+    The cube keeps its own endpoint, which is a facade over this: it takes
+    coordinates and computes the key. Two ways in, one register.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        _ensure_table()
+        p = request.query_params
+        where, args = [], []
+
+        st = (p.get('status') or 'open').strip()
+        if st != 'all':
+            where.append('status = %s')
+            args.append(st)
+
+        for param, col in (('subject_type', 'subject_type'), ('subject_key', 'subject_key'),
+                           ('author', 'author_key'), ('measure', 'measure')):
+            val = (p.get(param) or '').strip()
+            if val:
+                where.append('%s = %%s' % col)
+                args.append(val)
+
+        tags = _norm_tags(
+            (p.get('tags') or p.get('tag') or '').split(',')
+        )
+        if tags:
+            where.append('tags @> %s')
+            args.append(tags)
+
+        try:
+            limit = min(max(int(p.get('limit', 500)), 1), 5000)
+        except (TypeError, ValueError):
+            limit = 500
+
+        sql = 'SELECT %s FROM app.cube_comments' % COLS
+        if where:
+            sql += ' WHERE ' + ' AND '.join(where)
+        sql += ' ORDER BY updated_at DESC LIMIT %s'
+        args.append(limit)
+
+        with connection.cursor() as c:
+            c.execute(sql, args)
+            rows = c.fetchall()
+        return Response({'count': len(rows), 'results': [_row_to_dict(r) for r in rows]})
+
+    def post(self, request):
+        _ensure_table()
+        d = request.data or {}
+        subject_type = (d.get('subject_type') or '').strip()
+        subject_key = (d.get('subject_key') or '').strip()
+        if not subject_type or not subject_key:
+            return Response(
+                {'error': 'subject_type and subject_key are required',
+                 'known_subject_types': SUBJECT_KINDS},
+                status=http.HTTP_400_BAD_REQUEST)
+        if subject_type == 'cube_cell':
+            return Response({'error': 'post a cube-cell comment to '
+                                      'journals/pivot/comments/, which builds the key '
+                                      'from the coordinates'},
+                            status=http.HTTP_400_BAD_REQUEST)
+
+        comment = (d.get('comment') or '').strip()
+        author_key, author_name, verified = _author_identity(request, d.get('author'))
+        context = d.get('context') if isinstance(d.get('context'), dict) else {}
+
+        if not comment:
+            with connection.cursor() as c:
+                c.execute('DELETE FROM app.cube_comments WHERE subject_type = %s '
+                          'AND subject_key = %s AND author_key = %s',
+                          [subject_type, subject_key, author_key])
+                deleted = c.rowcount
+            return Response({'deleted': deleted, 'subject_type': subject_type,
+                             'subject_key': subject_key})
+
+        val = d.get('value')
+        try:
+            val = float(val) if val is not None else None
+        except (TypeError, ValueError):
+            val = None
+
+        with connection.cursor() as c:
+            c.execute(
+                'INSERT INTO app.cube_comments '
+                '(cell_key, subject_type, subject_key, subject_label, tenant_id, measure, '
+                ' row_dims, row_path, col_dims, col_path, filters, cell_value, '
+                ' comment, author, author_key, status, tags) '
+                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                'ON CONFLICT (subject_type, subject_key, author_key) DO UPDATE SET '
+                '  comment = EXCLUDED.comment, subject_label = EXCLUDED.subject_label, '
+                '  tags = EXCLUDED.tags, cell_value = EXCLUDED.cell_value, '
+                '  filters = EXCLUDED.filters, status = EXCLUDED.status, updated_at = now() '
+                'RETURNING ' + COLS,
+                [
+                    # cell_key stays UNIQUE-shaped for the legacy column; for a
+                    # non-cube subject it is simply the subject key.
+                    '%s:%s' % (subject_type, subject_key),
+                    subject_type, subject_key, (d.get('subject_label') or '').strip()[:300],
+                    (context.get('tenant') or '').strip(), (d.get('measure') or '').strip(),
+                    [], [], [], '', json.dumps(context), val,
+                    comment, author_name, author_key,
+                    (d.get('status') or 'open').strip(), _norm_tags(d.get('tags')),
+                ],
+            )
+            row = c.fetchone()
+        out = _row_to_dict(row)
+        out['author_verified'] = verified
+        return Response(out, status=http.HTTP_200_OK)
