@@ -21,6 +21,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
+from apps.xero.xero_data import cube_mentions
+
 logger = logging.getLogger(__name__)
 
 DDL = """
@@ -53,6 +55,12 @@ CREATE INDEX IF NOT EXISTS cube_comments_author_idx ON app.cube_comments (author
 ALTER TABLE app.cube_comments DROP CONSTRAINT IF EXISTS cube_comments_cell_key_key;
 CREATE UNIQUE INDEX IF NOT EXISTS cube_comments_cell_author_uq
     ON app.cube_comments (cell_key, author_key);
+
+-- Tags relate a comment to a piece of work rather than to a cell: tag=audit is
+-- how the year-end audit agent pulls exactly its own queue instead of reading
+-- the whole register. GIN because the filter is containment (@>), not equality.
+ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS tags text[] NOT NULL DEFAULT '{}';
+CREATE INDEX IF NOT EXISTS cube_comments_tags_gin ON app.cube_comments USING gin (tags);
 """
 
 _ready = False
@@ -121,6 +129,44 @@ def _cell_key(tenant, measure, row_dims, row_path, col_dims, col_path, filters):
 
 
 
+MAX_TAGS = 20
+MAX_TAG_LEN = 40
+
+
+def _norm_tags(raw):
+    """Normalise whatever the client sent into a clean, bounded tag list.
+
+    Lowercased, trimmed, a leading '#' dropped, empties removed, duplicates
+    collapsed, order preserved. Bounded on BOTH axes -- at most MAX_TAGS tags of
+    at most MAX_TAG_LEN chars -- because this column is written straight from a
+    client payload and an unbounded text[] is how one malformed add-in build
+    fills the register with a thousand junk tags that nobody can clear from
+    Excel.
+
+    Accepts a list or a comma-separated string, since the pane and the MCP
+    naturally send different shapes.
+    """
+    if raw is None:
+        return None                      # absent != empty: absent means "leave as is"
+    if isinstance(raw, str):
+        raw = raw.split(',')
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out, seen = [], set()
+    for item in raw:
+        tag = str(item or '').strip().lstrip('#').strip().lower()
+        if not tag:
+            continue
+        tag = tag[:MAX_TAG_LEN]
+        if tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag)
+        if len(out) >= MAX_TAGS:
+            break
+    return out
+
+
 def _author_identity(request, declared):
     """Who wrote this comment.
 
@@ -147,7 +193,26 @@ def _author_identity(request, declared):
 
 
 COLS = ('id, cell_key, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
-        'filters, cell_value, comment, author, author_key, status, created_at, updated_at')
+        'filters, cell_value, comment, author, author_key, status, created_at, updated_at, '
+        'tags')
+
+
+def _jsonb(v):
+    """jsonb comes back as a dict on some paths and as a JSON STRING on others.
+
+    Same reason cube_saved.py carries this helper. Leaving it raw is not
+    cosmetic: every consumer that treats `filters` as a mapping breaks on the
+    string form. It made the MCP return filter_context as a string, and it made
+    the mention email raise AttributeError mid-send -- which the notify() guard
+    caught and recorded, but the fix belongs HERE, at the source, rather than in
+    each caller.
+    """
+    if isinstance(v, (dict, list)):
+        return v
+    try:
+        return json.loads(v) if v else {}
+    except (TypeError, ValueError):
+        return {}
 
 
 def _row_to_dict(r):
@@ -155,10 +220,11 @@ def _row_to_dict(r):
         'id': r[0], 'cell_key': r[1], 'tenant_id': r[2], 'measure': r[3],
         'row_dims': list(r[4] or []), 'row_path': list(r[5] or []),
         'col_dims': list(r[6] or []), 'col_path': r[7],
-        'filters': r[8], 'cell_value': float(r[9]) if r[9] is not None else None,
+        'filters': _jsonb(r[8]), 'cell_value': float(r[9]) if r[9] is not None else None,
         'comment': r[10], 'author': r[11], 'author_key': r[12], 'status': r[13],
         'created_at': r[14].isoformat() if r[14] else None,
         'updated_at': r[15].isoformat() if r[15] else None,
+        'tags': list(r[16] or []),
     }
 
 
@@ -195,6 +261,17 @@ class XeroCubeCommentsView(APIView):
             if val:
                 where.append('%s = %%s' % col)
                 args.append(val)
+
+        # tag=audit           -> has that tag
+        # tags=audit,fy2026   -> has ALL of them (containment, not overlap:
+        #                        narrowing a queue is the point, and && would
+        #                        widen it instead)
+        wanted = _norm_tags(p.get('tags')) or []
+        single = _norm_tags(p.get('tag')) or []
+        wanted = wanted + [t for t in single if t not in wanted]
+        if wanted:
+            where.append('tags @> %s')
+            args.append(list(wanted))
 
         try:
             limit = min(max(int(p.get('limit', 500)), 1), 5000)
@@ -247,23 +324,38 @@ class XeroCubeCommentsView(APIView):
         except (TypeError, ValueError):
             val = None
 
+        tags = _norm_tags(d.get('tags'))
+        if tags is None:
+            tags = []
+
         with connection.cursor() as c:
             c.execute(
                 'INSERT INTO app.cube_comments '
                 '(cell_key, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
-                ' filters, cell_value, comment, author, author_key, status) '
-                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                ' filters, cell_value, comment, author, author_key, status, tags) '
+                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
                 'ON CONFLICT (cell_key, author_key) DO UPDATE SET '
                 '  comment = EXCLUDED.comment, cell_value = EXCLUDED.cell_value, '
-                '  author = EXCLUDED.author, status = EXCLUDED.status, updated_at = now() '
+                '  author = EXCLUDED.author, status = EXCLUDED.status, '
+                '  tags = EXCLUDED.tags, updated_at = now() '
                 'RETURNING ' + COLS,
                 [key, tenant, measure, list(row_dims), list(row_path), list(col_dims),
                  col_path, json.dumps(filters), val, comment,
-                 author_name, author_key, (d.get('status') or 'open').strip()],
+                 author_name, author_key, (d.get('status') or 'open').strip(), tags],
             )
             row = c.fetchone()
         out = _row_to_dict(row)
         out['author_verified'] = verified
+
+        # The comment is saved and committed by this point. Notification is
+        # strictly best-effort from here on: notify() catches everything and
+        # reports it, so a dead mail server costs an email, never the comment.
+        out['mentions'] = cube_mentions.notify(
+            out,
+            _coords(row_dims, row_path, col_dims, col_path),
+            author_name,
+            cube_mentions.parse_mentions(comment),
+        )
         return Response(out, status=http.HTTP_200_OK)
 
 

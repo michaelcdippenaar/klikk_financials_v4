@@ -42,6 +42,23 @@
 > — but it must become a strict per-user lookup the day a login exists that is
 > not MC's. **MC's call.**
 >
+> **New surface, 2026-08-20 (cube comment tags + @mentions):**
+> `/xero/data/journals/pivot/people/` (GET/POST) is `IsAuthenticated` and was
+> confirmed 401 anonymously, as were the comment endpoints — the public surface
+> is unchanged. Two things about it are worth a compliance eye rather than an
+> engineering one:
+> * `app.cube_people` holds the **names and email addresses of third parties**
+>   (MC's bookkeeper and auditors) who are not users of this system and have no
+>   login. That is personal information in a new table, so it belongs in the
+>   ROPA, and it needs a retention answer. Deliberately curated through the
+>   endpoint — never inferred from Xero contacts, WhatsApp, or anywhere else.
+> * A comment POST can cause an **outbound email to a named human**. It is
+>   strictly transactional (one mention, one recipient, one email, only from a
+>   POST containing that mention, never resent for the same comment+person) and
+>   carries no tracking or images. It is not marketing, so POPIA §69 does not
+>   bite, but it is the first thing in this codebase that emails a
+>   non-user — worth knowing before the mail backend is ever configured.
+>
 > **And: the MCP client MC actually runs is NOT configured with a token.** The
 > `klikk-financials` stdio server in the desktop client's config sets only
 > `KLIKK_API_BASE_URL`, so it calls the backend anonymously and now gets 401s.
