@@ -882,13 +882,18 @@
 
       var txt = document.createElement('span');
       txt.className = 'chip__t';
-      if (zone === 'filt') {
-        var sel = filterVals[key] || [];
-        txt.textContent = dimLabel(key) + (sel.length
-          ? ' · ' + (sel.length === 1 ? sel[0] : sel.length + ' selected')
-          : ' · all');
-      } else {
+      /* A subset belongs to the DIMENSION, not to the well it is sitting in.
+         Financial year restricted to FY2024-FY2026 means the same thing
+         whether the field is on rows, on columns, or filtering from the side
+         -- so the count is shown wherever the chip is, and dragging a field
+         between wells carries its subset along. */
+      var sub = filterVals[key] || [];
+      if (zone === 'avail') {
         txt.textContent = dimLabel(key);
+      } else {
+        txt.textContent = dimLabel(key) + (sub.length
+          ? ' · ' + (sub.length === 1 ? sub[0] : sub.length + ' selected')
+          : '');
       }
       chip.appendChild(txt);
 
@@ -913,6 +918,7 @@
       } else {
         acts.appendChild(btn('left', '\u2039', 'Move earlier'));
         acts.appendChild(btn('right', '\u203a', 'Move later'));
+        acts.appendChild(btn('pick', '\u25be', 'Subset — choose which values appear'));
         acts.appendChild(btn('remove', '\u00d7', 'Remove'));
       }
       chip.appendChild(acts);
@@ -1077,10 +1083,13 @@
 
   function moveField(key, from, to, at) {
     if (from === to && at < 0) return;
-    // Leaving Filters drops the selection with it, rather than keeping a
-    // hidden constraint alive on a field that is no longer shown as filtered.
-    if (from === 'filt' && to !== 'filt') delete filterVals[key];
-    if (to === 'filt' && !filterVals[key]) filterVals[key] = [];
+    /* Dropping a field back into Fields removes it from the view entirely, so
+       its subset goes too -- otherwise an invisible constraint would survive
+       on a dimension that is no longer anywhere on the sheet. Moving between
+       rows, columns and filters KEEPS it: those are all ways of showing the
+       same restricted set of members. */
+    if (to === 'avail') delete filterVals[key];
+    else if (!filterVals[key]) filterVals[key] = [];
     wells[from] = wells[from].filter(function (k) { return k !== key; });
     if (to !== 'avail') {
       if (wells[to].length >= MAX[to]) {

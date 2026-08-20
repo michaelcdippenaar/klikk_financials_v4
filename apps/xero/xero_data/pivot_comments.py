@@ -136,7 +136,11 @@ def _author_identity(request, declared):
     user = getattr(request, 'user', None)
     username = getattr(user, 'username', '') or ''
     declared = (declared or '').strip()
-    SHARED = {'excel-addin', ''}
+    # 'service-token' is the shared MCP credential and 'excel-addin' the shared
+    # add-in login: both name a TOOL, not a person. An agent writing a comment
+    # must say who it is, or the queue fills with notes from 'service-token'
+    # and nobody can tell the auditor's from the sync job's.
+    SHARED = {'excel-addin', 'service-token', ''}
     if username and username not in SHARED:
         return username, username, True
     return (declared or 'unattributed'), declared, False
