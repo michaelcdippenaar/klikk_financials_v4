@@ -128,7 +128,7 @@
       'contactList', 'description', 'amount', 'q', 'maxRows', 'countLine', 'btnLoad', 'btnCount',
       'detailPanel', 'btnPivot', 'cubePanel', 'measure', 'btnResetComments',
       'queryPanel', 'refreshPanel', 'commentPanel', 'settingsPanel',
-      'suppress', 'btnCube', 'cubeMsg', 'btnReload', 'wellAvail', 'wellRows',
+      'suppress', 'btnCube', 'cubeMsg', 'btnDrill', 'btnReload', 'wellAvail', 'wellRows',
       'wellCols', 'wellFilt', 'autoBuild', 'outline',
       'picker', 'pickerTitle', 'pickerClose', 'pickerSearch', 'pickerAll',
       'pickerNone', 'pickerCount', 'pickerList',
@@ -199,6 +199,7 @@
     el.btnPushComments.addEventListener('click', function () { run(pushCommentsToSheet); });
     el.btnSaveComment.addEventListener('click', function () { run(saveSelectedComment); });
     el.btnDeleteComment.addEventListener('click', function () { run(deleteSelectedComment); });
+    el.btnDrill.addEventListener('click', function () { run(drillSelection); });
     watchSelection();
     el.btnRefresh.addEventListener('click', function () { run(refreshActiveSheet); });
     el.btnRestore.addEventListener('click', restoreFiltersFromSheet);
@@ -1878,8 +1879,10 @@
       await writeCellComment(activeSheet.id, selection.r, selection.c, text);
     }
     el.selBox.className = 'sel sel--saved';
-    el.commentMsg.textContent = 'Saved against ' + selection.row_path.join(' / ')
-      + ' × ' + selection.col_path + '.';
+    var cs = selCoords(selection);
+    el.commentMsg.textContent = 'Saved against '
+      + Object.keys(cs).map(function (k) { return dimLabel(k) + ' ' + cs[k]; }).join(' · ')
+      + '. It stays on this figure wherever you move the fields.';
     el.commentMsg.className = 'msg msg--ok';
   }
 
@@ -1891,6 +1894,60 @@
     el.selBox.className = 'sel';
     el.commentMsg.textContent = 'Comment cleared.';
     el.commentMsg.className = 'msg';
+  }
+
+  /* The journal lines that add up to the selected figure.
+
+     The anchor's coordinates ARE the query -- {account_class: EXPENSE,
+     account: 406 — ..., fin_year: FY2023} filters the ledger to exactly the
+     lines the cell aggregated. Resolved live rather than from a stored list of
+     ids: the lines behind a figure change when Xero is re-synced, and a frozen
+     list would go stale while still looking authoritative.
+
+     The returned rows carry the same field set as a journal search, so they go
+     through the ordinary sheet writer. */
+  function selCoords(sel) {
+    var c = {};
+    (sel.row_dims || []).forEach(function (d, i) { c[d] = (sel.row_path || [])[i]; });
+    var cp = (sel.col_path && sel.col_path !== 'Total') ? String(sel.col_path).split(' | ') : [];
+    (sel.col_dims || []).forEach(function (d, i) { if (cp[i] !== undefined) c[d] = cp[i]; });
+    return c;
+  }
+
+  async function drillSelection() {
+    var sel = selection;
+    if (!sel || !sel.row_path) throw new Error('Select a value cell first.');
+    var coords = selCoords(sel);
+    progress(0, 1, 'Finding the transactions behind this figure…');
+    var data = await apiGet('/xero/data/journals/pivot/drill/',
+      Object.assign({}, toParams(sel.query), { coords: JSON.stringify(coords), limit: 5000 }));
+
+    if (!data.count) {
+      el.commentMsg.textContent = 'No journal lines match that figure — the ledger may have '
+        + 'changed since it was written.';
+      el.commentMsg.className = 'msg msg--err';
+      return;
+    }
+
+    var out = await renderRows(null, data.rows, sel.query);
+    await inspectActiveSheet();
+
+    // Report the reconciliation rather than assuming it. A drill that does not
+    // add up to the cell is a real signal -- the ledger moved under the figure.
+    var shown = typeof sel.value === 'number' ? sel.value : null;
+    var diff = shown === null ? null : Math.abs(shown - data.line_total);
+    var msg = fmtNum(data.count) + ' line' + (data.count === 1 ? '' : 's')
+      + ' totalling ' + data.line_total.toLocaleString(undefined, { minimumFractionDigits: 2 })
+      + ' written to ' + (out ? out.sheetName : 'a new sheet') + '.';
+    if (data.truncated) msg += ' Line cap hit — narrow the filters.';
+    if (diff !== null && diff > 0.005) {
+      msg += ' NOTE: the cell shows ' + shown.toLocaleString(undefined, { minimumFractionDigits: 2 })
+        + ' — a difference of ' + diff.toFixed(2) + '. The underlying data has changed.';
+      el.commentMsg.className = 'msg msg--err';
+    } else {
+      el.commentMsg.className = 'msg msg--ok';
+    }
+    el.commentMsg.textContent = msg;
   }
 
   async function postComment(sel, text) {

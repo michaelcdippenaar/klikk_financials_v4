@@ -188,6 +188,21 @@ def parse_dim_filters(p):
     return out
 
 
+
+def _attr_path(obj, path):
+    """Walk an ORM alias ('account__grouping') on a MODEL INSTANCE.
+
+    The labellers were written against .values() dicts; the drill needs whole
+    objects, so this rebuilds the same dict shape for the few aliases in play.
+    """
+    cur = obj
+    for part in path.split('__'):
+        if cur is None:
+            return None
+        cur = getattr(cur, part, None)
+    return cur
+
+
 def apply_journal_filters(qs, p):
     """Same filter vocabulary as the journal search endpoint, so the pane's
     Filters panel means exactly the same thing in both modes."""
@@ -497,4 +512,153 @@ class XeroCubeMembersView(APIView):
             'count': len(members),
             'truncated': truncated,
             'members': [{'value': k, 'lines': n} for k, n in members],
+        })
+
+
+# A dimension whose label IS the stored value can be filtered in SQL. The rest
+# (fin_year, report, month, ...) are computed in Python by their labeller, so
+# they are evaluated after the query -- pushing down what we can first keeps
+# that set small.
+PUSHDOWN = {
+    'entity': 'organisation__tenant_name',
+    'account_class': 'account__grouping',
+    'account_type': 'account__type',
+    'journal_type': 'journal_type',
+    'source_type': 'transaction_source__transaction_source',
+    'tracking1_category': 'tracking1__name',
+    'tracking1': 'tracking1__option',
+    'tracking2_category': 'tracking2__name',
+    'tracking2': 'tracking2__option',
+}
+
+
+class XeroCubeDrillView(APIView):
+    """GET /xero/data/journals/pivot/drill/?coords={"account":"406 — Consulting"}
+
+    The journal lines that ADD UP TO one cube cell.
+
+    A comment is written about a figure; this is what the figure is made of.
+    Coordinates are the same axis-independent {dimension: label} map the
+    comment anchor stores, so a comment can be resolved back to its
+    transactions at any time -- and re-resolved later, which is the point: the
+    lines behind a figure change when Xero is re-synced, and a stored list of
+    ids would quietly go stale while looking authoritative.
+
+    Same journal filter vocabulary as the pivot, so the context that produced
+    the number is reproduced exactly.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        p = request.query_params
+        try:
+            coords = json.loads(p.get('coords') or '{}')
+            if not isinstance(coords, dict):
+                raise ValueError
+        except (TypeError, ValueError):
+            return Response({'error': 'coords must be a JSON object of dimension -> value'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        unknown = [k for k in coords if k not in DIMENSIONS]
+        if unknown:
+            return Response({'error': 'unknown dimension(s): %s' % ', '.join(unknown)},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            limit = min(max(int(p.get('limit', 500)), 1), 5000)
+        except (TypeError, ValueError):
+            limit = 500
+
+        qs = apply_journal_filters(XeroJournals.objects.all(), p)
+
+        # Push down what SQL can do.
+        deferred = {}
+        for dim, val in coords.items():
+            val = '' if val is None else str(val)
+            if dim in PUSHDOWN:
+                qs = qs.filter(**{PUSHDOWN[dim]: val}) if val != BLANK else qs.filter(
+                    **{PUSHDOWN[dim] + '__in': ['', None]})
+            elif dim == 'account':
+                # Label is "code — name"; the code alone identifies it.
+                code = val.split('—')[0].strip() if '—' in val else val.strip()
+                qs = qs.filter(account__code=code) if code else qs
+                if '—' in val:
+                    deferred[dim] = val
+            else:
+                deferred[dim] = val
+
+        ann = _dim_annotations(list(deferred.keys()))
+        if ann:
+            qs = qs.annotate(**ann)
+
+        qs = qs.select_related('organisation', 'account', 'contact', 'tracking1', 'tracking2',
+                               'transaction_source', 'transaction_source__contact')
+
+        tests = [(d, _labeller(d), v) for d, v in deferred.items()]
+        aliases = []
+        for d in deferred:
+            aliases.extend(_dim_aliases(d))
+
+        rows, total, scanned = [], 0.0, 0
+        truncated = False
+        for j in qs.iterator(chunk_size=2000):
+            scanned += 1
+            if tests:
+                rec = {a: _attr_path(j, a) for a in aliases}
+                if any(f(rec) != v for _, f, v in tests):
+                    continue
+            total += float(j.amount or 0)
+            if len(rows) >= limit:
+                truncated = True
+                continue
+            src = j.transaction_source
+            supplier = j.contact or (src.contact if src else None)
+            acct = j.account
+            org = j.organisation
+            # Same field set as the journal search endpoint, so a drill result
+            # renders through the add-in's existing sheet writer untouched --
+            # one column contract, no second renderer to drift.
+            fy_rec = {
+                'd_year': j.date.year if j.date else None,
+                'd_month': j.date.month if j.date else None,
+                'organisation__fiscal_year_start_month': (
+                    getattr(org, 'fiscal_year_start_month', None) if org else None),
+            }
+            rows.append({
+                'id': j.id,
+                'date': j.date.date().isoformat() if j.date else None,
+                'journal_number': j.journal_number,
+                'journal_type': j.journal_type,
+                'fin_year': _label_fin_year(fy_rec),
+                'tenant_id': org.tenant_id if org else '',
+                'tenant_name': org.tenant_name if org else '',
+                'report': (('Income Statement' if acct.grouping in ('REVENUE', 'EXPENSE')
+                            else 'Balance Sheet') if acct and acct.grouping else ''),
+                'account_class': acct.grouping if acct else '',
+                'account_code': acct.code if acct else '',
+                'account_name': acct.name if acct else '',
+                'account_type': acct.type if acct else '',
+                'amount': str(j.amount),
+                'debit': str(j.debit),
+                'credit': str(j.credit),
+                'tax_amount': str(j.tax_amount),
+                'contact_name': j.contact.name if j.contact else '',
+                'supplier_name': supplier.name if supplier else '',
+                'supplier_via': ('journal' if j.contact else ('source' if (src and src.contact) else '')),
+                'description': j.description or '',
+                'reference': j.reference or '',
+                'tracking1_category': j.tracking1.name if j.tracking1 else '',
+                'tracking1': j.tracking1.option if j.tracking1 else '',
+                'tracking2_category': j.tracking2.name if j.tracking2 else '',
+                'tracking2': j.tracking2.option if j.tracking2 else '',
+                'transaction_source_type': src.transaction_source if src else '',
+                'transaction_source_id': src.transactions_id if src else '',
+            })
+
+        return Response({
+            'coords': coords,
+            'count': len(rows),
+            'line_total': _r2(total),
+            'truncated': truncated,
+            'rows': rows,
         })

@@ -44,6 +44,15 @@ CREATE TABLE IF NOT EXISTS app.cube_comments (
 );
 CREATE INDEX IF NOT EXISTS cube_comments_status_idx ON app.cube_comments (status);
 CREATE INDEX IF NOT EXISTS cube_comments_tenant_idx ON app.cube_comments (tenant_id);
+
+-- Comments are PER AUTHOR. The cell is shared; the note about it is not, so
+-- two people reviewing the same figure must not overwrite each other. Uniqueness
+-- is therefore (cell, author), not (cell).
+ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS author_key text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS cube_comments_author_idx ON app.cube_comments (author_key);
+ALTER TABLE app.cube_comments DROP CONSTRAINT IF EXISTS cube_comments_cell_key_key;
+CREATE UNIQUE INDEX IF NOT EXISTS cube_comments_cell_author_uq
+    ON app.cube_comments (cell_key, author_key);
 """
 
 _ready = False
@@ -111,8 +120,30 @@ def _cell_key(tenant, measure, row_dims, row_path, col_dims, col_path, filters):
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
+
+def _author_identity(request, declared):
+    """Who wrote this comment.
+
+    The authenticated user is the authority. The add-in currently signs in as
+    the shared `excel-addin` service account, so that name identifies the TOOL,
+    not the person -- when that is who we are, fall back to the name typed in
+    the pane and mark it self-declared, rather than filing everyone's notes
+    under one identity.
+
+    Give each person their own login and this collapses to the real username
+    with verified=True, and nothing else has to change.
+    """
+    user = getattr(request, 'user', None)
+    username = getattr(user, 'username', '') or ''
+    declared = (declared or '').strip()
+    SHARED = {'excel-addin', ''}
+    if username and username not in SHARED:
+        return username, username, True
+    return (declared or 'unattributed'), declared, False
+
+
 COLS = ('id, cell_key, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
-        'filters, cell_value, comment, author, status, created_at, updated_at')
+        'filters, cell_value, comment, author, author_key, status, created_at, updated_at')
 
 
 def _row_to_dict(r):
@@ -121,9 +152,9 @@ def _row_to_dict(r):
         'row_dims': list(r[4] or []), 'row_path': list(r[5] or []),
         'col_dims': list(r[6] or []), 'col_path': r[7],
         'filters': r[8], 'cell_value': float(r[9]) if r[9] is not None else None,
-        'comment': r[10], 'author': r[11], 'status': r[12],
-        'created_at': r[13].isoformat() if r[13] else None,
-        'updated_at': r[14].isoformat() if r[14] else None,
+        'comment': r[10], 'author': r[11], 'author_key': r[12], 'status': r[13],
+        'created_at': r[14].isoformat() if r[14] else None,
+        'updated_at': r[15].isoformat() if r[15] else None,
     }
 
 
@@ -150,6 +181,11 @@ class XeroCubeCommentsView(APIView):
         if st != 'all':
             where.append('status = %s')
             args.append(st)
+        author = (p.get('author') or '').strip()
+        if author:
+            where.append('author_key = %s')
+            args.append(author)
+
         for param, col in (('tenant', 'tenant_id'), ('measure', 'measure')):
             val = (p.get(param) or '').strip()
             if val:
@@ -189,14 +225,17 @@ class XeroCubeCommentsView(APIView):
         tenant = (filters.get('tenant') or '').strip()
         comment = (d.get('comment') or '').strip()
 
+        author_key, author_name, verified = _author_identity(request, d.get('author'))
         key = _cell_key(tenant, measure, row_dims, row_path, col_dims, col_path, filters)
 
-        # An emptied note means "retract", not "store a blank".
+        # An emptied note means "retract", not "store a blank" -- and retracts
+        # only YOUR note on that cell, never anyone else's.
         if not comment:
             with connection.cursor() as c:
-                c.execute('DELETE FROM app.cube_comments WHERE cell_key = %s', [key])
+                c.execute('DELETE FROM app.cube_comments WHERE cell_key = %s AND author_key = %s',
+                          [key, author_key])
                 deleted = c.rowcount
-            return Response({'deleted': deleted, 'cell_key': key})
+            return Response({'deleted': deleted, 'cell_key': key, 'author_key': author_key})
 
         val = d.get('cell_value')
         try:
@@ -208,18 +247,20 @@ class XeroCubeCommentsView(APIView):
             c.execute(
                 'INSERT INTO app.cube_comments '
                 '(cell_key, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
-                ' filters, cell_value, comment, author, status) '
-                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
-                'ON CONFLICT (cell_key) DO UPDATE SET '
+                ' filters, cell_value, comment, author, author_key, status) '
+                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                'ON CONFLICT (cell_key, author_key) DO UPDATE SET '
                 '  comment = EXCLUDED.comment, cell_value = EXCLUDED.cell_value, '
                 '  author = EXCLUDED.author, status = EXCLUDED.status, updated_at = now() '
                 'RETURNING ' + COLS,
                 [key, tenant, measure, list(row_dims), list(row_path), list(col_dims),
                  col_path, json.dumps(filters), val, comment,
-                 (d.get('author') or '').strip(), (d.get('status') or 'open').strip()],
+                 author_name, author_key, (d.get('status') or 'open').strip()],
             )
             row = c.fetchone()
-        return Response(_row_to_dict(row), status=http.HTTP_200_OK)
+        out = _row_to_dict(row)
+        out['author_verified'] = verified
+        return Response(out, status=http.HTTP_200_OK)
 
 
 class XeroCubeCommentStatusView(APIView):
