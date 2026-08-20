@@ -91,7 +91,13 @@ AUTH_REJECTED = (401, 403)
 # permission class): asserting "authed != 403" would be wrong for these.
 # /xero/auth/initiate/ returns 403 "No active Xero credentials found" when the
 # (test) DB holds no XeroClientCredentials row.
-VIEW_LOGIC_403 = {"/xero/auth/initiate/"}
+# Endpoints whose 403 comes from VIEW LOGIC ("no active Xero credentials
+# configured"), not from the permission gate. The authenticated sweep must not
+# read these as a gate that is stricter than IsAuthenticated.
+# /xero/core/tenants/ joined this set on 2026-08-20: it used to answer 500 here
+# (unguarded .get() -> DoesNotExist), which the sweep tolerated. It now answers
+# the same honest 403 as /xero/auth/initiate/ when the table has no credentials.
+VIEW_LOGIC_403 = {"/xero/auth/initiate/", "/xero/core/tenants/"}
 
 
 class _Base(TestCase):
@@ -235,3 +241,119 @@ class PublicAllowlistTests(_Base):
         except ProgrammingError:
             return
         self.assertEqual(resp.status_code, 404)
+
+
+class AuthenticatedWithoutXeroCredentialsTests(TestCase):
+    """The defect the lockdown INTRODUCED, and why an anonymous-only test misses it.
+
+    The sweep above asserts the permission GATE and explicitly tolerates a 500
+    from an authenticated caller ("may be 200/400/404/500"). That blind spot is
+    exactly where this bug lived.
+
+    Pre-lockdown these views were AllowAny, so real traffic arrived anonymous and
+    took the safe ``.filter(active=True).first()`` branch. The lockdown made every
+    caller authenticated, which pushed real users onto the sibling branch --
+    ``XeroClientCredentials.objects.get(user=request.user, active=True)`` -- and
+    that raises DoesNotExist for any logged-in user who does not personally own a
+    credentials row. Unhandled exception, so DRF answered **500**. Observed live
+    on GET /xero/core/tenants/ from the console.
+
+    The load-bearing case is a user who IS authenticated and has NO credentials
+    row. A test that only checks the anonymous 401 passes today and would never
+    catch a regression here.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        # Deliberately owns no XeroClientCredentials row.
+        self.stranger = User.objects.create_user(
+            username="no-xero-credentials", password="pw-not-logged")
+
+    def test_tenants_does_not_500_for_authenticated_user_without_credentials(self):
+        self.client.force_authenticate(self.stranger)
+        resp = self.client.get("/xero/core/tenants/")
+        self.assertNotEqual(
+            resp.status_code, 500,
+            "GET /xero/core/tenants/ raised for an authenticated user with no "
+            "credentials row -- the .get()/DoesNotExist regression is back")
+        # With no credentials in the table at all, the honest answer is 403.
+        self.assertEqual(resp.status_code, 403)
+
+    def test_tenants_is_still_401_anonymously(self):
+        resp = self.client.get("/xero/core/tenants/")
+        self.assertEqual(resp.status_code, 401)
+
+    def test_resolver_never_raises_and_prefers_the_users_own_row(self):
+        """Unit-level pin on the shared helper the three views now use."""
+        from django.test import RequestFactory
+
+        from apps.xero.xero_auth.credentials import (
+            resolve_active_credentials, resolve_active_credentials_user)
+        from apps.xero.xero_auth.models import XeroClientCredentials
+
+        request = RequestFactory().get("/")
+        request.user = self.stranger
+
+        # Nothing in the table: None, not an exception.
+        self.assertIsNone(resolve_active_credentials(request))
+        self.assertIsNone(resolve_active_credentials_user(request))
+
+        owner = User.objects.create_user(username="xero-owner", password="pw-not-logged")
+        owned = XeroClientCredentials.objects.create(
+            user=owner, client_id="cid-owner", client_secret="secret",
+            scope=[], active=True)
+
+        # A user with no row of their own falls back to the active row rather
+        # than raising. Deliberate single-operator behaviour -- see the module
+        # docstring in apps/xero/xero_auth/credentials.py.
+        self.assertEqual(resolve_active_credentials(request), owned)
+
+        # A user WITH their own row gets their own, never the fallback.
+        mine = XeroClientCredentials.objects.create(
+            user=self.stranger, client_id="cid-mine", client_secret="secret",
+            scope=[], active=True)
+        self.assertEqual(resolve_active_credentials(request), mine)
+
+    def test_service_token_caller_does_not_500_on_credential_resolution(self):
+        """The MCP server authenticates as a non-persisted ServiceAccount.
+
+        ServiceAccount has is_authenticated=True but pk=None and is not a
+        Django model, so passing it to .filter(user=...) raises -- which would
+        turn every machine call into a 500. Caught by
+        xero_sync.test_trigger_auth while fixing the tenants defect; pinned
+        here so the resolver keeps handling it.
+        """
+        from django.test import RequestFactory
+
+        from apps.xero.xero_auth.credentials import resolve_active_credentials
+        from klikk_business_intelligence.permissions import ServiceAccount
+
+        request = RequestFactory().get("/")
+        request.user = ServiceAccount()
+        self.assertIsNone(resolve_active_credentials(request))  # must not raise
+
+    def test_no_view_reintroduces_the_unguarded_get(self):
+        """LIVING GUARD over the whole family, not just the one view that broke.
+
+        The same shape existed in xero_core, xero_metadata and xero_sync. This
+        fails if anyone reintroduces ``.get(user=request.user`` in a view module,
+        which is the precise construct that turns a 4xx into a 500.
+        """
+        import pathlib
+
+        root = pathlib.Path(__file__).resolve().parents[2] / "apps" / "xero"
+        offenders = []
+        for path in root.rglob("views*.py"):
+            text = path.read_text(encoding="utf-8")
+            for lineno, line in enumerate(text.splitlines(), 1):
+                stripped = line.strip()
+                if stripped.startswith("#"):
+                    continue  # prose ABOUT the construct is not the construct
+                if ".get(user=request.user" in stripped:
+                    offenders.append(f"{path}:{lineno}: {stripped}")
+        self.assertEqual(
+            offenders, [],
+            "Unguarded .get(user=request.user ...) is back -- it raises "
+            "DoesNotExist and DRF turns that into a 500. Use "
+            "apps/xero/xero_auth/credentials.resolve_active_credentials():\n  "
+            + "\n  ".join(offenders))

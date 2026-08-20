@@ -8,7 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_sync.api_call_logging import get_api_call_stats
-from apps.xero.xero_auth.models import XeroClientCredentials
+from apps.xero.xero_auth.credentials import resolve_active_credentials_user
 from apps.xero.xero_sync.services import update_xero_models
 
 
@@ -30,15 +30,13 @@ class XeroUpdateModelsView(APIView):
             return Response({"error": "Tenant not found"}, status=status.HTTP_404_NOT_FOUND)
 
         try:
-            # TODO: When adding authentication back, use request.user
-            # For now, get user from first active credentials (development only)
-            if request.user.is_authenticated:
-                user = request.user
-            else:
-                credentials = XeroClientCredentials.objects.filter(active=True).first()
-                if not credentials:
-                    return Response({"error": "No active Xero credentials found"}, status=status.HTTP_403_FORBIDDEN)
-                user = credentials.user
+            # Same defect class as xero_core/views.py, one layer deeper: passing a
+            # logged-in user with no credentials row into update_xero_models()
+            # reaches XeroApiClient.__init__, whose unguarded .get() raises
+            # DoesNotExist -> HTTP 500. Resolve to a user with credentials first.
+            user = resolve_active_credentials_user(request)
+            if user is None:
+                return Response({"error": "No active Xero credentials found"}, status=status.HTTP_403_FORBIDDEN)
             # Use the service function for consistency with scheduled tasks
             result = update_xero_models(tenant_id, user=user)
             

@@ -171,8 +171,28 @@ class AuthBypassHeaderTests(_Base):
             m.assert_not_called()
 
 
+class _CredentialedBase(_Base):
+    """Adds an active XeroClientCredentials row.
+
+    Since 2026-08-20 the sync/metadata triggers resolve credentials BEFORE
+    calling the service layer, and answer a clean 403 when the system has no
+    Xero connection at all (previously they passed the caller straight through
+    and blew up deeper, in XeroApiClient, as a 500). These tests exist to prove
+    that AUTH reaches the service layer, so they need the system to be
+    connected -- otherwise they assert the 403 precondition instead of the
+    auth plumbing they were written for."""
+
+    def setUp(self):
+        super().setUp()
+        from apps.xero.xero_auth.models import XeroClientCredentials
+        XeroClientCredentials.objects.get_or_create(
+            user=self.user, active=True,
+            defaults={"client_id": "cid-test", "client_secret": "secret", "scope": []},
+        )
+
+
 @override_settings(KLIKK_API_TOKEN=SERVICE_TOKEN)
-class ServiceTokenTests(_Base):
+class ServiceTokenTests(_CredentialedBase):
     """ServiceTokenAuthentication runs before JWT and the MCP server relies on
     it. The correct token must AUTHENTICATE (not 401); a wrong token must not."""
 
@@ -202,7 +222,7 @@ class ServiceTokenTests(_Base):
             m.assert_not_called()
 
 
-class JwtHappyPathTests(_Base):
+class JwtHappyPathTests(_CredentialedBase):
     """A real simplejwt access token must reach the endpoint -- this is what
     proves the console's Run buttons still work. Downstream mocked."""
 

@@ -7,7 +7,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
 from apps.xero.xero_core.models import XeroTenant
-from apps.xero.xero_auth.models import XeroClientCredentials, XeroTenantToken
+from apps.xero.xero_auth.models import XeroTenantToken
+from apps.xero.xero_auth.credentials import resolve_active_credentials
 
 
 class XeroTenantListView(APIView):
@@ -15,14 +16,14 @@ class XeroTenantListView(APIView):
 
     def get(self, request):
         """List all tenants connected to the user's credentials."""
-        # TODO: When adding authentication back, filter by request.user
-        # For now, get first active credentials (development only)
-        if request.user.is_authenticated:
-            credentials = XeroClientCredentials.objects.get(user=request.user, active=True)
-        else:
-            credentials = XeroClientCredentials.objects.filter(active=True).first()
-            if not credentials:
-                return Response({"error": "No active Xero credentials found"}, status=status.HTTP_403_FORBIDDEN)
+        # Was `.get(user=request.user, active=True)` on the authenticated branch,
+        # which raised DoesNotExist -> HTTP 500 for any logged-in user who did not
+        # personally own a credentials row. The lockdown made every caller
+        # authenticated, so that branch started carrying real traffic for the
+        # first time and the console got 500s. See xero_auth/credentials.py.
+        credentials = resolve_active_credentials(request)
+        if credentials is None:
+            return Response({"error": "No active Xero credentials found"}, status=status.HTTP_403_FORBIDDEN)
         tenant_tokens = XeroTenantToken.objects.filter(credentials=credentials)
         tenants = [
             {

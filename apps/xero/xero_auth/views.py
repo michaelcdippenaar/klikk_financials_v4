@@ -17,6 +17,7 @@ from rest_framework.permissions import IsAuthenticated, AllowAny
 from xero_python.identity import IdentityApi
 from xero_python.exceptions import AccountingBadRequestException as ApiException
 
+from apps.xero.xero_auth.credentials import resolve_active_credentials
 from apps.xero.xero_auth.models import XeroClientCredentials, XeroTenantToken, XeroAuthSettings
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_core.services import XeroApiClient
@@ -35,15 +36,12 @@ class XeroAuthInitiateView(APIView):
         """Initiate Xero OAuth2 flow by returning the authorization URL."""
         # TODO: When adding authentication back, filter by request.user
         # For now, get first active credentials (development only)
-        try:
-            if request.user.is_authenticated:
-                credentials = XeroClientCredentials.objects.get(user=request.user, active=True)
-            else:
-                # For development: get first active credentials
-                credentials = XeroClientCredentials.objects.filter(active=True).first()
-                if not credentials:
-                    return Response({"error": "No active Xero credentials found"}, status=status.HTTP_403_FORBIDDEN)
-        except XeroClientCredentials.DoesNotExist:
+        # Same resolver as xero_core / xero_metadata / xero_sync. This view was
+        # already guarded by try/except DoesNotExist, so it never 500'd -- it is
+        # switched over for uniformity, so the whole family has exactly one way of
+        # answering "whose Xero credentials do I act with?".
+        credentials = resolve_active_credentials(request)
+        if credentials is None:
             return Response({"error": "No active Xero credentials found"}, status=status.HTTP_403_FORBIDDEN)
 
         auth_settings = XeroAuthSettings.objects.first()
@@ -86,21 +84,14 @@ class XeroCallbackView(APIView):
             logger.error("No code provided")
             return self._redirect_error("No authorization code provided")
 
-        try:
-            # TODO: When adding authentication back, filter by request.user
-            # For now, get first active credentials (development only)
-            if request.user.is_authenticated:
-                credentials = XeroClientCredentials.objects.get(user=request.user, active=True)
-            else:
-                # For development: get first active credentials
-                credentials = XeroClientCredentials.objects.filter(active=True).first()
-                if not credentials:
-                    logger.error("No active credentials found")
-                    return self._redirect_error("No active Xero credentials found")
-            logger.info(f"Credentials found: client_id={credentials.client_id}")
-        except XeroClientCredentials.DoesNotExist:
-            logger.error(f"No active credentials found")
+        # AllowAny by design: Xero redirects the user's BROWSER here with no
+        # Authorization header, so the anonymous path is the normal one. The
+        # resolver handles both without raising.
+        credentials = resolve_active_credentials(request)
+        if credentials is None:
+            logger.error("No active credentials found")
             return self._redirect_error("No active Xero credentials found")
+        logger.info(f"Credentials found: client_id={credentials.client_id}")
 
         auth_settings = XeroAuthSettings.objects.first()
         if not auth_settings:
