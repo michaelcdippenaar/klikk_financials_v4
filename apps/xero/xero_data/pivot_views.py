@@ -494,7 +494,33 @@ class XeroJournalPivotView(APIView):
         # the grand total the moment anyone switched year totals on.
         grand = _r2(sum(t for i, t in enumerate(col_totals) if not col_synthetic[i]))
 
+        # The mirror warning.
+        #
+        # Xero's journal mirror carries every entry under more than one
+        # journal_type (journal 142,437 / transaction 65,883 / system_journal
+        # 56,067 / manual_journal 7,377). Summing without choosing one adds an
+        # entry to itself: MC's saved views showed FY2026 revenue as R7.61m
+        # against a true R1.86m, and nothing on the sheet said so.
+        #
+        # This is a WARNING, not a default. Silently forcing journal_type would
+        # change every existing view's numbers without asking, and there are
+        # legitimate reasons to look at a single mirror. The cube says what it
+        # did and leaves the choice.
+        mirror_hint = None
+        if measure != 'count' and not (p.get('journal_type') or '').strip():
+            kinds = list(
+                qs.values_list('journal_type', flat=True).order_by().distinct()[:5]
+            )
+            if len(kinds) > 1:
+                mirror_hint = (
+                    'No journal type is selected, so this totals %s mirrors of the same '
+                    'entries (%s) and is larger than the real figure. Pick a journal type '
+                    '— "journal" is the full ledger — unless you mean to see every mirror.'
+                    % (len(kinds), ', '.join(sorted(k for k in kinds if k)))
+                )
+
         return Response({
+            'mirror_hint': mirror_hint,
             'measure': measure,
             'measure_label': MEASURES[measure][0],
             'dim_filters': {k: sorted(v) for k, v in dim_filters.items()},

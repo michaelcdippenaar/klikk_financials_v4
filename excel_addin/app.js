@@ -1702,7 +1702,10 @@
     var head = [];
     head.push([cube.measure_label + ' — Klikk journals'].concat(blanks(width - 1)));
     head.push([describe(qy)].concat(blanks(width - 1)));
-    head.push(blanks(width));
+    /* A caveat that lives only in the task pane is lost the moment the sheet is
+       shared, printed or screenshotted — and this one changes the numbers by a
+       factor of four. It goes in the sheet. */
+    head.push([cube.mirror_hint ? '\u26a0 ' + cube.mirror_hint : ''].concat(blanks(width - 1)));
 
     /* Stacked column headers, the way a PivotTable reads.
 
@@ -1819,6 +1822,11 @@
       title.format.font.color = SHEET.headBg;
       sheet.getRangeByIndexes(1, 0, 1, 1).format.font.color = SHEET.subtle;
       sheet.getRangeByIndexes(1, 0, 1, 1).format.font.italic = true;
+      if (cube.mirror_hint) {
+        var warn = sheet.getRangeByIndexes(2, 0, 1, Math.max(1, Math.min(width, 8)));
+        warn.format.font.color = '#9C2B21';
+        warn.format.font.bold = true;
+      }
 
       /* The header is a solid band, not bold text on white. It has to stay
          readable when the grid scrolls under it and when the sheet is printed
@@ -2026,6 +2034,13 @@
 
     if (cube.balancing_hint) {
       el.cubeMsg.textContent = cube.balancing_hint;
+      el.cubeMsg.className = 'msg msg--err';
+      return;
+    }
+    // Louder than the row count, because it is the difference between a real
+    // figure and one several times too big.
+    if (cube.mirror_hint) {
+      el.cubeMsg.textContent = cube.mirror_hint;
       el.cubeMsg.className = 'msg msg--err';
       return;
     }
