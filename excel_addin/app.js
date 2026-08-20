@@ -1065,295 +1065,104 @@
 
   /* ── native Excel PivotTable over a detail sheet ───────── */
 
+  /* Create a native PivotTable over a detail sheet.
+   *
+   * Deliberately step-by-step with a ctx.sync() between each stage. The first
+   * version created the pivot and added all four hierarchies in ONE batch,
+   * which references hierarchies of a PivotTable that does not exist on the
+   * host side yet -- Excel for Mac crashes on that rather than erroring. Each
+   * field is also added independently so a missing column degrades to a
+   * partial pivot instead of taking the whole operation down. */
+  var PIVOT_ROW_CEILING = 100000;
+
   async function addNativePivot() {
     if (!activeSheet.binding || activeSheet.binding.kind !== 'detail') {
       throw new Error('Open a detail sheet first, then add the PivotTable.');
     }
     var sourceId = activeSheet.id;
+    var sourceName = activeSheet.name;
     var newPivot = null;
+
+    // 1. Find the source range from the sheet's table, and check its size.
+    var srcAddress = null;
+    var srcRows = 0;
+    await Excel.run(async function (ctx) {
+      var src = ctx.workbook.worksheets.getItem(sourceId);
+      var tables = src.tables;
+      tables.load('items/name');
+      await ctx.sync();
+
+      var range = tables.items.length
+        ? tables.items[0].getRange()
+        : src.getUsedRange();
+      range.load('address,rowCount');
+      await ctx.sync();
+      srcAddress = range.address;
+      srcRows = range.rowCount;
+    });
+
+    if (srcRows > PIVOT_ROW_CEILING) {
+      throw new Error(fmtNum(srcRows) + ' rows on this sheet. Excel on this machine '
+        + 'will struggle to pivot that — narrow the filters and reload, or use the '
+        + 'cube view, which aggregates server-side.');
+    }
+
+    // 2. Create the empty pivot on its own sheet, and stop.
+    var pivotName = null;
     try {
       await Excel.run(async function (ctx) {
-        var src = ctx.workbook.worksheets.getItem(sourceId);
-        var used = src.getUsedRange();
-        used.load('address');
         var dest = ctx.workbook.worksheets.add(await uniqueSheetName(ctx, 'Pivot'));
-        dest.load('name');
+        dest.load('id,name');
         await ctx.sync();
 
-        var pivotName = 'KlikkPivot_' + dest.name.replace(/[^A-Za-z0-9]/g, '_');
-        var pivot = dest.pivotTables.add(pivotName, used,
-          dest.getRangeByIndexes(0, 0, 1, 1));
-        pivot.rowHierarchies.add(pivot.hierarchies.getItem('Acct class'));
-        pivot.rowHierarchies.add(pivot.hierarchies.getItem('Account'));
-        pivot.columnHierarchies.add(pivot.hierarchies.getItem('Fin year'));
-        pivot.dataHierarchies.add(pivot.hierarchies.getItem('Amount'));
-        dest.load('id,name');
-        dest.activate();
+        pivotName = 'KlikkPivot_' + dest.name.replace(/[^A-Za-z0-9]/g, '_');
+        dest.pivotTables.add(pivotName, srcAddress, dest.getRangeByIndexes(0, 0, 1, 1));
         await ctx.sync();
+
         newPivot = { sheetId: dest.id, name: dest.name, pivotName: pivotName };
       });
-      await bindQuery(newPivot.sheetId, activeSheet.binding.query, 0, 'pivot',
-        { pivotName: newPivot.pivotName, sourceSheet: sourceId });
     } catch (e) {
-      throw new Error('Excel could not create a PivotTable here (' +
-        (e && e.message ? e.message : e) + '). The cube view does the same job server-side.');
-    }
-    await inspectActiveSheet();
-    el.countLine.textContent = 'PivotTable created on ' + newPivot.name
-      + ' — drag fields freely; comments on it sync by meaning, not cell address.';
-  }
-
-  /* Re-run the pane's CURRENT filters into the sheet already in front, instead
-     of spawning another tab. Refresh replays the sheet's stored query; this
-     replaces it with what is in the pane now. */
-  async function reloadThisSheet() {
-    var b = activeSheet.binding;
-    if (!b) throw new Error('Open a Klikk sheet first, then reload it.');
-    var qy = readQuery();
-
-    if (b.kind === 'cube') {
-      var spec = readCubeSpec();
-      var bad = validateCube(spec);
-      if (bad) throw new Error(bad);
-      progress(0, 1, 'Aggregating…');
-      var cube = await fetchCube(qy, spec);
-      if (cancelFlag.cancelled) return;
-      await renderCube(activeSheet.id, cube, qy, spec);
-      await inspectActiveSheet();
-      el.cubeMsg.textContent = 'Reloaded ' + activeSheet.name + ' — '
-        + fmtNum(cube.leaf_count) + ' leaf rows.';
-      el.cubeMsg.className = 'msg msg--ok';
-      return;
+      throw new Error('Excel could not create the PivotTable ('
+        + (e && e.message ? e.message : e) + '). The cube view does the same job server-side.');
     }
 
-    progress(0, 1, 'Querying…');
-    var got = await fetchRows(qy);
-    if (cancelFlag.cancelled) return;
-    await renderRows(activeSheet.id, got.rows, qy);
-    await inspectActiveSheet();
-    el.countLine.innerHTML = 'Reloaded — <strong>' + fmtNum(got.rows.length) + '</strong> rows.';
-  }
-
-  /* ── comments pinned to a cube intersection ────────────────── */
-
-  var COMMENT_API = '/xero/data/journals/pivot/comments/';
-
-  function cellToIntersection(cube, rowIdx, colIdx) {
-    var r = cube.rows[rowIdx];
-    if (!r) return null;
-    var nCols = cube.cols.length;
-    var colPath, value;
-    if (colIdx < 0) return null;
-    if (colIdx < nCols) {
-      colPath = cube.cols[colIdx];
-      value = r.cells[colIdx];
-    } else if (colIdx === nCols) {
-      colPath = 'Total';
-      value = r.cells.reduce(function (a, b) { return a + b; }, 0);
-    } else {
-      return null;
-    }
-    return {
-      row_dims: cube.row_dims.slice(0, r.keys.length).map(function (d) { return d.key; }),
-      row_path: r.keys,
-      col_dims: cube.col_dims.map(function (d) { return d.key; }),
-      col_path: colPath,
-      cell_value: value
-    };
-  }
-
-  function anchorId(x) {
-    return x.row_path.join('\u001f') + '\u001e' + x.col_path;
-  }
-
-  async function syncComments() {
-    var b = activeSheet.binding;
-    if (!b) throw new Error('Open a Klikk cube or PivotTable sheet first.');
-    if (b.kind === 'pivot') return syncPivotComments(b);
-    if (b.kind !== 'cube') throw new Error('Open a cube or PivotTable sheet first.');
-    if (!Office.context.requirements.isSetSupported('ExcelApi', '1.10')) {
-      throw new Error('This Excel build has no comment API (needs ExcelApi 1.10).');
-    }
-
-    el.commentMsg.textContent = 'Rebuilding the cube to locate cells…';
-    el.commentMsg.className = 'msg';
-
-    // Re-derive the layout from the server rather than storing thousands of row
-    // keys in the workbook; the sheet is a pure function of the spec anyway.
-    var cube = await fetchCube(b.query, b.spec);
-    var nRowDims = cube.row_dims.length;
-    var FIRST_DATA_ROW = 4;
-    var sheetId = activeSheet.id;
-
-    var found = [];
-    await Excel.run(async function (ctx) {
-      var sheet = ctx.workbook.worksheets.getItem(sheetId);
-      var comments = sheet.comments;
-      comments.load('items/content');
-      await ctx.sync();
-      var locs = comments.items.map(function (c) {
-        var rng = c.getLocation();
-        rng.load('rowIndex,columnIndex');
-        return rng;
-      });
-      await ctx.sync();
-      comments.items.forEach(function (c, i) {
-        found.push({ content: c.content, r: locs[i].rowIndex, c: locs[i].columnIndex });
-      });
-    });
-
-    var author = (el.commentAuthor.value || '').trim();
-    var posted = 0, skipped = 0;
-    var onSheet = {};
-
-    for (var i = 0; i < found.length; i++) {
-      var f = found[i];
-      var x = cellToIntersection(cube, f.r - FIRST_DATA_ROW, f.c - nRowDims);
-      if (!x) { skipped += 1; continue; }
-      onSheet[anchorId(x)] = true;
-      await apiPost(COMMENT_API, {
-        measure: b.spec.measure,
-        row_dims: x.row_dims, row_path: x.row_path,
-        col_dims: x.col_dims, col_path: x.col_path,
-        filters: toParams(b.query),
-        cell_value: x.cell_value,
-        comment: f.content,
-        author: author
-      });
-      posted += 1;
-    }
-
-    // Pull anything commented elsewhere back onto the sheet.
-    var server = await apiGet(COMMENT_API, { status: 'all', limit: 2000 });
-    var pulled = 0;
-    var toAdd = [];
-    (server.results || []).forEach(function (c) {
-      if (c.measure !== b.spec.measure) return;
-      var id = c.row_path.join('\u001f') + '\u001e' + c.col_path;
-      if (onSheet[id]) return;
-      for (var ri = 0; ri < cube.rows.length; ri++) {
-        if (cube.rows[ri].keys.join('\u001f') !== c.row_path.join('\u001f')) continue;
-        var ci = c.col_path === 'Total' ? cube.cols.length : cube.cols.indexOf(c.col_path);
-        if (ci < 0) return;
-        toAdd.push({ r: ri + FIRST_DATA_ROW, c: ci + nRowDims, text: c.comment });
-        return;
+    // 3. Add the fields one at a time, each its own round trip.
+    var fields = [
+      { axis: 'row', name: 'Acct class' },
+      { axis: 'row', name: 'Account' },
+      { axis: 'column', name: 'Fin year' },
+      { axis: 'data', name: 'Amount' }
+    ];
+    var added = 0;
+    for (var i = 0; i < fields.length; i++) {
+      var f = fields[i];
+      try {
+        await Excel.run(async function (ctx) {
+          var sheet = ctx.workbook.worksheets.getItem(newPivot.sheetId);
+          var pivot = sheet.pivotTables.getItem(newPivot.pivotName);
+          var h = pivot.hierarchies.getItem(f.name);
+          if (f.axis === 'row') pivot.rowHierarchies.add(h);
+          else if (f.axis === 'column') pivot.columnHierarchies.add(h);
+          else pivot.dataHierarchies.add(h);
+          await ctx.sync();
+        });
+        added += 1;
+      } catch (e) {
+        // Missing column or a field Excel will not place — leave it out and
+        // carry on; the user can drag it in themselves.
       }
-    });
-
-    if (toAdd.length) {
-      await Excel.run(async function (ctx) {
-        var sheet = ctx.workbook.worksheets.getItem(sheetId);
-        toAdd.forEach(function (a) {
-          try { sheet.comments.add(sheet.getRangeByIndexes(a.r, a.c, 1, 1), a.text); } catch (e) { /* already there */ }
-        });
-        await ctx.sync();
-      });
-      pulled = toAdd.length;
     }
-
-    el.commentMsg.textContent = posted + ' sent to Postgres, ' + pulled + ' pulled back'
-      + (skipped ? ', ' + skipped + ' outside the data area ignored' : '') + '.';
-    el.commentMsg.className = 'msg msg--ok';
-  }
-
-  /* Comments on a NATIVE PivotTable.
-   *
-   * Excel pins a comment to a cell ADDRESS. A PivotTable's cells move the
-   * moment you expand a node, drag a field or refresh, so an address-anchored
-   * comment silently ends up describing a different number — worse than no
-   * comment at all on an audit. So we never store the address: each commented
-   * cell is resolved to the pivot items that actually produce it, and THAT is
-   * the anchor. Needs ExcelApi 1.12 (getPivotItems / getDataHierarchy); if the
-   * host cannot do it we refuse rather than store something that will drift.
-   */
-  async function syncPivotComments(b) {
-    if (!Office.context.requirements.isSetSupported('ExcelApi', '1.10')) {
-      throw new Error('This Excel build has no comment API (needs ExcelApi 1.10).');
-    }
-    if (!Office.context.requirements.isSetSupported('ExcelApi', '1.12')) {
-      throw new Error('This Excel build cannot resolve a PivotTable cell to its row '
-        + 'and column items (needs ExcelApi 1.12). Anchoring on the cell address '
-        + 'instead would drift as soon as the pivot is rearranged, so it is not '
-        + 'offered. Comment on a cube sheet instead.');
-    }
-
-    el.commentMsg.textContent = 'Resolving pivot cells…';
-    el.commentMsg.className = 'msg';
-
-    var sheetId = activeSheet.id;
-    var resolved = [];
 
     await Excel.run(async function (ctx) {
-      var sheet = ctx.workbook.worksheets.getItem(sheetId);
-      var pivot = sheet.pivotTables.getItem(b.spec.pivotName);
-      var comments = sheet.comments;
-      comments.load('items/content');
+      ctx.workbook.worksheets.getItem(newPivot.sheetId).activate();
       await ctx.sync();
-
-      if (!comments.items.length) return;
-
-      var cells = comments.items.map(function (c) {
-        var r = c.getLocation();
-        r.load('address');
-        return r;
-      });
-      await ctx.sync();
-
-      var parts = cells.map(function (cell) {
-        var rows = pivot.layout.getPivotItems(Excel.PivotAxis.row, cell);
-        var cols = pivot.layout.getPivotItems(Excel.PivotAxis.column, cell);
-        var data = pivot.layout.getDataHierarchy(cell);
-        rows.load('items/name');
-        cols.load('items/name');
-        data.load('name');
-        cell.load('values');
-        return { rows: rows, cols: cols, data: data, cell: cell };
-      });
-      await ctx.sync();
-
-      comments.items.forEach(function (c, i) {
-        var pt = parts[i];
-        var rowPath = pt.rows.items.map(function (x) { return x.name; });
-        if (!rowPath.length) return;              // header or blank cell, not a value
-        resolved.push({
-          content: c.content,
-          row_path: rowPath,
-          col_path: pt.cols.items.map(function (x) { return x.name; }).join(' | ') || 'Total',
-          measure: pt.data.name || 'Amount',
-          value: (pt.cell.values && pt.cell.values[0]) ? pt.cell.values[0][0] : null
-        });
-      });
     });
 
-    if (!resolved.length) {
-      el.commentMsg.textContent = 'No comments found on a value cell of this PivotTable.';
-      el.commentMsg.className = 'msg';
-      return;
-    }
-
-    var author = (el.commentAuthor.value || '').trim();
-    var posted = 0;
-    for (var i = 0; i < resolved.length; i++) {
-      var r = resolved[i];
-      await apiPost(COMMENT_API, {
-        measure: r.measure,
-        // The pivot names its own levels; record them positionally so the anchor
-        // still reads sensibly when the field list changes.
-        row_dims: r.row_path.map(function (_, n) { return 'pivot_row_' + (n + 1); }),
-        row_path: r.row_path,
-        col_dims: ['pivot_col'],
-        col_path: r.col_path,
-        filters: toParams(b.query),
-        cell_value: typeof r.value === 'number' ? r.value : null,
-        comment: r.content,
-        author: author
-      });
-      posted += 1;
-    }
-
-    el.commentMsg.textContent = posted + ' comment' + (posted === 1 ? '' : 's')
-      + ' sent to Postgres, anchored to their row/column items. They stay on the sheet.';
-    el.commentMsg.className = 'msg msg--ok';
+    await bindQuery(newPivot.sheetId, activeSheet.binding.query, 0, 'pivot',
+      { pivotName: newPivot.pivotName, sourceSheet: sourceId });
+    await inspectActiveSheet();
+    el.countLine.textContent = 'PivotTable on ' + newPivot.name + ' over ' + sourceName
+      + ' (' + fmtNum(srcRows) + ' rows, ' + added + ' of 4 fields placed) — drag fields in Excel.';
   }
 
   /* ── the selected cell ─────────────────────────────────── */
@@ -1372,9 +1181,10 @@
 
     var probe = await apiGet('/xero/data/journals/search/',
       Object.assign({}, toParams(qy), { limit: 1, offset: 0 }));
-    if (probe.count > 250000) {
-      throw new Error(fmtNum(probe.count) + ' rows match. Narrow the filters — a '
-        + 'PivotTable over that many rows will crawl on this machine.');
+    if (probe.count > PIVOT_ROW_CEILING) {
+      throw new Error(fmtNum(probe.count) + ' rows match — too many to pivot natively '
+        + 'on this machine. Narrow the filters, or use the cube view, which aggregates '
+        + 'in Postgres and has no row limit.');
     }
 
     progress(0, 1, 'Pulling all ' + fmtNum(probe.count) + ' rows…');
