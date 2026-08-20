@@ -159,18 +159,25 @@
     <section class="panel" id="cubePanel" hidden>
       <h2>Cube view</h2>
 
-      <label for="measure">Measure</label>
+      <label for="measure">Values</label>
       <select id="measure"></select>
 
-      <label>Rows <span class="lbl-note">outermost first</span></label>
-      <select id="row1" class="dimsel"></select>
-      <select id="row2" class="dimsel"></select>
-      <select id="row3" class="dimsel"></select>
+      <label>Fields <span class="lbl-note">drag into Rows or Columns</span></label>
+      <div class="well well--src" id="wellAvail" data-zone="avail"></div>
 
-      <label>Columns</label>
-      <select id="col1" class="dimsel"></select>
-      <select id="col2" class="dimsel"></select>
+      <div class="wellrow">
+        <div class="wellcol">
+          <label>Rows</label>
+          <div class="well" id="wellRows" data-zone="rows"></div>
+        </div>
+        <div class="wellcol">
+          <label>Columns</label>
+          <div class="well" id="wellCols" data-zone="cols"></div>
+        </div>
+      </div>
 
+      <label class="chk"><input type="checkbox" id="autoBuild"> Rebuild on every change</label>
+      <label class="chk"><input type="checkbox" id="outline" checked> Collapsible groups in the sheet</label>
       <label class="chk"><input type="checkbox" id="suppress" checked> Suppress zero rows</label>
 
       <div class="row">

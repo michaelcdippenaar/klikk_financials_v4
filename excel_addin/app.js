@@ -74,8 +74,9 @@
       'btnConnect', 'btnForget', 'settingsMsg', 'queryPanel', 'tenant', 'journalType',
       'typeHint', 'dateFrom', 'dateTo', 'account', 'accountList', 'contact', 'reference',
       'contactList', 'description', 'amount', 'q', 'maxRows', 'countLine', 'btnLoad', 'btnCount',
-      'detailPanel', 'btnPivot', 'cubePanel', 'measure', 'row1', 'row2', 'row3',
-      'col1', 'col2', 'suppress', 'btnCube', 'cubeMsg', 'btnReload',
+      'detailPanel', 'btnPivot', 'cubePanel', 'measure',
+      'suppress', 'btnCube', 'cubeMsg', 'btnReload', 'wellAvail', 'wellRows',
+      'wellCols', 'autoBuild', 'outline',
       'commentPanel', 'commentAuthor', 'btnSyncComments', 'commentMsg',
       'refreshPanel', 'sheetInfo', 'btnRefresh', 'btnRestore', 'progressPanel',
       'progressMsg', 'progressFill', 'btnCancel', 'errorMsg'
@@ -597,7 +598,7 @@
     el.btnRestore.disabled = false;
     el.btnPivot.disabled = b.kind !== 'detail';
     el.btnReload.disabled = false;
-    el.btnSyncComments.disabled = b.kind !== 'cube';
+    el.btnSyncComments.disabled = (b.kind !== 'cube' && b.kind !== 'pivot');
   }
 
   function restoreFiltersFromSheet() {
@@ -658,41 +659,146 @@
 
   /* ── cube view ─────────────────────────────────────────── */
 
-  var DIM_SELECTS = ['row1', 'row2', 'row3', 'col1', 'col2'];
+  /* Field wells. Excel's own field list is native UI we cannot host inside the
+     grid, so this is the closest equivalent: drag chips between Fields, Rows and
+     Columns, drop to reorder, and the sheet rebuilds from the resulting spec. */
+  var DIMS = [];
+  var wells = { avail: [], rows: [], cols: [] };
+  var MAX = { rows: 4, cols: 3 };
 
   function populateCube(cat) {
-    var dims = cat.dimensions || [];
+    DIMS = cat.dimensions || [];
     fill(el.measure, cat.measures || [], 'Amount', function (m) {
       return { value: m.key, label: m.label };
     });
-    el.measure.querySelector('option[value=""]').remove();
+    var ph = el.measure.querySelector('option[value=""]');
+    if (ph) ph.remove();
     if (!el.measure.value) el.measure.value = 'amount';
 
-    DIM_SELECTS.forEach(function (id) {
-      fill(el[id], dims, '—', function (d) { return { value: d.key, label: d.label }; });
+    if (!wells.rows.length && !wells.cols.length) {
+      wells.rows = ['account_class', 'account'];
+      wells.cols = ['fin_year'];
+    }
+    reflowWells();
+    wireWells();
+  }
+
+  function dimLabel(key) {
+    for (var i = 0; i < DIMS.length; i++) if (DIMS[i].key === key) return DIMS[i].label;
+    return key;
+  }
+
+  function reflowWells() {
+    var used = wells.rows.concat(wells.cols);
+    wells.avail = DIMS.map(function (d) { return d.key; })
+      .filter(function (k) { return used.indexOf(k) === -1; });
+    ['avail', 'rows', 'cols'].forEach(renderWell);
+  }
+
+  function renderWell(zone) {
+    var host = zone === 'avail' ? el.wellAvail : (zone === 'rows' ? el.wellRows : el.wellCols);
+    host.innerHTML = '';
+    wells[zone].forEach(function (key, idx) {
+      var chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.draggable = true;
+      chip.dataset.key = key;
+      chip.dataset.zone = zone;
+      chip.dataset.idx = idx;
+      chip.appendChild(document.createTextNode(dimLabel(key)));
+      if (zone !== 'avail') {
+        var x = document.createElement('span');
+        x.className = 'chip__x';
+        x.textContent = '\u00d7';
+        x.title = 'Remove';
+        x.addEventListener('click', function (e) {
+          e.stopPropagation();
+          moveField(key, zone, 'avail', -1);
+        });
+        chip.appendChild(x);
+      }
+      host.appendChild(chip);
     });
-    // A default that reads like a trial balance the moment you open the pane.
-    if (!el.row1.value) el.row1.value = 'account_type';
-    if (!el.row2.value) el.row2.value = 'account';
-    if (!el.col1.value) el.col1.value = 'year';
+  }
+
+  var dragging = null;
+
+  function wireWells() {
+    [el.wellAvail, el.wellRows, el.wellCols].forEach(function (host) {
+      if (host.dataset.wired) return;
+      host.dataset.wired = '1';
+
+      host.addEventListener('dragstart', function (e) {
+        var chip = e.target.closest ? e.target.closest('.chip') : null;
+        if (!chip) return;
+        dragging = { key: chip.dataset.key, from: chip.dataset.zone };
+        chip.classList.add('is-drag');
+        try { e.dataTransfer.setData('text/plain', chip.dataset.key); } catch (err) {}
+        e.dataTransfer.effectAllowed = 'move';
+      });
+      host.addEventListener('dragend', function () {
+        dragging = null;
+        Array.prototype.forEach.call(document.querySelectorAll('.chip.is-drag'),
+          function (c) { c.classList.remove('is-drag'); });
+      });
+      host.addEventListener('dragover', function (e) {
+        if (!dragging) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        host.classList.add('is-over');
+      });
+      host.addEventListener('dragleave', function () { host.classList.remove('is-over'); });
+      host.addEventListener('drop', function (e) {
+        e.preventDefault();
+        host.classList.remove('is-over');
+        if (!dragging) return;
+        var zone = host.dataset.zone;
+        // drop position = before the chip we landed on, so order is draggable
+        var over = e.target.closest ? e.target.closest('.chip') : null;
+        var at = over && over.dataset.zone === zone ? parseInt(over.dataset.idx, 10) : -1;
+        moveField(dragging.key, dragging.from, zone, at);
+        dragging = null;
+      });
+    });
+  }
+
+  function moveField(key, from, to, at) {
+    if (from === to && at < 0) return;
+    wells[from] = wells[from].filter(function (k) { return k !== key; });
+    if (to !== 'avail') {
+      if (wells[to].length >= MAX[to]) {
+        el.cubeMsg.textContent = 'At most ' + MAX[to] + ' fields on ' + to + '.';
+        el.cubeMsg.className = 'msg msg--err';
+        reflowWells();
+        return;
+      }
+      wells[to] = wells[to].filter(function (k) { return k !== key; });
+      if (at >= 0 && at <= wells[to].length) wells[to].splice(at, 0, key);
+      else wells[to].push(key);
+    }
+    reflowWells();
+    el.cubeMsg.textContent = '';
+    el.cubeMsg.className = 'msg';
+    if (el.autoBuild.checked && wells.rows.length) run(buildCube);
   }
 
   function readCubeSpec() {
-    var rows = ['row1', 'row2', 'row3'].map(function (id) { return el[id].value; })
-      .filter(Boolean);
-    var cols = ['col1', 'col2'].map(function (id) { return el[id].value; }).filter(Boolean);
     return {
-      rows: rows, cols: cols,
+      rows: wells.rows.slice(),
+      cols: wells.cols.slice(),
       measure: el.measure.value || 'amount',
-      suppress: el.suppress.checked
+      suppress: el.suppress.checked,
+      outline: el.outline.checked
     };
   }
 
   function applyCubeSpec(spec) {
-    ['row1', 'row2', 'row3'].forEach(function (id, i) { el[id].value = (spec.rows || [])[i] || ''; });
-    ['col1', 'col2'].forEach(function (id, i) { el[id].value = (spec.cols || [])[i] || ''; });
+    wells.rows = (spec.rows || []).slice();
+    wells.cols = (spec.cols || []).slice();
     el.measure.value = spec.measure || 'amount';
     el.suppress.checked = !!spec.suppress;
+    if (typeof spec.outline === 'boolean') el.outline.checked = spec.outline;
+    reflowWells();
   }
 
   function validateCube(spec) {
@@ -839,6 +945,34 @@
       await ctx.sync();
     });
 
+    // Real drill-down, using Excel's own outline: every run of rows beneath a
+    // consolidation becomes a group, so the grid gets native +/- controls in the
+    // margin. Nothing to reimplement and it survives saving the workbook.
+    if (spec && spec.outline && cube.rows.length && nRowDims > 1) {
+      await Excel.run(async function (ctx) {
+        var sheet = ctx.workbook.worksheets.getItem(sheetId);
+        var groups = [];
+        cube.rows.forEach(function (r, i) {
+          if (!r.is_total) return;
+          var start = i + 1, end = i;
+          for (var j = i + 1; j < cube.rows.length; j++) {
+            if (cube.rows[j].depth <= r.depth) break;
+            end = j;
+          }
+          if (end >= start) {
+            groups.push({ from: firstDataRow + start, to: firstDataRow + end });
+          }
+        });
+        groups.forEach(function (g) {
+          try {
+            sheet.getRangeByIndexes(g.from, 0, g.to - g.from + 1, 1)
+              .group(Excel.GroupOption.byRows);
+          } catch (e) { /* host without outlining: rows just stay expanded */ }
+        });
+        await ctx.sync();
+      }).catch(function () { /* outlining unsupported; the sheet is still correct */ });
+    }
+
     await bindQuery(sheetId, qy, cube.rows.length, 'cube', spec);
     return { sheetId: sheetId, sheetName: sheetName };
   }
@@ -887,6 +1021,7 @@
       throw new Error('Open a detail sheet first, then add the PivotTable.');
     }
     var sourceId = activeSheet.id;
+    var newPivot = null;
     try {
       await Excel.run(async function (ctx) {
         var src = ctx.workbook.worksheets.getItem(sourceId);
@@ -896,19 +1031,27 @@
         dest.load('name');
         await ctx.sync();
 
-        var pivot = dest.pivotTables.add('KlikkPivot_' + Date.now(), used,
+        var pivotName = 'KlikkPivot_' + dest.name.replace(/[^A-Za-z0-9]/g, '_');
+        var pivot = dest.pivotTables.add(pivotName, used,
           dest.getRangeByIndexes(0, 0, 1, 1));
-        pivot.rowHierarchies.add(pivot.hierarchies.getItem('Acct type'));
+        pivot.rowHierarchies.add(pivot.hierarchies.getItem('Acct class'));
         pivot.rowHierarchies.add(pivot.hierarchies.getItem('Account'));
+        pivot.columnHierarchies.add(pivot.hierarchies.getItem('Fin year'));
         pivot.dataHierarchies.add(pivot.hierarchies.getItem('Amount'));
+        dest.load('id,name');
         dest.activate();
         await ctx.sync();
+        newPivot = { sheetId: dest.id, name: dest.name, pivotName: pivotName };
       });
+      await bindQuery(newPivot.sheetId, activeSheet.binding.query, 0, 'pivot',
+        { pivotName: newPivot.pivotName, sourceSheet: sourceId });
     } catch (e) {
       throw new Error('Excel could not create a PivotTable here (' +
         (e && e.message ? e.message : e) + '). The cube view does the same job server-side.');
     }
-    el.countLine.textContent = 'PivotTable created — drag fields in Excel to rearrange it.';
+    await inspectActiveSheet();
+    el.countLine.textContent = 'PivotTable created on ' + newPivot.name
+      + ' — drag fields freely; comments on it sync by meaning, not cell address.';
   }
 
   /* Re-run the pane's CURRENT filters into the sheet already in front, instead
@@ -976,7 +1119,9 @@
 
   async function syncComments() {
     var b = activeSheet.binding;
-    if (!b || b.kind !== 'cube') throw new Error('Open a cube sheet first.');
+    if (!b) throw new Error('Open a Klikk cube or PivotTable sheet first.');
+    if (b.kind === 'pivot') return syncPivotComments(b);
+    if (b.kind !== 'cube') throw new Error('Open a cube or PivotTable sheet first.');
     if (!Office.context.requirements.isSetSupported('ExcelApi', '1.10')) {
       throw new Error('This Excel build has no comment API (needs ExcelApi 1.10).');
     }
@@ -1062,6 +1207,106 @@
     el.commentMsg.className = 'msg msg--ok';
   }
 
+  /* Comments on a NATIVE PivotTable.
+   *
+   * Excel pins a comment to a cell ADDRESS. A PivotTable's cells move the
+   * moment you expand a node, drag a field or refresh, so an address-anchored
+   * comment silently ends up describing a different number — worse than no
+   * comment at all on an audit. So we never store the address: each commented
+   * cell is resolved to the pivot items that actually produce it, and THAT is
+   * the anchor. Needs ExcelApi 1.12 (getPivotItems / getDataHierarchy); if the
+   * host cannot do it we refuse rather than store something that will drift.
+   */
+  async function syncPivotComments(b) {
+    if (!Office.context.requirements.isSetSupported('ExcelApi', '1.10')) {
+      throw new Error('This Excel build has no comment API (needs ExcelApi 1.10).');
+    }
+    if (!Office.context.requirements.isSetSupported('ExcelApi', '1.12')) {
+      throw new Error('This Excel build cannot resolve a PivotTable cell to its row '
+        + 'and column items (needs ExcelApi 1.12). Anchoring on the cell address '
+        + 'instead would drift as soon as the pivot is rearranged, so it is not '
+        + 'offered. Comment on a cube sheet instead.');
+    }
+
+    el.commentMsg.textContent = 'Resolving pivot cells…';
+    el.commentMsg.className = 'msg';
+
+    var sheetId = activeSheet.id;
+    var resolved = [];
+
+    await Excel.run(async function (ctx) {
+      var sheet = ctx.workbook.worksheets.getItem(sheetId);
+      var pivot = sheet.pivotTables.getItem(b.spec.pivotName);
+      var comments = sheet.comments;
+      comments.load('items/content');
+      await ctx.sync();
+
+      if (!comments.items.length) return;
+
+      var cells = comments.items.map(function (c) {
+        var r = c.getLocation();
+        r.load('address');
+        return r;
+      });
+      await ctx.sync();
+
+      var parts = cells.map(function (cell) {
+        var rows = pivot.layout.getPivotItems(Excel.PivotAxis.row, cell);
+        var cols = pivot.layout.getPivotItems(Excel.PivotAxis.column, cell);
+        var data = pivot.layout.getDataHierarchy(cell);
+        rows.load('items/name');
+        cols.load('items/name');
+        data.load('name');
+        cell.load('values');
+        return { rows: rows, cols: cols, data: data, cell: cell };
+      });
+      await ctx.sync();
+
+      comments.items.forEach(function (c, i) {
+        var pt = parts[i];
+        var rowPath = pt.rows.items.map(function (x) { return x.name; });
+        if (!rowPath.length) return;              // header or blank cell, not a value
+        resolved.push({
+          content: c.content,
+          row_path: rowPath,
+          col_path: pt.cols.items.map(function (x) { return x.name; }).join(' | ') || 'Total',
+          measure: pt.data.name || 'Amount',
+          value: (pt.cell.values && pt.cell.values[0]) ? pt.cell.values[0][0] : null
+        });
+      });
+    });
+
+    if (!resolved.length) {
+      el.commentMsg.textContent = 'No comments found on a value cell of this PivotTable.';
+      el.commentMsg.className = 'msg';
+      return;
+    }
+
+    var author = (el.commentAuthor.value || '').trim();
+    var posted = 0;
+    for (var i = 0; i < resolved.length; i++) {
+      var r = resolved[i];
+      await apiPost(COMMENT_API, {
+        measure: r.measure,
+        // The pivot names its own levels; record them positionally so the anchor
+        // still reads sensibly when the field list changes.
+        row_dims: r.row_path.map(function (_, n) { return 'pivot_row_' + (n + 1); }),
+        row_path: r.row_path,
+        col_dims: ['pivot_col'],
+        col_path: r.col_path,
+        filters: toParams(b.query),
+        cell_value: typeof r.value === 'number' ? r.value : null,
+        comment: r.content,
+        author: author
+      });
+      posted += 1;
+    }
+
+    el.commentMsg.textContent = posted + ' comment' + (posted === 1 ? '' : 's')
+      + ' sent to Postgres, anchored to their row/column items. They stay on the sheet.';
+    el.commentMsg.className = 'msg msg--ok';
+  }
+
   /* ── plumbing ──────────────────────────────────────────── */
 
   async function run(fn) {
@@ -1092,7 +1337,7 @@
     el.btnRestore.disabled = !on || !activeSheet.binding;
     el.btnPivot.disabled = !on || !activeSheet.binding || activeSheet.binding.kind !== 'detail';
     el.btnReload.disabled = !on || !activeSheet.binding;
-    el.btnSyncComments.disabled = !on || !activeSheet.binding || activeSheet.binding.kind !== 'cube';
+    el.btnSyncComments.disabled = !on || !activeSheet.binding || (activeSheet.binding.kind !== 'cube' && activeSheet.binding.kind !== 'pivot');
   }
 
   function progress(done, total, msg) {
