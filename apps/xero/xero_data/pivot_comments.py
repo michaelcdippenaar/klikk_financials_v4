@@ -447,16 +447,22 @@ class XeroCubeCommentsView(APIView):
 
         with connection.cursor() as c:
             c.execute(
+                # subject_type/subject_key are the register's identity since the
+                # generic-comment migration; cell_key is kept in step for the legacy
+                # column and readers. ON CONFLICT must name the index that actually
+                # exists (subject_type, subject_key, author_key) - _ensure_table drops
+                # the old cube_comments_cell_author_uq, so conflicting on
+                # (cell_key, author_key) raised ProgrammingError on every POST.
                 'INSERT INTO app.cube_comments '
-                '(cell_key, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
+                '(cell_key, subject_type, subject_key, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
                 ' filters, cell_value, comment, author, author_key, status, tags) '
-                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
-                'ON CONFLICT (cell_key, author_key) DO UPDATE SET '
+                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                'ON CONFLICT (subject_type, subject_key, author_key) DO UPDATE SET '
                 '  comment = EXCLUDED.comment, cell_value = EXCLUDED.cell_value, '
                 '  author = EXCLUDED.author, status = EXCLUDED.status, '
                 '  tags = EXCLUDED.tags, updated_at = now() '
                 'RETURNING ' + COLS,
-                [key, tenant, measure, list(row_dims), list(row_path), list(col_dims),
+                [key, 'cube_cell', key, tenant, measure, list(row_dims), list(row_path), list(col_dims),
                  col_path, json.dumps(filters), val, comment,
                  author_name, author_key, (d.get('status') or 'open').strip(), tags],
             )
