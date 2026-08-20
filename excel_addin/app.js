@@ -95,22 +95,55 @@
     { key: 'id',                      label: 'Row ID',     fmt: 'int',   width: 10 }
   ];
 
-  var MONEY_FMT = '#,##0.00;[Red]-#,##0.00;"–"';   // a zero reads as a dash, not 0.00
+  /* Accounting convention: parentheses for negatives, a dash for zero.
+
+     On an income statement the sign flips by account class, so a column is a
+     mix of both — and a bracket is far quicker to scan than a leading minus,
+     which is why every set of statutory accounts uses it. MC formatted a built
+     cube this way by hand, which is the clearest possible statement of intent;
+     doing it in the render means it survives the next rebuild, which his manual
+     formatting would not have.
+
+     Whole rands by default: at twenty-odd columns the cents cost width and buy
+     nothing. Decimals stay available for the cases that need them. */
+  var MONEY_FMT_0 = '#,##0;(#,##0);"–"';
+  var MONEY_FMT_2 = '#,##0.00;(#,##0.00);"–"';
+  var MONEY_FMT = MONEY_FMT_2;              // detail sheets keep their cents
 
   /* Sheet palette. Deliberately a light theme with a dark header band rather
      than following the pane's dark mode: a worksheet is printed, shared and
      screenshotted, and Excel does not tell an add-in which theme the workbook
      will be read under. */
+  /* Header colour is a CHOICE, not a constant.
+
+     A built cube is cleared and rewritten on every refresh, so anything
+     formatted by hand is lost the next time it is built. Making the palette
+     part of the spec means a preference survives the rebuild — and travels
+     with a saved view. */
+  var HEAD_THEMES = {
+    navy:   { bg: '#1F2836', bg2: '#2E3948' },
+    purple: { bg: '#6F2F6A', bg2: '#8A4785' },
+    plum:   { bg: '#5B2545', bg2: '#7A3A61' },
+    forest: { bg: '#1E4634', bg2: '#2F5F49' },
+    slate:  { bg: '#3A4551', bg2: '#4E5A68' },
+    black:  { bg: '#22252A', bg2: '#343941' }
+  };
+
   var SHEET = {
-    headBg:    '#1F2836',   // header band
-    headBg2:   '#2E3948',   // parent level of a stacked header
+    headBg:    '#1F2836',   // replaced per build from the chosen theme
+    headBg2:   '#2E3948',
     headInk:   '#FFFFFF',
     accent:    '#C8912A',   // Klikk gold, for the title and the grand total rule
-    total0:    '#DCE4F0',   // top-level consolidation
-    total1:    '#E8EDF5',
-    total2:    '#F2F5FA',   // and anything deeper
-    grand:     '#C9D4E6',
-    rule:      '#B9C4D6',
+    /* Consolidation greys: DARKEST AT THE HIGHEST LEVEL, getting lighter as
+       you go down. The steps are deliberately wide enough to tell apart on a
+       laptop screen at 100% -- three tints that are nearly the same shade look
+       like a rendering artefact rather than a hierarchy. Neutral grey rather
+       than a tinted one so it sits under any header colour. */
+    total0:    '#C7CBD2',   // top-level rollup
+    total1:    '#DCDFE4',
+    total2:    '#EDEFF2',   // and anything deeper
+    grand:     '#B3B8C1',
+    rule:      '#9BA2AD',
     subtle:    '#6B7280'
   };
   var DATE_FMT = 'yyyy-mm-dd';
@@ -145,7 +178,7 @@
       'contactList', 'description', 'amount', 'q', 'maxRows', 'countLine', 'btnLoad', 'btnCount',
       'detailPanel', 'btnPivot', 'cubePanel', 'measure', 'btnResetComments',
       'queryPanel', 'refreshPanel', 'commentPanel', 'settingsPanel',
-      'suppress', 'btnCube', 'cubeMsg', 'btnDrill', 'btnReload', 'wellAvail', 'wellRows',
+      'suppress', 'btnCube', 'cubeMsg', 'btnDrill', 'headTheme', 'showDecimals', 'btnReload', 'wellAvail', 'wellRows',
       'wellCols', 'wellFilt', 'autoBuild', 'outline',
       'pickerModal', 'pickerTitle', 'pickerClose', 'pickerSearch',
       'pickerAvail', 'pickerSel', 'pickerAvailCount', 'pickerSelCount',
@@ -1611,6 +1644,8 @@
       measure: el.measure.value || 'amount',
       filt: wells.filt.slice(),
       totals: JSON.parse(JSON.stringify(totalVals)),
+      headTheme: el.headTheme ? el.headTheme.value : 'purple',
+      decimals: el.showDecimals ? el.showDecimals.checked : false,
       filters: JSON.parse(JSON.stringify(filterVals)),
       suppress: el.suppress.checked,
       outline: el.outline.checked
@@ -1623,6 +1658,10 @@
     wells.filt = (spec.filt || []).slice();
     filterVals = spec.filters ? JSON.parse(JSON.stringify(spec.filters)) : {};
     totalVals = spec.totals ? JSON.parse(JSON.stringify(spec.totals)) : {};
+    if (el.headTheme && spec.headTheme) el.headTheme.value = spec.headTheme;
+    if (el.showDecimals && typeof spec.decimals === 'boolean') {
+      el.showDecimals.checked = spec.decimals;
+    }
     el.measure.value = spec.measure || 'amount';
     el.suppress.checked = !!spec.suppress;
     if (typeof spec.outline === 'boolean') el.outline.checked = spec.outline;
@@ -1678,6 +1717,14 @@
 
        cube.cols (the joined form) is untouched and still what comment anchors
        are keyed on, so nothing about existing comments moves. */
+    var theme = HEAD_THEMES[(spec && spec.headTheme) || 'purple'] || HEAD_THEMES.purple;
+    SHEET.headBg = theme.bg;
+    SHEET.headBg2 = theme.bg2;
+    // The rules under the header and above the grand total take the header
+    // colour, so a sheet reads as one palette instead of navy-plus-gold.
+    SHEET.accent = theme.bg;
+    var moneyFmt = (spec && spec.decimals) ? MONEY_FMT_2 : MONEY_FMT_0;
+
     var colPaths = cube.col_paths
       || cube.cols.map(function (c) { return [c]; });
     var nLevels = Math.max(1, (cube.col_dims || []).length);
@@ -1811,7 +1858,7 @@
 
       if (body.length) {
         var nums = sheet.getRangeByIndexes(firstDataRow, nRowDims, body.length, nCols + 1);
-        nums.numberFormat = [[isCount ? '#,##0' : MONEY_FMT]];
+        nums.numberFormat = [[isCount ? '#,##0' : moneyFmt]];
       }
 
       /* Consolidations are shaded by DEPTH, so the level a subtotal belongs to
@@ -1854,14 +1901,21 @@
       var gt = sheet.getRangeByIndexes(firstDataRow + body.length + 1, 0, 1, width);
       gt.format.font.bold = true;
       gt.format.fill.color = SHEET.grand;
-      gt.numberFormat = [[isCount ? '#,##0' : MONEY_FMT]];
+      gt.numberFormat = [[isCount ? '#,##0' : moneyFmt]];
       gt.getCell(0, 0).numberFormat = [['General']];
       gt.format.borders.getItem('EdgeTop').style = 'Double';
       gt.format.borders.getItem('EdgeTop').color = SHEET.accent;
 
       // Row-dimension columns get the room; value columns are uniform so the
       // eye can compare down a column without re-reading its width.
-      sheet.getRangeByIndexes(headerRowIdx, 0, 1, nRowDims).format.columnWidth = 200;
+      /* Row-label columns are not all the same job. The outer ones hold short
+         codes (REVENUE, OVERHEADS); the innermost holds the long account name.
+         Giving all of them 200 wasted a screen of width on the outer ones and
+         still clipped the inner one. */
+      if (nRowDims > 1) {
+        sheet.getRangeByIndexes(headerRowIdx, 0, 1, nRowDims - 1).format.columnWidth = 130;
+      }
+      sheet.getRangeByIndexes(headerRowIdx, nRowDims - 1, 1, 1).format.columnWidth = 330;
       // One call for every value column rather than one call per column: a wide
       // cube can be fifty columns, and each of those was a round trip.
       sheet.getRangeByIndexes(headerRowIdx, nRowDims, 1, width - nRowDims)
