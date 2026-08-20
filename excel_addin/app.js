@@ -523,6 +523,9 @@
     });
 
     await bindQuery(sheetId, qy, rows.length, 'detail', null);
+    // Remembered so a PivotTable built later through Excel's own Insert dialog
+    // can inherit the filters that produced these rows.
+    lastDetail = { sheetId: sheetId, query: qy, rows: rows.length };
     return { sheetId: sheetId, sheetName: sheetName };
   }
 
@@ -539,6 +542,8 @@
   }
 
   /* ── per-sheet query binding (lives in the workbook) ───── */
+
+  var lastDetail = null;
 
   function bindQuery(sheetId, qy, rowCount, kind, spec) {
     var s = Office.context.document.settings;
@@ -560,7 +565,12 @@
 
   var activeSheet = { id: null, name: '', binding: null };
 
+  /* (declared above) The last detail sheet loaded this session. A PivotTable the user builds
+   * through Excel's own Insert > PivotTable lands on a sheet Excel created, so
+   * it carries no binding of ours -- we adopt it below and inherit the filter
+   * context from here, because a comment's anchor is meaningless without it. */
   async function inspectActiveSheet() {
+    var adopt = null;
     try {
       await Excel.run(async function (ctx) {
         var sheet = ctx.workbook.worksheets.getActiveWorksheet();
@@ -569,9 +579,31 @@
         activeSheet.id = sheet.id;
         activeSheet.name = sheet.name;
         activeSheet.binding = readBinding(sheet.id);
+
+        // No binding? It may still be a PivotTable the user built themselves.
+        if (!activeSheet.binding) {
+          var pts = sheet.pivotTables;
+          pts.load('items/name');
+          await ctx.sync();
+          if (pts.items.length) adopt = pts.items[0].name;
+        }
       });
     } catch (e) {
       activeSheet = { id: null, name: '', binding: null };
+    }
+
+    if (adopt && lastDetail) {
+      await bindQuery(activeSheet.id, lastDetail.query, lastDetail.rows, 'pivot',
+        { pivotName: adopt, sourceSheet: lastDetail.sheetId, adopted: true });
+      activeSheet.binding = readBinding(activeSheet.id);
+    } else if (adopt) {
+      // A pivot with no detail sheet loaded this session: we cannot honestly
+      // say which filters produced it, and a comment anchored to a guessed
+      // context would attach to the wrong number later.
+      activeSheet.binding = null;
+      activeSheet.orphanPivot = adopt;
+    } else {
+      activeSheet.orphanPivot = null;
     }
     paintRefreshPanel();
   }
@@ -579,10 +611,15 @@
   function paintRefreshPanel() {
     var b = activeSheet.binding;
     if (!b) {
-      el.sheetInfo.innerHTML = activeSheet.name
-        ? '<strong>' + esc(activeSheet.name) + '</strong> has no Klikk query bound to it. '
-          + 'Load a query to a new sheet first.'
-        : 'No Klikk query is bound to the active sheet.';
+      el.sheetInfo.innerHTML = activeSheet.orphanPivot
+        ? '<strong>' + esc(activeSheet.name) + '</strong> holds a PivotTable, but no Klikk '
+          + 'detail sheet has been loaded this session, so the pane cannot tell which '
+          + 'filters produced it. Load the query again, then reopen this sheet — comments '
+          + 'need that context to stay pinned to the right figure.'
+        : activeSheet.name
+          ? '<strong>' + esc(activeSheet.name) + '</strong> has no Klikk query bound to it. '
+            + 'Load a query to a new sheet first.'
+          : 'No Klikk query is bound to the active sheet.';
       el.btnRefresh.disabled = true;
       el.btnRestore.disabled = true;
       el.btnPivot.disabled = true;
