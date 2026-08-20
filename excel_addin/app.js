@@ -1125,6 +1125,22 @@
 
     lastCube[sheetId] = { cube: cube, firstDataRow: firstDataRow, nRowDims: nRowDims };
     await bindQuery(sheetId, qy, cube.rows.length, 'cube', spec);
+
+    /* Pull comments automatically. A cube is rebuilt from scratch on every
+     * load and refresh, which wipes the notes drawn on it, so leaving this to
+     * a button meant the sheet silently came back bare and the notes looked
+     * lost. They were never lost -- Postgres holds them -- but the grid lied
+     * about it until someone clicked.
+     *
+     * Deliberately non-fatal: the ledger data is the point of this operation,
+     * and a comment API that is unreachable or missing must not fail a load
+     * that otherwise succeeded. */
+    try {
+      var n = await placeCubeComments(sheetId, lastCube[sheetId], spec, qy);
+      if (n) el.countLine.innerHTML += ' · <strong>' + fmtNum(n) + '</strong> comment'
+        + (n === 1 ? '' : 's') + ' restored';
+    } catch (e) { /* sheet is correct; comments just are not mirrored */ }
+
     return { sheetId: sheetId, sheetName: sheetName };
   }
 
@@ -1691,6 +1707,38 @@
           + ' whose cell could not be tied to a figure.' : '.');
   }
 
+  /* Place stored comments onto a cube sheet.
+   *
+   * Explicit arguments rather than activeSheet, because this also runs during
+   * a cube build -- at which point the sheet being written is not necessarily
+   * the one in front.
+   *
+   * Cheap by construction: cellToIntersection is pure in-memory arithmetic
+   * over the cube we already hold, so the whole grid resolves without a single
+   * round trip, and only one write pass touches Excel. That is why a cube can
+   * pull its comments automatically and a PivotTable cannot -- the pivot has
+   * to ask Excel what each cell means, one cell at a time. */
+  async function placeCubeComments(sheetId, cached, spec, query) {
+    if (!cached || !Office.context.requirements.isSetSupported('ExcelApi', '1.10')) return 0;
+
+    var all = await apiGet(COMMENT_API, { status: 'all', limit: 2000 });
+    var want = {};
+    (all.results || []).forEach(function (cm) { want[anchorKey(cm)] = cm.comment; });
+
+    var writes = [];
+    var nCols = cached.cube.cols.length;
+    cached.cube.rows.forEach(function (r, i) {
+      for (var ci = 0; ci <= nCols; ci++) {
+        var x = cellToIntersection(cached.cube, i, ci);
+        if (!x) continue;
+        var txt = want[spec.measure + '\u001e' + x.row_path.join('\u001f') + '\u001e' + x.col_path];
+        if (txt) writes.push({ r: cached.firstDataRow + i, c: cached.nRowDims + ci, t: txt });
+      }
+    });
+    await writeCellComments(sheetId, writes);
+    return writes.length;
+  }
+
   async function pushCommentsToSheet() {
     var b = activeSheet.binding;
     if (!b) throw new Error('Open a cube or PivotTable sheet first.');
@@ -1707,18 +1755,7 @@
     if (b.kind === 'cube') {
       var cached = lastCube[activeSheet.id];
       if (!cached) throw new Error('Rebuild this cube sheet first, then try again.');
-      var writes = [];
-      cached.cube.rows.forEach(function (r, i) {
-        var nCols = cached.cube.cols.length;
-        for (var ci = 0; ci <= nCols; ci++) {
-          var x = cellToIntersection(cached.cube, i, ci);
-          if (!x) continue;
-          var txt = want[b.spec.measure + '\u001e' + x.row_path.join('\u001f') + '\u001e' + x.col_path];
-          if (txt) writes.push({ r: cached.firstDataRow + i, c: cached.nRowDims + ci, t: txt });
-        }
-      });
-      await writeCellComments(activeSheet.id, writes);
-      placed = writes.length;
+      placed = await placeCubeComments(activeSheet.id, cached, b.spec, b.query);
     } else {
       // A PivotTable's cells only reveal their meaning one at a time, so walk
       // the data body and resolve as we go. Bounded, and it reports what it
