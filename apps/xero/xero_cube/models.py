@@ -124,6 +124,7 @@ class XeroTrailBalanceManager(DataFrameManager):
                 COALESCE(j.contact_id, ts.contact_id),
                 j.tracking1_id, j.tracking2_id
             HAVING SUM(j.amount) != 0
+                OR SUM(CASE WHEN j.amount > 0 THEN j.amount ELSE 0 END) != 0
         """
 
         with connection.cursor() as cursor:

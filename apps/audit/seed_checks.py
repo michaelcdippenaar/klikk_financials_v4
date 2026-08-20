@@ -122,12 +122,21 @@ ORDER BY 1
 """,
     ),
     dict(
-        code='RDY-04', category='RDY', severity='high', expected='zero_rows', owner_action='engineering',
-        title='Exact-duplicate journal sets in mirror (double-ingested voids)',
-        description='Journal numbers (journal_type=journal) in the FY where every line appears exactly twice — '
-                    'the signature of a voided journal being ingested alongside the original (Boschendal x2 bug). '
-                    'Balances from these journals are overstated.',
-        rationale='klikk-xero-reconciliation-bridge: voided manual journals ingested (Boschendal exactly double).',
+        code='RDY-04', category='RDY', severity='low', expected='list', owner_action='engineering',
+        title='Void/reversal pairs in the retired journal mirror (informational)',
+        description='RETIRED FEED — informational only (2026-08-20). Journal numbers in the frozen '
+                    'journal_type=journal mirror where every line appears exactly twice (Boschendal x2 bug). '
+                    'Xero moved the Journals API to the Advanced tier in Mar 2026, so this mirror is frozen at '
+                    '2025-11-25 and no longer feeds the trial balance or the cube, meaning findings here do NOT '
+                    'affect reported balances. Verified 2026-08-20: all 356 voided manual journals net to exactly '
+                    'R0.00 in the mirror (original + reversal both present), and voided/deleted manual journals '
+                    'get no legs in the live feed at all.',
+        rationale='Was: klikk-xero-reconciliation-bridge -- voided manual journals ingested '
+                  '(Boschendal exactly double). DISPROVEN 2026-08-20: the mirror carries BOTH the '
+                  'original and its reversal, so every such group nets to exactly R0.00 (verified on '
+                  'all 356 voided manual journals, and on the VOX 3D group 42340/42341/42366/42367 = '
+                  'R0.00 across 44 lines). The live ledger omits voided documents entirely. Nothing is '
+                  'overstated; this lists the void trail only.',
         sql_text="""
 SELECT journal_number,
        min(date)::date AS jdate,
@@ -659,7 +668,7 @@ ORDER BY reason, a.name
         title='Deposits held by suppliers where supplier activity has ended',
         description='Asset-side deposit accounts (CURRENT/NONCURRENT, name contains "deposit") with a positive balance at '
                     'FY end per contact, where the contact\'s last journal activity is more than 90 days before FY end '
-                    'and no refund has cleared the balance (balances from the GL journal feed, contact attribution from the '
+                    'and no refund has cleared the balance (balances from the live ledger — transaction + manual_journal; contact attribution from the '
                     'transaction feed). The MoneyBadgers lesson: correct when booked, wrong by staying. '
                     'GAP: no contract-end-date field yet — "last payment > 90 days" is the proxy.',
         rationale='MoneyBadgers R9,813.33 deposit (Sep 2025), lease ended Jan 2026, never recovered.',
@@ -668,7 +677,7 @@ WITH acct AS (
   SELECT j.account_id, sum(j.debit) + sum(j.credit) AS gl_balance, max(j.date)::date AS last_movement
   FROM xero_data_xerojournals j
   JOIN xero_metadata_xeroaccount a ON a.account_id = j.account_id
-  WHERE j.organisation_id = :tenant_id AND j.journal_type = 'journal'
+  WHERE j.organisation_id = :tenant_id AND j.journal_type <> 'journal'
     AND a.type IN ('CURRENT', 'NONCURRENT') AND a.name ILIKE '%deposit%'
     AND j.date < :fy_end::date + 1
   GROUP BY 1
@@ -735,7 +744,7 @@ SELECT 'Prepayments account (GL balance)', a.name,
        max(j.date)::date, NULL, round(sum(j.debit) + sum(j.credit), 2), 'open', a.code
 FROM xero_data_xerojournals j
 JOIN xero_metadata_xeroaccount a ON a.account_id = j.account_id
-WHERE j.organisation_id = :tenant_id AND j.journal_type = 'journal'
+WHERE j.organisation_id = :tenant_id AND j.journal_type <> 'journal'
   AND a.name = 'Prepayments' AND j.date < :fy_end::date + 1
 GROUP BY a.name, a.code
 HAVING sum(j.debit) + sum(j.credit) > 0.01 AND max(j.date)::date < :fy_end::date - 90
@@ -758,7 +767,7 @@ WITH dep AS (
          max(j.date)::date AS last_movement
   FROM xero_data_xerojournals j
   JOIN xero_metadata_xeroaccount a ON a.account_id = j.account_id
-  WHERE j.organisation_id = :tenant_id AND j.journal_type = 'journal'
+  WHERE j.organisation_id = :tenant_id AND j.journal_type <> 'journal'
     AND a.type = 'CURRLIAB' AND a.name ILIKE 'Deposit%'
     AND j.date < :fy_end::date + 1
   GROUP BY 1, 2, 3
@@ -832,7 +841,7 @@ SELECT a.code, a.name, a.type,
 FROM xero_data_xerojournals j
 JOIN xero_metadata_xeroaccount a ON a.account_id = j.account_id
 WHERE j.organisation_id = :tenant_id
-  AND j.journal_type = 'journal'
+  AND j.journal_type <> 'journal'
   AND j.date < :fy_end::date + 1
   AND a.type IN ('CURRLIAB', 'CURRENT', 'LIABILITY')
   AND a.name NOT ILIKE 'Deposit%'

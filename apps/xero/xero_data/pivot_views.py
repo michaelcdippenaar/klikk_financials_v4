@@ -253,6 +253,16 @@ def apply_journal_filters(qs, p):
     journal_type = (p.get('journal_type') or '').strip()
     if journal_type:
         qs = qs.filter(journal_type__iexact=journal_type)
+    else:
+        # Xero moved the Journals API to the Advanced tier (Mar 2026), so the
+        # 'journal' mirror is frozen at 2025-11-25 and cannot be refreshed. It
+        # duplicates the live transaction / manual_journal / system_journal
+        # feeds, which are complementary and together form the whole ledger.
+        # The trial balance already excludes it (xero_cube/models.py:
+        # journal_type != 'journal'); the cube MUST match or the two disagree
+        # on every figure. Pass journal_type=journal to inspect the legacy
+        # mirror deliberately.
+        qs = qs.exclude(journal_type='journal')
 
     date_from = parse_date(p.get('date_from') or '')
     if date_from:
@@ -494,30 +504,26 @@ class XeroJournalPivotView(APIView):
         # the grand total the moment anyone switched year totals on.
         grand = _r2(sum(t for i, t in enumerate(col_totals) if not col_synthetic[i]))
 
-        # The mirror warning.
+        # Legacy-mirror warning.
         #
-        # Xero's journal mirror carries every entry under more than one
-        # journal_type (journal 142,437 / transaction 65,883 / system_journal
-        # 56,067 / manual_journal 7,377). Summing without choosing one adds an
-        # entry to itself: MC's saved views showed FY2026 revenue as R7.61m
-        # against a true R1.86m, and nothing on the sheet said so.
-        #
-        # This is a WARNING, not a default. Silently forcing journal_type would
-        # change every existing view's numbers without asking, and there are
-        # legitimate reasons to look at a single mirror. The cube says what it
-        # did and leaves the choice.
+        # The cube now excludes the frozen 'journal' mirror by default (see
+        # _apply_filters), so the default view matches the trial balance and
+        # needs no warning. The remaining feeds -- transaction, manual_journal
+        # and system_journal -- are complementary, not mirrors:
+        # sync_system_journals only ingests SourceTypes the other two pipelines
+        # do not cover. Warn only when someone has deliberately selected the
+        # legacy mirror, because its numbers will not tie to any report.
         mirror_hint = None
-        if measure != 'count' and not (p.get('journal_type') or '').strip():
-            kinds = list(
-                qs.values_list('journal_type', flat=True).order_by().distinct()[:5]
+        selected_type = (p.get('journal_type') or '').strip().lower()
+        if measure != 'count' and selected_type == 'journal':
+            mirror_hint = (
+                'You are viewing the legacy "journal" mirror. Xero moved the '
+                'Journals API to the Advanced tier in March 2026, so this feed is '
+                'frozen at 2025-11-25 and duplicates the live transaction / '
+                'manual_journal / system_journal feeds. The trial balance excludes '
+                'it, so these totals will not tie to any report. Clear the journal '
+                'type filter to see the real ledger.'
             )
-            if len(kinds) > 1:
-                mirror_hint = (
-                    'No journal type is selected, so this totals %s mirrors of the same '
-                    'entries (%s) and is larger than the real figure. Pick a journal type '
-                    '— "journal" is the full ledger — unless you mean to see every mirror.'
-                    % (len(kinds), ', '.join(sorted(k for k in kinds if k)))
-                )
 
         return Response({
             'mirror_hint': mirror_hint,

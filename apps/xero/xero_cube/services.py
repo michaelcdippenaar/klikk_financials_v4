@@ -146,7 +146,7 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
         'balance_to_date'
     ])
 
-    df = df[df.amount != 0].copy()
+    df = df[(df.amount != 0) | (df.debit != 0) | (df.credit != 0)].copy()
     df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
     df['debit'] = pd.to_numeric(df['debit'], errors='coerce')
     df['credit'] = pd.to_numeric(df['credit'], errors='coerce')
