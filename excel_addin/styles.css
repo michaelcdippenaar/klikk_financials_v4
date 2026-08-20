@@ -482,3 +482,71 @@ input:focus, select:focus {
 .saved__row select,
 .saved__row input[type="text"] { flex: 1; min-width: 0; box-sizing: border-box; }
 .saved__row .btn { flex: 0 0 auto; }
+
+/* ── icons & control polish ──────────────────────────────── */
+
+/* Icons inherit currentColor so one set serves light and dark, and disabled
+   and hover states come free with the text colour. */
+.ic { display: inline-block; vertical-align: -2px; flex: 0 0 auto; }
+.btn .ic { margin-right: 5px; }
+.btn--tiny .ic, .chip__b .ic { margin: 0; }
+
+.chip__b {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 4px;
+  color: var(--ink-mute);
+  transition: background-color .12s, color .12s;
+}
+.chip__b:hover  { background: rgba(127, 127, 127, .16); color: var(--ink); }
+.chip__b:active { background: rgba(127, 127, 127, .26); }
+
+/* A visible focus ring on every interactive control: the pane is often driven
+   from the keyboard while the grid keeps mouse focus. */
+.btn:focus-visible,
+.chip__b:focus-visible,
+.navbtn:focus-visible,
+select:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: box-shadow .12s, transform .06s;
+}
+.chip:hover { box-shadow: 0 1px 4px rgba(0, 0, 0, .14); }
+.chip__t { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.well {
+  transition: background-color .12s, outline-color .12s;
+  border-radius: var(--radius);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius);
+  transition: background-color .12s, border-color .12s, color .12s;
+}
+.btn:disabled { opacity: .45; cursor: default; }
+
+/* The transfer column reads as one control rather than four loose buttons. */
+.xfer__btns .btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+}
+
+.modal__head strong { font-size: 13px; }
+.xfer__lbl { display: flex; align-items: center; gap: 5px; }

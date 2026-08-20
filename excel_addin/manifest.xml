@@ -63,9 +63,9 @@
                       <Description resid="Klikk.FiltersTip"/>
                     </Supertip>
                     <Icon>
-                      <bt:Image size="16" resid="Klikk.Icon16"/>
-                      <bt:Image size="32" resid="Klikk.Icon32"/>
-                      <bt:Image size="80" resid="Klikk.Icon80"/>
+                      <bt:Image size="16" resid="Klikk.Filters16"/>
+                      <bt:Image size="32" resid="Klikk.Filters32"/>
+                      <bt:Image size="80" resid="Klikk.Filters80"/>
                     </Icon>
                     <Action xsi:type="ShowTaskpane">
                       <TaskpaneId>KlikkJournalsPane</TaskpaneId>
@@ -79,9 +79,9 @@
                       <Description resid="Klikk.DetailTip"/>
                     </Supertip>
                     <Icon>
-                      <bt:Image size="16" resid="Klikk.Icon16"/>
-                      <bt:Image size="32" resid="Klikk.Icon32"/>
-                      <bt:Image size="80" resid="Klikk.Icon80"/>
+                      <bt:Image size="16" resid="Klikk.Detail16"/>
+                      <bt:Image size="32" resid="Klikk.Detail32"/>
+                      <bt:Image size="80" resid="Klikk.Detail80"/>
                     </Icon>
                     <Action xsi:type="ShowTaskpane">
                       <TaskpaneId>KlikkJournalsPane</TaskpaneId>
@@ -92,9 +92,9 @@
                 <Group id="Klikk.Grp.Analyse">
                   <Label resid="Klikk.Grp.AnalyseLabel"/>
                   <Icon>
-                    <bt:Image size="16" resid="Klikk.Icon16"/>
-                    <bt:Image size="32" resid="Klikk.Icon32"/>
-                    <bt:Image size="80" resid="Klikk.Icon80"/>
+                    <bt:Image size="16" resid="Klikk.Cube16"/>
+                    <bt:Image size="32" resid="Klikk.Cube32"/>
+                    <bt:Image size="80" resid="Klikk.Cube80"/>
                   </Icon>
                   <Control xsi:type="Button" id="Klikk.Cube">
                     <Label resid="Klikk.CubeLabel"/>
@@ -103,9 +103,9 @@
                       <Description resid="Klikk.CubeTip"/>
                     </Supertip>
                     <Icon>
-                      <bt:Image size="16" resid="Klikk.Icon16"/>
-                      <bt:Image size="32" resid="Klikk.Icon32"/>
-                      <bt:Image size="80" resid="Klikk.Icon80"/>
+                      <bt:Image size="16" resid="Klikk.Cube16"/>
+                      <bt:Image size="32" resid="Klikk.Cube32"/>
+                      <bt:Image size="80" resid="Klikk.Cube80"/>
                     </Icon>
                     <Action xsi:type="ShowTaskpane">
                       <TaskpaneId>KlikkJournalsPane</TaskpaneId>
@@ -116,9 +116,9 @@
                 <Group id="Klikk.Grp.Sheet">
                   <Label resid="Klikk.Grp.SheetLabel"/>
                   <Icon>
-                    <bt:Image size="16" resid="Klikk.Icon16"/>
-                    <bt:Image size="32" resid="Klikk.Icon32"/>
-                    <bt:Image size="80" resid="Klikk.Icon80"/>
+                    <bt:Image size="16" resid="Klikk.Sheet16"/>
+                    <bt:Image size="32" resid="Klikk.Sheet32"/>
+                    <bt:Image size="80" resid="Klikk.Sheet80"/>
                   </Icon>
                   <Control xsi:type="Button" id="Klikk.Sheet">
                     <Label resid="Klikk.SheetLabel"/>
@@ -127,9 +127,9 @@
                       <Description resid="Klikk.SheetTip"/>
                     </Supertip>
                     <Icon>
-                      <bt:Image size="16" resid="Klikk.Icon16"/>
-                      <bt:Image size="32" resid="Klikk.Icon32"/>
-                      <bt:Image size="80" resid="Klikk.Icon80"/>
+                      <bt:Image size="16" resid="Klikk.Sheet16"/>
+                      <bt:Image size="32" resid="Klikk.Sheet32"/>
+                      <bt:Image size="80" resid="Klikk.Sheet80"/>
                     </Icon>
                     <Action xsi:type="ShowTaskpane">
                       <TaskpaneId>KlikkJournalsPane</TaskpaneId>
@@ -143,9 +143,9 @@
                       <Description resid="Klikk.CommentsTip"/>
                     </Supertip>
                     <Icon>
-                      <bt:Image size="16" resid="Klikk.Icon16"/>
-                      <bt:Image size="32" resid="Klikk.Icon32"/>
-                      <bt:Image size="80" resid="Klikk.Icon80"/>
+                      <bt:Image size="16" resid="Klikk.Comments16"/>
+                      <bt:Image size="32" resid="Klikk.Comments32"/>
+                      <bt:Image size="80" resid="Klikk.Comments80"/>
                     </Icon>
                     <Action xsi:type="ShowTaskpane">
                       <TaskpaneId>KlikkJournalsPane</TaskpaneId>
@@ -156,9 +156,9 @@
                 <Group id="Klikk.Grp.Setup">
                   <Label resid="Klikk.Grp.SetupLabel"/>
                   <Icon>
-                    <bt:Image size="16" resid="Klikk.Icon16"/>
-                    <bt:Image size="32" resid="Klikk.Icon32"/>
-                    <bt:Image size="80" resid="Klikk.Icon80"/>
+                    <bt:Image size="16" resid="Klikk.Setup16"/>
+                    <bt:Image size="32" resid="Klikk.Setup32"/>
+                    <bt:Image size="80" resid="Klikk.Setup80"/>
                   </Icon>
                   <Control xsi:type="Button" id="Klikk.Connection">
                     <Label resid="Klikk.ConnLabel"/>
@@ -167,9 +167,9 @@
                       <Description resid="Klikk.ConnTip"/>
                     </Supertip>
                     <Icon>
-                      <bt:Image size="16" resid="Klikk.Icon16"/>
-                      <bt:Image size="32" resid="Klikk.Icon32"/>
-                      <bt:Image size="80" resid="Klikk.Icon80"/>
+                      <bt:Image size="16" resid="Klikk.Setup16"/>
+                      <bt:Image size="32" resid="Klikk.Setup32"/>
+                      <bt:Image size="80" resid="Klikk.Setup80"/>
                     </Icon>
                     <Action xsi:type="ShowTaskpane">
                       <TaskpaneId>KlikkJournalsPane</TaskpaneId>
@@ -188,6 +188,24 @@
         <bt:Image id="Klikk.Icon16" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/icon-16.png"/>
         <bt:Image id="Klikk.Icon32" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/icon-32.png"/>
         <bt:Image id="Klikk.Icon80" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/icon-80.png"/>
+        <bt:Image id="Klikk.Filters16" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/filters-16.png"/>
+        <bt:Image id="Klikk.Filters32" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/filters-32.png"/>
+        <bt:Image id="Klikk.Filters80" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/filters-80.png"/>
+        <bt:Image id="Klikk.Detail16" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/detail-16.png"/>
+        <bt:Image id="Klikk.Detail32" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/detail-32.png"/>
+        <bt:Image id="Klikk.Detail80" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/detail-80.png"/>
+        <bt:Image id="Klikk.Cube16" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/cube-16.png"/>
+        <bt:Image id="Klikk.Cube32" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/cube-32.png"/>
+        <bt:Image id="Klikk.Cube80" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/cube-80.png"/>
+        <bt:Image id="Klikk.Sheet16" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/sheet-16.png"/>
+        <bt:Image id="Klikk.Sheet32" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/sheet-32.png"/>
+        <bt:Image id="Klikk.Sheet80" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/sheet-80.png"/>
+        <bt:Image id="Klikk.Comments16" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/comments-16.png"/>
+        <bt:Image id="Klikk.Comments32" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/comments-32.png"/>
+        <bt:Image id="Klikk.Comments80" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/comments-80.png"/>
+        <bt:Image id="Klikk.Setup16" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/setup-16.png"/>
+        <bt:Image id="Klikk.Setup32" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/setup-32.png"/>
+        <bt:Image id="Klikk.Setup80" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/setup-80.png"/>
       </bt:Images>
       <bt:Urls>
         <bt:Url id="Klikk.Url.Query" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#query"/>

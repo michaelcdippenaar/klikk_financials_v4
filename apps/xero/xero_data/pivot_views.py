@@ -419,6 +419,11 @@ class XeroJournalPivotView(APIView):
             'row_dims': [{'key': d, 'label': DIMENSIONS[d][0]} for d in row_dims],
             'col_dims': [{'key': d, 'label': DIMENSIONS[d][0]} for d in col_dims],
             'cols': [' | '.join(c) for c in ordered_cols],
+            # The same columns UNFLATTENED, so the client can stack the
+            # header the way a PivotTable does -- Financial year spanning
+            # its periods rather than 'FY2019 | 2018-07' in one cell. The
+            # joined form stays: it is what comment anchors are keyed on.
+            'col_paths': [list(c) for c in ordered_cols],
             'rows': out_rows,
             'col_totals': col_totals,
             'grand_total': _r2(sum(col_totals)),

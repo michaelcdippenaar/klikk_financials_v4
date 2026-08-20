@@ -839,6 +839,49 @@
   /* Field wells. Excel's own field list is native UI we cannot host inside the
      grid, so this is the closest equivalent: drag chips between Fields, Rows and
      Columns, drop to reorder, and the sheet rebuilds from the resulting spec. */
+  /* Inline SVG icons.
+
+     Text glyphs (R, C, F, the angle quotes) were doing the work of icons and
+     doing it badly: they carry no meaning to anyone who has not been told what
+     they stand for, and they render at whatever the font decides. These are
+     drawn on a 24-unit grid and inherit currentColor, so they follow the
+     theme -- including Excel's dark mode -- without a second palette. */
+  var ICON = {
+    rows:    '<path d="M3 5h18M3 12h18M3 19h12"/>',
+    cols:    '<path d="M5 3v18M12 3v18M19 3v12"/>',
+    filter:  '<path d="M3 5h18l-7 8v6l-4 2v-8z"/>',
+    subset:  '<path d="M6 9l6 6 6-6"/>',
+    left:    '<path d="M15 6l-6 6 6 6"/>',
+    right:   '<path d="M9 6l6 6-6 6"/>',
+    up:      '<path d="M12 19V5M6 11l6-6 6 6"/>',
+    down:    '<path d="M12 5v14M6 13l6 6 6-6"/>',
+    remove:  '<path d="M18 6L6 18M6 6l12 12"/>',
+    add:     '<path d="M9 6l6 6-6 6"/>',
+    addAll:  '<path d="M6 6l6 6-6 6M13 6l6 6-6 6"/>',
+    del:     '<path d="M15 6l-6 6 6 6"/>',
+    delAll:  '<path d="M11 6l-6 6 6 6M18 6l-6 6 6 6"/>',
+    sortAz:  '<path d="M7 4v16M4 17l3 3 3-3M13 5h7M13 10h5M13 15h3"/>',
+    search:  '<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/>',
+    check:   '<path d="M5 13l4 4L19 7"/>',
+    refresh: '<path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/>',
+    table:   '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/>',
+    cube:    '<path d="M12 3l9 5v8l-9 5-9-5V8z"/><path d="M12 21V13M3 8l9 5 9-5"/>',
+    comment: '<path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
+    key:     '<circle cx="8" cy="14" r="4"/><path d="M11 11l9-9M17 5l3 3M14 8l3 3"/>',
+    save:    '<path d="M5 3h11l3 3v15H5z"/><path d="M8 3v6h8M8 21v-6h8v6"/>',
+    trash:   '<path d="M4 7h16M9 7V4h6v3M6 7l1 14h10l1-14"/>',
+    play:    '<path d="M6 4l14 8-14 8z"/>'
+  };
+
+  function svgIcon(name, size) {
+    var d = ICON[name];
+    if (!d) return '';
+    var px = size || 14;
+    return '<svg class="ic" viewBox="0 0 24 24" width="' + px + '" height="' + px
+      + '" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" '
+      + 'stroke-linejoin="round" aria-hidden="true" focusable="false">' + d + '</svg>';
+  }
+
   var DIMS = [];
   var wells = { avail: [], rows: [], cols: [], filt: [] };
   var MAX = { rows: 4, cols: 3, filt: 6 };
@@ -939,27 +982,28 @@
 
       var acts = document.createElement('span');
       acts.className = 'chip__acts';
-      function btn(act, glyph, title) {
+      function btn(act, iconName, title) {
         var b = document.createElement('button');
         b.type = 'button';
         b.className = 'chip__b';
         b.dataset.act = act;
-        b.textContent = glyph;
+        b.innerHTML = svgIcon(iconName, 13);
         b.title = title;
+        b.setAttribute('aria-label', title);
         return b;
       }
       if (zone === 'avail') {
-        acts.appendChild(btn('toRows', 'R', 'Move to Rows'));
-        acts.appendChild(btn('toCols', 'C', 'Move to Columns'));
-        acts.appendChild(btn('toFilt', 'F', 'Move to Filters'));
+        acts.appendChild(btn('toRows', 'rows', 'Move to Rows'));
+        acts.appendChild(btn('toCols', 'cols', 'Move to Columns'));
+        acts.appendChild(btn('toFilt', 'filter', 'Move to Filters'));
       } else if (zone === 'filt') {
-        acts.appendChild(btn('pick', '\u25be', 'Choose values'));
-        acts.appendChild(btn('remove', '\u00d7', 'Remove'));
+        acts.appendChild(btn('pick', 'subset', 'Choose values'));
+        acts.appendChild(btn('remove', 'remove', 'Remove'));
       } else {
-        acts.appendChild(btn('left', '\u2039', 'Move earlier'));
-        acts.appendChild(btn('right', '\u203a', 'Move later'));
-        acts.appendChild(btn('pick', '\u25be', 'Subset — choose which values appear'));
-        acts.appendChild(btn('remove', '\u00d7', 'Remove'));
+        acts.appendChild(btn('left', 'left', 'Move earlier'));
+        acts.appendChild(btn('right', 'right', 'Move later'));
+        acts.appendChild(btn('pick', 'subset', 'Subset — choose which values appear'));
+        acts.appendChild(btn('remove', 'remove', 'Remove'));
       }
       chip.appendChild(acts);
       host.appendChild(chip);
@@ -1542,9 +1586,49 @@
     head.push([describe(qy)].concat(blanks(width - 1)));
     head.push(blanks(width));
 
-    var labelRow = cube.row_dims.map(function (d) { return d.label; })
-      .concat(cube.cols, ['Total']);
-    head.push(labelRow);
+    /* Stacked column headers, the way a PivotTable reads.
+
+       Two column dimensions used to flatten into one row of
+       "FY2019 | 2018-07", repeating the year in every single cell. Now each
+       column dimension gets its own header row and a parent is written once,
+       above the span of children it covers -- Financial year across the top,
+       period beneath it.
+
+       Row-dimension labels sit on the LAST header row, level with the leaf
+       column labels, because that is the row the data actually lines up with.
+
+       cube.cols (the joined form) is untouched and still what comment anchors
+       are keyed on, so nothing about existing comments moves. */
+    var colPaths = cube.col_paths
+      || cube.cols.map(function (c) { return [c]; });
+    var nLevels = Math.max(1, (cube.col_dims || []).length);
+    var merges = [];
+
+    for (var lv = 0; lv < nLevels; lv++) {
+      var isLast = lv === nLevels - 1;
+      var row = isLast
+        ? cube.row_dims.map(function (d) { return d.label; })
+        : blanks(nRowDims);
+
+      for (var ci = 0; ci < nCols; ci++) {
+        var label = (colPaths[ci] || [])[lv];
+        label = (label === undefined || label === null) ? '' : String(label);
+        // Write a parent only where its run STARTS; the cells it spans stay
+        // blank and are merged under it.
+        var prev = ci > 0 ? (colPaths[ci - 1] || []) : null;
+        var sameRun = prev !== null && samePrefix(colPaths[ci] || [], prev, lv);
+        row.push(sameRun ? '' : label);
+        if (!sameRun && !isLast) {
+          var span = 1;
+          while (ci + span < nCols && samePrefix(colPaths[ci + span] || [], colPaths[ci] || [], lv)) span++;
+          if (span > 1) merges.push({ row: 3 + lv, col: nRowDims + ci, span: span });
+        }
+      }
+      row.push(isLast ? 'Total' : '');
+      head.push(row);
+    }
+
+    var firstDataRow = 3 + nLevels;
 
     var body = cube.rows.map(function (r) {
       var cells = [];
@@ -1564,8 +1648,7 @@
     totalRow.push(cube.grand_total);
 
     var matrix = head.concat(body, [blanks(width)], [totalRow]);
-    var headerRowIdx = 3;
-    var firstDataRow = CUBE_FIRST_DATA_ROW;
+    var headerRowIdx = firstDataRow - 1;   // the leaf header row
 
     var sheetId = targetId;
     var sheetName = '';
@@ -1608,11 +1691,27 @@
       sheet.getRangeByIndexes(0, 0, 1, 1).format.font.size = 13;
       sheet.getRangeByIndexes(1, 0, 1, 1).format.font.color = '#6b7280';
 
+      // Every header level is bold; only the leaf row carries the rule beneath,
+      // so the stack reads as one block rather than several.
+      var allHead = sheet.getRangeByIndexes(3, 0, nLevels, width);
+      allHead.format.font.bold = true;
+      allHead.format.horizontalAlignment = 'Right';
+
       var hdr = sheet.getRangeByIndexes(headerRowIdx, 0, 1, width);
-      hdr.format.font.bold = true;
       hdr.format.borders.getItem('EdgeBottom').style = 'Continuous';
-      hdr.format.horizontalAlignment = 'Right';
       sheet.getRangeByIndexes(headerRowIdx, 0, 1, nRowDims).format.horizontalAlignment = 'Left';
+
+      /* Merge each parent across the children it spans, and centre it over
+         them. Non-fatal: on a host without merge the labels still sit at the
+         start of their run, which is how a PivotTable in compact form looks
+         anyway -- the sheet is correct either way. */
+      merges.forEach(function (m) {
+        try {
+          var r = sheet.getRangeByIndexes(m.row, m.col, 1, m.span);
+          r.merge(true);
+          r.format.horizontalAlignment = 'Center';
+        } catch (e) { /* merge unsupported on this host */ }
+      });
 
       if (body.length) {
         var nums = sheet.getRangeByIndexes(firstDataRow, nRowDims, body.length, nCols + 1);
@@ -1702,6 +1801,15 @@
     } catch (e) { /* sheet is correct; comments just are not mirrored */ }
 
     return { sheetId: sheetId, sheetName: sheetName };
+  }
+
+  /* Do two column paths agree on every level ABOVE the given one?
+     That is what makes them part of the same parent's span. */
+  function samePrefix(a, b, level) {
+    for (var i = 0; i <= level; i++) {
+      if ((a[i] === undefined ? '' : a[i]) !== (b[i] === undefined ? '' : b[i])) return false;
+    }
+    return true;
   }
 
   function blanks(n) {
@@ -1804,8 +1912,16 @@
   /* ── the selected cell ─────────────────────────────────── */
 
   var lastCube = {};
-  // Title, blank, column headers, blank -> data starts on row index 4.
-  var CUBE_FIRST_DATA_ROW = 4;
+  /* Where the data starts, given how deep the column header stacks.
+
+     Title, filter line, blank, then ONE HEADER ROW PER COLUMN DIMENSION. It
+     was a constant 4 while headers were a single flattened row; with stacked
+     headers it moves, and anything that reads a cell's meaning from its
+     position has to move with it -- otherwise comments on a two-deep cube
+     would resolve one row out. */
+  function cubeFirstDataRow(cube) {
+    return 3 + Math.max(1, ((cube && cube.col_dims) || []).length);
+  }
   var selection = null;
   var commentCache = null;
 
@@ -2048,7 +2164,7 @@
     var cube = await fetchCube(b.query, b.spec);
     lastCube[sheetId] = {
       cube: cube,
-      firstDataRow: CUBE_FIRST_DATA_ROW,
+      firstDataRow: cubeFirstDataRow(cube),
       nRowDims: cube.row_dims.length
     };
     return lastCube[sheetId];
