@@ -70,7 +70,16 @@
     </header>
 
     <!-- ── Connection ─────────────────────────────────────────── -->
-    <section class="panel" id="settingsPanel" hidden>
+        <nav class="nav" id="sectionNav" aria-label="Sections">
+      <button class="navbtn" data-section="query">Filters</button>
+      <button class="navbtn" data-section="detail">Detail</button>
+      <button class="navbtn" data-section="cube">Cube</button>
+      <button class="navbtn" data-section="sheet">Sheet</button>
+      <button class="navbtn" data-section="comments">Comments</button>
+      <button class="navbtn" data-section="settings">Connection</button>
+    </nav>
+
+<section class="panel" id="settingsPanel" hidden>
       <h2>Connection</h2>
       <label for="baseUrl">API base URL</label>
       <input type="url" id="baseUrl" spellcheck="false" autocomplete="off">

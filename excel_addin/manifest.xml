@@ -47,32 +47,137 @@
           </GetStarted>
 
           <ExtensionPoint xsi:type="PrimaryCommandSurface">
-            <OfficeTab id="TabHome">
-              <Group id="Klikk.Group">
-                <Label resid="Klikk.GroupLabel"/>
-                <Icon>
-                  <bt:Image size="16" resid="Klikk.Icon16"/>
-                  <bt:Image size="32" resid="Klikk.Icon32"/>
-                  <bt:Image size="80" resid="Klikk.Icon80"/>
-                </Icon>
-                <Control xsi:type="Button" id="Klikk.OpenPane">
-                  <Label resid="Klikk.OpenLabel"/>
-                  <Supertip>
-                    <Title resid="Klikk.OpenLabel"/>
-                    <Description resid="Klikk.OpenTip"/>
-                  </Supertip>
+            <CustomTab id="Klikk.Tab">
+              <Label resid="Klikk.TabLabel"/>
+                <Group id="Klikk.Grp.Data">
+                  <Label resid="Klikk.Grp.DataLabel"/>
                   <Icon>
                     <bt:Image size="16" resid="Klikk.Icon16"/>
                     <bt:Image size="32" resid="Klikk.Icon32"/>
                     <bt:Image size="80" resid="Klikk.Icon80"/>
                   </Icon>
-                  <Action xsi:type="ShowTaskpane">
-                    <TaskpaneId>KlikkJournalsPane</TaskpaneId>
-                    <SourceLocation resid="Klikk.TaskpaneUrl"/>
-                  </Action>
-                </Control>
-              </Group>
-            </OfficeTab>
+                  <Control xsi:type="Button" id="Klikk.Filters">
+                    <Label resid="Klikk.FiltersLabel"/>
+                    <Supertip>
+                      <Title resid="Klikk.FiltersLabel"/>
+                      <Description resid="Klikk.FiltersTip"/>
+                    </Supertip>
+                    <Icon>
+                      <bt:Image size="16" resid="Klikk.Icon16"/>
+                      <bt:Image size="32" resid="Klikk.Icon32"/>
+                      <bt:Image size="80" resid="Klikk.Icon80"/>
+                    </Icon>
+                    <Action xsi:type="ShowTaskpane">
+                      <TaskpaneId>KlikkJournalsPane</TaskpaneId>
+                      <SourceLocation resid="Klikk.Url.Query"/>
+                    </Action>
+                  </Control>
+                  <Control xsi:type="Button" id="Klikk.Detail">
+                    <Label resid="Klikk.DetailLabel"/>
+                    <Supertip>
+                      <Title resid="Klikk.DetailLabel"/>
+                      <Description resid="Klikk.DetailTip"/>
+                    </Supertip>
+                    <Icon>
+                      <bt:Image size="16" resid="Klikk.Icon16"/>
+                      <bt:Image size="32" resid="Klikk.Icon32"/>
+                      <bt:Image size="80" resid="Klikk.Icon80"/>
+                    </Icon>
+                    <Action xsi:type="ShowTaskpane">
+                      <TaskpaneId>KlikkJournalsPane</TaskpaneId>
+                      <SourceLocation resid="Klikk.Url.Detail"/>
+                    </Action>
+                  </Control>
+                </Group>
+                <Group id="Klikk.Grp.Analyse">
+                  <Label resid="Klikk.Grp.AnalyseLabel"/>
+                  <Icon>
+                    <bt:Image size="16" resid="Klikk.Icon16"/>
+                    <bt:Image size="32" resid="Klikk.Icon32"/>
+                    <bt:Image size="80" resid="Klikk.Icon80"/>
+                  </Icon>
+                  <Control xsi:type="Button" id="Klikk.Cube">
+                    <Label resid="Klikk.CubeLabel"/>
+                    <Supertip>
+                      <Title resid="Klikk.CubeLabel"/>
+                      <Description resid="Klikk.CubeTip"/>
+                    </Supertip>
+                    <Icon>
+                      <bt:Image size="16" resid="Klikk.Icon16"/>
+                      <bt:Image size="32" resid="Klikk.Icon32"/>
+                      <bt:Image size="80" resid="Klikk.Icon80"/>
+                    </Icon>
+                    <Action xsi:type="ShowTaskpane">
+                      <TaskpaneId>KlikkJournalsPane</TaskpaneId>
+                      <SourceLocation resid="Klikk.Url.Cube"/>
+                    </Action>
+                  </Control>
+                </Group>
+                <Group id="Klikk.Grp.Sheet">
+                  <Label resid="Klikk.Grp.SheetLabel"/>
+                  <Icon>
+                    <bt:Image size="16" resid="Klikk.Icon16"/>
+                    <bt:Image size="32" resid="Klikk.Icon32"/>
+                    <bt:Image size="80" resid="Klikk.Icon80"/>
+                  </Icon>
+                  <Control xsi:type="Button" id="Klikk.Sheet">
+                    <Label resid="Klikk.SheetLabel"/>
+                    <Supertip>
+                      <Title resid="Klikk.SheetLabel"/>
+                      <Description resid="Klikk.SheetTip"/>
+                    </Supertip>
+                    <Icon>
+                      <bt:Image size="16" resid="Klikk.Icon16"/>
+                      <bt:Image size="32" resid="Klikk.Icon32"/>
+                      <bt:Image size="80" resid="Klikk.Icon80"/>
+                    </Icon>
+                    <Action xsi:type="ShowTaskpane">
+                      <TaskpaneId>KlikkJournalsPane</TaskpaneId>
+                      <SourceLocation resid="Klikk.Url.Sheet"/>
+                    </Action>
+                  </Control>
+                  <Control xsi:type="Button" id="Klikk.Comments">
+                    <Label resid="Klikk.CommentsLabel"/>
+                    <Supertip>
+                      <Title resid="Klikk.CommentsLabel"/>
+                      <Description resid="Klikk.CommentsTip"/>
+                    </Supertip>
+                    <Icon>
+                      <bt:Image size="16" resid="Klikk.Icon16"/>
+                      <bt:Image size="32" resid="Klikk.Icon32"/>
+                      <bt:Image size="80" resid="Klikk.Icon80"/>
+                    </Icon>
+                    <Action xsi:type="ShowTaskpane">
+                      <TaskpaneId>KlikkJournalsPane</TaskpaneId>
+                      <SourceLocation resid="Klikk.Url.Comments"/>
+                    </Action>
+                  </Control>
+                </Group>
+                <Group id="Klikk.Grp.Setup">
+                  <Label resid="Klikk.Grp.SetupLabel"/>
+                  <Icon>
+                    <bt:Image size="16" resid="Klikk.Icon16"/>
+                    <bt:Image size="32" resid="Klikk.Icon32"/>
+                    <bt:Image size="80" resid="Klikk.Icon80"/>
+                  </Icon>
+                  <Control xsi:type="Button" id="Klikk.Connection">
+                    <Label resid="Klikk.ConnLabel"/>
+                    <Supertip>
+                      <Title resid="Klikk.ConnLabel"/>
+                      <Description resid="Klikk.ConnTip"/>
+                    </Supertip>
+                    <Icon>
+                      <bt:Image size="16" resid="Klikk.Icon16"/>
+                      <bt:Image size="32" resid="Klikk.Icon32"/>
+                      <bt:Image size="80" resid="Klikk.Icon80"/>
+                    </Icon>
+                    <Action xsi:type="ShowTaskpane">
+                      <TaskpaneId>KlikkJournalsPane</TaskpaneId>
+                      <SourceLocation resid="Klikk.Url.Settings"/>
+                    </Action>
+                  </Control>
+                </Group>
+            </CustomTab>
           </ExtensionPoint>
         </DesktopFormFactor>
       </Host>
@@ -85,15 +190,38 @@
         <bt:Image id="Klikk.Icon80" DefaultValue="https://console.8-bit.space/backend/excel-addin/assets/icon-80.png"/>
       </bt:Images>
       <bt:Urls>
+        <bt:Url id="Klikk.Url.Query" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#query"/>
+        <bt:Url id="Klikk.Url.Detail" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#detail"/>
+        <bt:Url id="Klikk.Url.Cube" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#cube"/>
+        <bt:Url id="Klikk.Url.Sheet" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#sheet"/>
+        <bt:Url id="Klikk.Url.Comments" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#comments"/>
+        <bt:Url id="Klikk.Url.Settings" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#settings"/>
         <bt:Url id="Klikk.TaskpaneUrl" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html"/>
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://console.8-bit.space/"/>
       </bt:Urls>
       <bt:ShortStrings>
+        <bt:String id="Klikk.TabLabel" DefaultValue="Klikk"/>
+        <bt:String id="Klikk.Grp.DataLabel" DefaultValue="Ledger"/>
+        <bt:String id="Klikk.Grp.AnalyseLabel" DefaultValue="Analyse"/>
+        <bt:String id="Klikk.Grp.SheetLabel" DefaultValue="Worksheet"/>
+        <bt:String id="Klikk.Grp.SetupLabel" DefaultValue="Setup"/>
+        <bt:String id="Klikk.FiltersLabel" DefaultValue="Filters"/>
+        <bt:String id="Klikk.DetailLabel" DefaultValue="Detail rows"/>
+        <bt:String id="Klikk.CubeLabel" DefaultValue="Cube view"/>
+        <bt:String id="Klikk.SheetLabel" DefaultValue="This sheet"/>
+        <bt:String id="Klikk.CommentsLabel" DefaultValue="Comments"/>
+        <bt:String id="Klikk.ConnLabel" DefaultValue="Connection"/>
         <bt:String id="Klikk.GroupLabel" DefaultValue="Klikk Financials"/>
         <bt:String id="Klikk.OpenLabel" DefaultValue="Journals"/>
         <bt:String id="GetStarted.Title" DefaultValue="Klikk Journals is ready."/>
       </bt:ShortStrings>
       <bt:LongStrings>
+        <bt:String id="Klikk.FiltersTip" DefaultValue="Choose entity, dates, accounts and tracking, then load the ledger."/>
+        <bt:String id="Klikk.DetailTip" DefaultValue="Load journal lines to a worksheet."/>
+        <bt:String id="Klikk.CubeTip" DefaultValue="Aggregate server-side in Postgres — no row limit."/>
+        <bt:String id="Klikk.SheetTip" DefaultValue="Refresh, reload or restore the filters for the sheet in front."/>
+        <bt:String id="Klikk.CommentsTip" DefaultValue="Import comments onto the sheet, or clear and re-place them."/>
+        <bt:String id="Klikk.ConnTip" DefaultValue="API address and token."/>
         <bt:String id="Klikk.OpenTip" DefaultValue="Open the Klikk Journals pane to pull ledger data into this workbook."/>
         <bt:String id="GetStarted.Description" DefaultValue="Open the Journals pane from the Home tab, paste your API token, and load the ledger."/>
       </bt:LongStrings>

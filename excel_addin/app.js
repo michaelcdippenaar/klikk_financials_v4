@@ -12,6 +12,55 @@
   var DEFAULT_BASE = 'https://console.8-bit.space/backend';
   var PAGE_SIZE = 1000;
   var WRITE_CHUNK = 2000;
+  /* Sections.
+   *
+   * The pane used to show every panel stacked, which is fine at three panels
+   * and unreadable at six. The ribbon tab now addresses each one by URL
+   * fragment (taskpane.html#cube), so a ribbon button and the in-pane nav are
+   * two doors into the same state rather than two separate mechanisms.
+   *
+   * Excel will not always re-navigate a pane that is already open, so the
+   * in-pane nav is the reliable path and the fragment is the convenience. */
+  var SECTIONS = {
+    query:    'queryPanel',
+    detail:   'detailPanel',
+    cube:     'cubePanel',
+    sheet:    'refreshPanel',
+    comments: 'commentPanel',
+    settings: 'settingsPanel'
+  };
+  var DEFAULT_SECTION = 'query';
+  var currentSection = DEFAULT_SECTION;
+  var connected = false;
+
+  function sectionFromHash() {
+    var h = (window.location.hash || '').replace(/^#/, '');
+    return SECTIONS[h] ? h : null;
+  }
+
+  function applySection() {
+    // Nothing but Connection is meaningful before a token is accepted, so an
+    // unconnected pane always lands there regardless of which button was hit.
+    var want = connected ? currentSection : 'settings';
+    Object.keys(SECTIONS).forEach(function (k) {
+      var node = el[SECTIONS[k]];
+      if (node) node.hidden = (k !== want);
+    });
+    var nav = document.getElementById('sectionNav');
+    if (nav) {
+      Array.prototype.forEach.call(nav.querySelectorAll('button'), function (b) {
+        b.className = 'navbtn' + (b.dataset.section === want ? ' navbtn--on' : '');
+        b.disabled = !connected && b.dataset.section !== 'settings';
+      });
+    }
+  }
+
+  function showSection(name) {
+    if (!SECTIONS[name]) return;
+    currentSection = name;
+    applySection();
+  }
+
   var SETTING_PREFIX = 'klikkJournalQuery::';
   // Cube/pivot cell comments — GET lists them, POST upserts one, and
   // <id>/status/ marks one actioned. Server route: journals/pivot/comments/.
@@ -78,6 +127,7 @@
       'typeHint', 'dateFrom', 'dateTo', 'account', 'accountList', 'contact', 'reference',
       'contactList', 'description', 'amount', 'q', 'maxRows', 'countLine', 'btnLoad', 'btnCount',
       'detailPanel', 'btnPivot', 'cubePanel', 'measure', 'btnResetComments',
+      'queryPanel', 'refreshPanel', 'commentPanel', 'settingsPanel',
       'suppress', 'btnCube', 'cubeMsg', 'btnReload', 'wellAvail', 'wellRows',
       'wellCols', 'autoBuild', 'outline',
       'commentPanel', 'commentAuthor', 'btnSyncComments', 'commentMsg',
@@ -131,6 +181,18 @@
     el.btnReload.addEventListener('click', function () { run(reloadThisSheet); });
     el.btnSyncComments.addEventListener('click', function () { run(syncComments); });
     el.btnResetComments.addEventListener('click', function () { run(resetSheetComments); });
+    var nav = document.getElementById('sectionNav');
+    if (nav) {
+      nav.addEventListener('click', function (ev) {
+        var b = ev.target.closest('button[data-section]');
+        if (b) showSection(b.dataset.section);
+      });
+    }
+    currentSection = sectionFromHash() || DEFAULT_SECTION;
+    window.addEventListener('hashchange', function () {
+      var h = sectionFromHash();
+      if (h) showSection(h);
+    });
     el.btnFullPivot.addEventListener('click', function () { run(pivotFromFullDetail); });
     el.btnPushComments.addEventListener('click', function () { run(pushCommentsToSheet); });
     el.btnSaveComment.addEventListener('click', function () { run(saveSelectedComment); });
@@ -226,11 +288,8 @@
   function setConnected(ok) {
     el.connLabel.textContent = ok ? 'Connected to Klikk Financials' : 'Not connected';
     el.connLabel.className = ok ? 'hd__sub hd__sub--ok' : 'hd__sub';
-    el.queryPanel.hidden = !ok;
-    el.detailPanel.hidden = !ok;
-    el.cubePanel.hidden = !ok;
-    el.commentPanel.hidden = !ok;
-    el.refreshPanel.hidden = !ok;
+    connected = ok;
+    applySection();
   }
 
   function populateFilters(opts) {
