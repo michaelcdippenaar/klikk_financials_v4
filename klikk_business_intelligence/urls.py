@@ -22,6 +22,20 @@ from django.conf import settings
 from django.conf.urls.static import static
 from django.views.static import serve as static_serve
 
+
+def _excel_addin_asset(request, path, document_root=None):
+    """Serve the add-in bundle with caching switched off.
+
+    Excel's webview holds on to CSS and JS aggressively. The task pane HTML
+    already sends no-store, but the assets it pulls did not, so a deploy could
+    leave the pane running new markup against a stale stylesheet -- which looked
+    exactly like broken CSS. Every client picks up a redeploy on next open.
+    """
+    response = static_serve(request, path, document_root=document_root)
+    response['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+    response['Pragma'] = 'no-cache'
+    return response
+
 from apps.xero.xero_auth.views import XeroCallbackView
 
 urlpatterns = [
@@ -64,7 +78,7 @@ urlpatterns = [
     # Office fetches these before any token exists, and they hold no secrets.
     re_path(
         r'^excel-addin/(?P<path>.*)$',
-        static_serve,
+        _excel_addin_asset,
         {'document_root': settings.BASE_DIR / 'excel_addin'},
         name='excel_addin',
     ),
