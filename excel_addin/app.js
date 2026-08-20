@@ -1008,12 +1008,15 @@
             groups.push({ from: firstDataRow + start, to: firstDataRow + end });
           }
         });
-        groups.forEach(function (g) {
+        // Sync in batches; a few thousand queued group() calls in one round
+        // trip is a lot to push through the add-in bridge at once.
+        for (var gi = 0; gi < groups.length; gi++) {
           try {
-            sheet.getRangeByIndexes(g.from, 0, g.to - g.from + 1, 1)
+            sheet.getRangeByIndexes(groups[gi].from, 0, groups[gi].to - groups[gi].from + 1, 1)
               .group(Excel.GroupOption.byRows);
           } catch (e) { /* host without outlining: rows just stay expanded */ }
-        });
+          if ((gi + 1) % 100 === 0) await ctx.sync();
+        }
         await ctx.sync();
       }).catch(function () { /* outlining unsupported; the sheet is still correct */ });
     }
@@ -1532,7 +1535,16 @@
 
   /* Write (or clear) a native Excel comment on one cell. Excel has no
      "comment at address" lookup, so match on the resolved location. */
-  async function writeCellComment(sheetId, r, c, text) {
+  function writeCellComment(sheetId, r, c, text) {
+    return writeCellComments(sheetId, [{ r: r, c: c, t: text }]);
+  }
+
+  /* One pass for many cells. The previous version ran a full Excel.run per
+     comment, each re-loading every comment on the sheet and its location — the
+     bridge traffic grew with the square of the comment count, which is the kind
+     of load that destabilises the host. */
+  async function writeCellComments(sheetId, writes) {
+    if (!writes.length) return;
     try {
       await Excel.run(async function (ctx) {
         var sheet = ctx.workbook.worksheets.getItem(sheetId);
@@ -1547,21 +1559,24 @@
         });
         await ctx.sync();
 
-        var hit = -1;
+        var at = {};
         for (var i = 0; i < locs.length; i++) {
-          if (locs[i].rowIndex === r && locs[i].columnIndex === c) { hit = i; break; }
+          at[locs[i].rowIndex + ':' + locs[i].columnIndex] = i;
         }
-        if (text) {
-          if (hit >= 0) comments.items[hit].content = text;
-          else comments.add(sheet.getRangeByIndexes(r, c, 1, 1), text);
-        } else if (hit >= 0) {
-          comments.items[hit].delete();
-        }
+        writes.forEach(function (w) {
+          var hit = at[w.r + ':' + w.c];
+          if (w.t) {
+            if (hit != null) comments.items[hit].content = w.t;
+            else comments.add(sheet.getRangeByIndexes(w.r, w.c, 1, 1), w.t);
+          } else if (hit != null) {
+            comments.items[hit].delete();
+          }
+        });
         await ctx.sync();
       });
     } catch (e) {
-      // Comment API missing (needs ExcelApi 1.10) — the comment is still safely
-      // in Postgres, it just is not mirrored onto the grid.
+      // Comment API missing (needs ExcelApi 1.10) — comments are still safely in
+      // Postgres, they just are not mirrored onto the grid.
     }
   }
 
@@ -1592,10 +1607,8 @@
           if (txt) writes.push({ r: cached.firstDataRow + i, c: cached.nRowDims + ci, t: txt });
         }
       });
-      for (var w = 0; w < writes.length; w++) {
-        await writeCellComment(activeSheet.id, writes[w].r, writes[w].c, writes[w].t);
-        placed += 1;
-      }
+      await writeCellComments(activeSheet.id, writes);
+      placed = writes.length;
     } else {
       // A PivotTable's cells only reveal their meaning one at a time, so walk
       // the data body and resolve as we go. Bounded, and it reports what it
@@ -1612,11 +1625,14 @@
         await ctx.sync();
 
         var total = body.rowCount * body.columnCount;
-        if (total > 1500) {
+        if (total > 600) {
           unplaced = total;
           return;
         }
+        // Sync every 150 cells rather than queueing thousands of proxy loads
+        // into a single round trip.
         var probes = [];
+        var pending = [];
         for (var rr = 0; rr < body.rowCount; rr++) {
           for (var cc = 0; cc < body.columnCount; cc++) {
             var cell = sheet.getRangeByIndexes(body.rowIndex + rr, body.columnIndex + cc, 1, 1);
@@ -1624,10 +1640,18 @@
             var pc = pivot.layout.getPivotItems(Excel.PivotAxis.column, cell);
             var pd = pivot.layout.getDataHierarchy(cell);
             pr.load('items/name'); pc.load('items/name'); pd.load('name');
-            probes.push({ r: body.rowIndex + rr, c: body.columnIndex + cc, pr: pr, pc: pc, pd: pd });
+            pending.push({ r: body.rowIndex + rr, c: body.columnIndex + cc, pr: pr, pc: pc, pd: pd });
+            if (pending.length >= 150) {
+              await ctx.sync();
+              probes = probes.concat(pending);
+              pending = [];
+            }
           }
         }
-        await ctx.sync();
+        if (pending.length) {
+          await ctx.sync();
+          probes = probes.concat(pending);
+        }
         probes.forEach(function (pb) {
           var rp = pb.pr.items.map(function (x) { return x.name; });
           if (!rp.length) return;
@@ -1640,10 +1664,8 @@
         throw new Error('This PivotTable has ' + fmtNum(unplaced) + ' value cells — too many '
           + 'to resolve one by one. Collapse or filter it, then try again.');
       }
-      for (var f = 0; f < found.length; f++) {
-        await writeCellComment(activeSheet.id, found[f].r, found[f].c, found[f].t);
-        placed += 1;
-      }
+      await writeCellComments(activeSheet.id, found);
+      placed = found.length;
     }
 
     el.commentMsg.textContent = placed
