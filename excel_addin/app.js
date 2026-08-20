@@ -95,7 +95,24 @@
     { key: 'id',                      label: 'Row ID',     fmt: 'int',   width: 10 }
   ];
 
-  var MONEY_FMT = '#,##0.00;[Red]-#,##0.00';
+  var MONEY_FMT = '#,##0.00;[Red]-#,##0.00;"–"';   // a zero reads as a dash, not 0.00
+
+  /* Sheet palette. Deliberately a light theme with a dark header band rather
+     than following the pane's dark mode: a worksheet is printed, shared and
+     screenshotted, and Excel does not tell an add-in which theme the workbook
+     will be read under. */
+  var SHEET = {
+    headBg:    '#1F2836',   // header band
+    headBg2:   '#2E3948',   // parent level of a stacked header
+    headInk:   '#FFFFFF',
+    accent:    '#C8912A',   // Klikk gold, for the title and the grand total rule
+    total0:    '#DCE4F0',   // top-level consolidation
+    total1:    '#E8EDF5',
+    total2:    '#F2F5FA',   // and anything deeper
+    grand:     '#C9D4E6',
+    rule:      '#B9C4D6',
+    subtle:    '#6B7280'
+  };
   var DATE_FMT = 'yyyy-mm-dd';
 
   var settings = { baseUrl: DEFAULT_BASE, token: '' };
@@ -1687,19 +1704,36 @@
     await Excel.run(async function (ctx) {
       var sheet = ctx.workbook.worksheets.getItem(sheetId);
 
-      sheet.getRangeByIndexes(0, 0, 1, 1).format.font.bold = true;
-      sheet.getRangeByIndexes(0, 0, 1, 1).format.font.size = 13;
-      sheet.getRangeByIndexes(1, 0, 1, 1).format.font.color = '#6b7280';
+      var title = sheet.getRangeByIndexes(0, 0, 1, 1);
+      title.format.font.bold = true;
+      title.format.font.size = 14;
+      title.format.font.color = SHEET.headBg;
+      sheet.getRangeByIndexes(1, 0, 1, 1).format.font.color = SHEET.subtle;
+      sheet.getRangeByIndexes(1, 0, 1, 1).format.font.italic = true;
 
-      // Every header level is bold; only the leaf row carries the rule beneath,
-      // so the stack reads as one block rather than several.
+      /* The header is a solid band, not bold text on white. It has to stay
+         readable when the grid scrolls under it and when the sheet is printed
+         or pasted into a document, which bold-on-white does not. */
       var allHead = sheet.getRangeByIndexes(3, 0, nLevels, width);
       allHead.format.font.bold = true;
+      allHead.format.font.color = SHEET.headInk;
+      allHead.format.fill.color = SHEET.headBg;
       allHead.format.horizontalAlignment = 'Right';
+      allHead.format.verticalAlignment = 'Center';
+
+      // Parent levels sit one shade lighter, so a stacked header reads as a
+      // hierarchy rather than one thick slab.
+      if (nLevels > 1) {
+        sheet.getRangeByIndexes(3, 0, nLevels - 1, width).format.fill.color = SHEET.headBg2;
+      }
 
       var hdr = sheet.getRangeByIndexes(headerRowIdx, 0, 1, width);
       hdr.format.borders.getItem('EdgeBottom').style = 'Continuous';
+      hdr.format.borders.getItem('EdgeBottom').color = SHEET.accent;
+      hdr.format.borders.getItem('EdgeBottom').weight = 'Medium';
       sheet.getRangeByIndexes(headerRowIdx, 0, 1, nRowDims).format.horizontalAlignment = 'Left';
+      // Long column labels wrap instead of being clipped by the next column.
+      allHead.format.wrapText = true;
 
       /* Merge each parent across the children it spans, and centre it over
          them. Non-fatal: on a host without merge the labels still sit at the
@@ -1718,28 +1752,62 @@
         nums.numberFormat = [[isCount ? '#,##0' : MONEY_FMT]];
       }
 
-      // Consolidation rows carry the weight; leaves are indented under them.
+      /* Consolidations are shaded by DEPTH, so the level a subtotal belongs to
+         is visible without counting indents -- the top-level rollups are the
+         darkest and the eye lands on them first.
+
+         Applied in RUNS of consecutive rows that share a depth, not row by
+         row. A cube can be thousands of rows and one range call per row is the
+         difference between a sheet that renders and one that appears to hang. */
+      var TOTAL_FILL = [SHEET.total0, SHEET.total1, SHEET.total2];
+      var run = null;
+      var runs = [];
       cube.rows.forEach(function (r, i) {
-        var rowRange = sheet.getRangeByIndexes(firstDataRow + i, 0, 1, width);
-        if (r.is_total) {
-          rowRange.format.font.bold = true;
+        var kind = (r.is_total ? 'T' : 'L') + Math.min(r.depth, 2);
+        if (run && run.kind === kind && run.to === i - 1) {
+          run.to = i;
+        } else {
+          run = { kind: kind, from: i, to: i, isTotal: r.is_total, depth: r.depth };
+          runs.push(run);
         }
-        if (r.depth > 0) {
-          sheet.getRangeByIndexes(firstDataRow + i, r.depth, 1, 1).format.indentLevel =
-            Math.min(r.depth, 5);
+      });
+
+      runs.forEach(function (g) {
+        var n = g.to - g.from + 1;
+        var range = sheet.getRangeByIndexes(firstDataRow + g.from, 0, n, width);
+        if (g.isTotal) {
+          range.format.font.bold = true;
+          range.format.fill.color = TOTAL_FILL[Math.min(g.depth, TOTAL_FILL.length - 1)];
+          if (g.depth === 0) {
+            range.format.borders.getItem('EdgeTop').style = 'Continuous';
+            range.format.borders.getItem('EdgeTop').color = SHEET.rule;
+          }
+        }
+        if (g.depth > 0) {
+          sheet.getRangeByIndexes(firstDataRow + g.from, Math.min(g.depth, nRowDims - 1), n, 1)
+            .format.indentLevel = Math.min(g.depth, 5);
         }
       });
 
       var gt = sheet.getRangeByIndexes(firstDataRow + body.length + 1, 0, 1, width);
       gt.format.font.bold = true;
+      gt.format.fill.color = SHEET.grand;
       gt.numberFormat = [[isCount ? '#,##0' : MONEY_FMT]];
       gt.getCell(0, 0).numberFormat = [['General']];
-      gt.format.borders.getItem('EdgeTop').style = 'Continuous';
+      gt.format.borders.getItem('EdgeTop').style = 'Double';
+      gt.format.borders.getItem('EdgeTop').color = SHEET.accent;
 
-      sheet.getRangeByIndexes(headerRowIdx, 0, 1, nRowDims).format.columnWidth = 190;
-      for (var c = nRowDims; c < width; c++) {
-        sheet.getRangeByIndexes(headerRowIdx, c, 1, 1).format.columnWidth = 96;
-      }
+      // Row-dimension columns get the room; value columns are uniform so the
+      // eye can compare down a column without re-reading its width.
+      sheet.getRangeByIndexes(headerRowIdx, 0, 1, nRowDims).format.columnWidth = 200;
+      // One call for every value column rather than one call per column: a wide
+      // cube can be fifty columns, and each of those was a round trip.
+      sheet.getRangeByIndexes(headerRowIdx, nRowDims, 1, width - nRowDims)
+        .format.columnWidth = 104;
+      // Autofit rather than a fixed height: wrapText with a fixed height
+      // clips a long column label instead of showing it.
+      try { sheet.getRangeByIndexes(3, 0, nLevels, width).format.autofitRows(); }
+      catch (e) { /* host without autofit: wrapped text still shows on 1 line */ }
 
       // Freeze the context + header block and the row-dimension columns, so the
       // numbers stay readable when you scroll into 2029.
