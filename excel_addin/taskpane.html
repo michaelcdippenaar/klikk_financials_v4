@@ -313,6 +313,20 @@
         </div>
       </div>
 
+      <!-- Bulk flag. Reviewing a cube means spotting a dozen figures that look
+           wrong; writing a considered note on each is not what that moment
+           needs. Select them, tag them, move on. -->
+      <div class="saved">
+        <label class="xfer__lbl">Flag a selection <span id="bulkCount" class="cc-count"></span></label>
+        <div class="saved__row">
+          <input type="text" id="bulkTags" placeholder="Tags, e.g. check, fy2026">
+        </div>
+        <div class="saved__row">
+          <input type="text" id="bulkNote" placeholder="Note applied to all of them…">
+          <button class="btn btn--tiny" id="btnBulkFlag">Flag</button>
+        </div>
+      </div>
+
       <label for="commentAuthor">Your name</label>
       <input type="text" id="commentAuthor" spellcheck="false" placeholder="e.g. MC">
       <label class="chk"><input type="checkbox" id="markCells" checked>

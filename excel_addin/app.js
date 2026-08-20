@@ -190,6 +190,7 @@
       'commentPanel', 'commentAuthor', 'btnSyncComments', 'commentMsg',
       'btnFullPivot', 'selNone', 'selHas', 'selPath', 'selVal', 'selComment',
       'btnSaveComment', 'btnDeleteComment', 'selBox', 'markCells', 'btnPushComments',
+      'bulkTags', 'bulkNote', 'btnBulkFlag', 'bulkCount',
       'refreshPanel', 'sheetInfo', 'btnRefresh', 'btnRestore', 'progressPanel',
       'progressMsg', 'progressFill', 'btnCancel', 'errorMsg'
     ].forEach(function (id) { el[id] = document.getElementById(id); });
@@ -255,6 +256,7 @@
     el.btnSaveComment.addEventListener('click', function () { run(saveSelectedComment); });
     el.btnDeleteComment.addEventListener('click', function () { run(deleteSelectedComment); });
     el.btnDrill.addEventListener('click', function () { run(drillSelection); });
+    el.btnBulkFlag.addEventListener('click', function () { run(flagSelection); });
     el.btnViewSave.addEventListener('click', function () { run(saveCurrentView); });
     el.btnViewLoad.addEventListener('click', function () { run(openSavedView); });
     el.btnViewDelete.addEventListener('click', function () {
@@ -2528,6 +2530,122 @@
       el.commentMsg.className = 'msg msg--ok';
     }
     el.commentMsg.textContent = msg;
+  }
+
+  /* Flag every cell in the selection at once.
+
+     Only cube sheets: a cube resolves its cells from the grid already held in
+     memory, so a hundred of them cost nothing. A PivotTable would need the
+     rendered grid re-read per area, which is doable but is not what this is
+     for -- the point is speed while reviewing.
+
+     One request, not one per cell. Sixty round trips would be slow and would
+     fail halfway through often enough to matter. */
+  var BULK_MAX = 500;
+
+  async function flagSelection() {
+    var b = activeSheet.binding;
+    if (!b || b.kind !== 'cube') {
+      throw new Error('Bulk flagging works on a cube sheet. Open or rebuild one first.');
+    }
+    var cached = await ensureCube(activeSheet.id, b);
+    if (!cached) throw new Error('Rebuild this cube sheet first, then try again.');
+
+    var tags = (el.bulkTags.value || '').split(',')
+      .map(function (t) { return t.trim(); }).filter(Boolean);
+    var note = (el.bulkNote.value || '').trim();
+    if (!note && !tags.length) {
+      throw new Error('Give a tag or a note — a flag with neither says nothing.');
+    }
+    if (!note) note = 'Flagged: ' + tags.join(', ');
+
+    var picked = await selectedCells();
+    if (!picked.length) throw new Error('Select the cells to flag first.');
+
+    var cells = [], outside = 0;
+    for (var i = 0; i < picked.length; i++) {
+      if (cells.length >= BULK_MAX) break;
+      var x = cellToIntersection(cached.cube,
+        picked[i].r - cached.firstDataRow, picked[i].c - cached.nRowDims);
+      // Labels, headers and blank cells have no figure behind them. Counted
+      // and reported rather than silently ignored.
+      if (!x) { outside++; continue; }
+      cells.push({
+        measure: b.spec.measure,
+        row_dims: x.row_dims, row_path: x.row_path,
+        col_dims: x.col_dims, col_path: x.col_path,
+        cell_value: x.cell_value,
+        filters: toParams(b.query),
+        // Carried on the cell itself. Cells that hold no figure are skipped,
+        // so an index into `cells` is NOT an index into `picked` — pairing
+        // them positionally would write each note onto the wrong cell.
+        _r: picked[i].r, _c: picked[i].c
+      });
+    }
+    if (!cells.length) {
+      throw new Error('None of the selected cells hold a figure — select value cells.');
+    }
+
+    progress(0, cells.length, 'Flagging ' + fmtNum(cells.length) + ' cells…');
+    var res = await apiPost(COMMENT_API + 'bulk/', {
+      cells: cells.map(function (c) {
+        var o = {}; for (var k in c) if (k.charAt(0) !== '_') o[k] = c[k];
+        return o;
+      }),
+      comment: note, tags: tags,
+      author: (el.commentAuthor.value || '').trim()
+    });
+    commentCache = null;
+
+    if (el.markCells.checked) {
+      await writeCellComments(activeSheet.id, cells.map(function (c) {
+        return { r: c._r, c: c._c, t: note };
+      }));
+    }
+
+    var msg = 'Flagged ' + fmtNum(res.saved) + ' cell' + (res.saved === 1 ? '' : 's');
+    if (res.tags && res.tags.length) msg += ' as ' + res.tags.join(', ');
+    msg += '.';
+    if (outside) msg += ' ' + fmtNum(outside) + ' selected cell'
+      + (outside === 1 ? '' : 's') + ' held no figure and were left alone.';
+    if (picked.length > BULK_MAX) {
+      msg += ' Only the first ' + fmtNum(BULK_MAX) + ' were taken — narrow the selection.';
+    }
+    el.commentMsg.textContent = msg;
+    el.commentMsg.className = 'msg msg--ok';
+  }
+
+  /* Every cell of the selection, across all areas.
+
+     Excel supports a discontiguous selection (ctrl-click), which is exactly
+     how someone picks out the dozen figures that look wrong -- so a single
+     getSelectedRange would miss most of what they chose. */
+  async function selectedCells() {
+    var out = [];
+    await Excel.run(async function (ctx) {
+      var areas = null;
+      try {
+        if (Office.context.requirements.isSetSupported('ExcelApi', '1.9')) {
+          areas = ctx.workbook.getSelectedRanges();
+          areas.load('areas/items/rowIndex,areas/items/columnIndex,areas/items/rowCount,areas/items/columnCount');
+        }
+      } catch (e) { areas = null; }
+
+      var single = ctx.workbook.getSelectedRange();
+      single.load('rowIndex,columnIndex,rowCount,columnCount');
+      await ctx.sync();
+
+      var list = (areas && areas.areas && areas.areas.items && areas.areas.items.length)
+        ? areas.areas.items : [single];
+      list.forEach(function (a) {
+        for (var r = 0; r < a.rowCount; r++) {
+          for (var c = 0; c < a.columnCount; c++) {
+            out.push({ r: a.rowIndex + r, c: a.columnIndex + c });
+          }
+        }
+      });
+    });
+    return out;
   }
 
   async function postComment(sel, text) {

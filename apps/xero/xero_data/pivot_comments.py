@@ -380,3 +380,101 @@ class XeroCubeCommentStatusView(APIView):
         if not row:
             return Response({'error': 'no such comment'}, status=http.HTTP_404_NOT_FOUND)
         return Response(_row_to_dict(row))
+
+
+MAX_BULK = 1000
+
+
+class XeroCubeCommentsBulkView(APIView):
+    """POST /xero/data/journals/pivot/comments/bulk/
+
+    Flag many cells at once.
+
+    Reviewing a cube means spotting a dozen figures that look wrong, and
+    writing a considered note on each is not what that moment needs -- the
+    useful action is "these ones, check them". So one shared note and one set
+    of tags are applied across a selection, and the detail is written later on
+    the few that turn out to matter.
+
+    One request, one transaction. The obvious alternative -- the client posting
+    each cell in turn -- is a round trip per cell, so flagging sixty cells
+    would take sixty of them and fail halfway through often enough to matter.
+
+    Every cell still gets its OWN anchor and its own row. This is a bulk write,
+    not a group object: untagging one, commenting properly on another, or
+    actioning a third all behave exactly as they do for a comment written by
+    hand.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        _ensure_table()
+        d = request.data or {}
+        cells = d.get('cells')
+        if not isinstance(cells, list) or not cells:
+            return Response({'error': 'cells must be a non-empty list'},
+                            status=http.HTTP_400_BAD_REQUEST)
+        if len(cells) > MAX_BULK:
+            return Response({'error': 'at most %d cells at a time (got %d)'
+                                      % (MAX_BULK, len(cells))},
+                            status=http.HTTP_400_BAD_REQUEST)
+
+        shared_comment = (d.get('comment') or '').strip()
+        shared_tags = _norm_tags(d.get('tags'))
+        author_key, author_name, verified = _author_identity(request, d.get('author'))
+        status_val = (d.get('status') or 'open').strip()
+
+        saved, skipped, results = 0, [], []
+        with connection.cursor() as c:
+            for i, cell in enumerate(cells):
+                measure = (cell.get('measure') or d.get('measure') or '').strip()
+                row_dims = cell.get('row_dims') or []
+                row_path = cell.get('row_path') or []
+                comment = (cell.get('comment') or shared_comment).strip()
+                if not measure or not row_dims or not row_path:
+                    skipped.append({'index': i, 'why': 'missing measure, row_dims or row_path'})
+                    continue
+                if not comment:
+                    # A bulk flag with no text at all would be invisible on the
+                    # sheet and meaningless in the queue.
+                    skipped.append({'index': i, 'why': 'no comment text'})
+                    continue
+
+                col_dims = cell.get('col_dims') or []
+                col_path = (cell.get('col_path') or '').strip()
+                filters = cell.get('filters') or d.get('filters') or {}
+                tenant = (filters.get('tenant') or '').strip()
+                tags = _norm_tags(cell.get('tags')) or shared_tags
+
+                val = cell.get('cell_value')
+                try:
+                    val = float(val) if val is not None else None
+                except (TypeError, ValueError):
+                    val = None
+
+                key = _cell_key(tenant, measure, row_dims, row_path,
+                                col_dims, col_path, filters)
+                c.execute(
+                    'INSERT INTO app.cube_comments '
+                    '(cell_key, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
+                    ' filters, cell_value, comment, author, author_key, status, tags) '
+                    'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                    'ON CONFLICT (cell_key, author_key) DO UPDATE SET '
+                    '  comment = EXCLUDED.comment, cell_value = EXCLUDED.cell_value, '
+                    '  tags = EXCLUDED.tags, status = EXCLUDED.status, updated_at = now() '
+                    'RETURNING id',
+                    [key, tenant, measure, list(row_dims), list(row_path), list(col_dims),
+                     col_path, json.dumps(filters), val, comment,
+                     author_name, author_key, status_val, tags],
+                )
+                results.append({'id': c.fetchone()[0], 'cell_key': key})
+                saved += 1
+
+        return Response({
+            'saved': saved,
+            'skipped': skipped,
+            'author': author_name,
+            'author_verified': verified,
+            'tags': shared_tags,
+            'results': results,
+        })
