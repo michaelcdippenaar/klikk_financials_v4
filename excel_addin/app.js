@@ -1195,6 +1195,31 @@
   // Comment sync walks the pivot's value cells to learn what each one means.
   // Three proxy loads per cell, flushed every PIVOT_SYNC_CHUNK cells so no
   // single round trip carries thousands of them.
+  /* PivotTable cell resolution is DISABLED.
+   *
+   * Office.js PivotLayout.getPivotItems traps Excel for Mac -- a native
+   * EXC_BAD_INSTRUCTION, not a catchable JS error -- when handed a cell it
+   * does not consider a leaf data cell. Bounds-checking against
+   * getDataBodyRange() is not sufficient: re-laying out a pivot (moving a
+   * field to the header, collapsing a level) creates SUBTOTAL rows that sit
+   * geometrically inside the body but resolve to no single item. Walking the
+   * body then hits them and Excel dies.
+   *
+   * I have guessed at this three times and been wrong each time, so the API
+   * is now off entirely rather than fenced again. Cube sheets are unaffected
+   * -- they never touch it; their intersections are computed in memory from
+   * the cube we already hold, which is why cube comments work and pivot
+   * comments do not.
+   *
+   * The durable fix is to reconstruct pivot row/column paths by READING THE
+   * RENDERED LABEL CELLS, the way the cube path already does, and never ask
+   * Excel what a cell means. Until that is written and proven, this stays
+   * false. */
+  var PIVOT_RESOLUTION_ENABLED = false;
+  var PIVOT_OFF_MSG = 'PivotTable comments are switched off: the Excel API that maps '
+    + 'a pivot cell to its meaning crashes Excel for Mac on subtotal rows. Use a '
+    + 'cube sheet for commenting — it resolves cells in memory and is unaffected.';
+
   var PIVOT_CELL_CEILING = 5000;
   var PIVOT_SYNC_CHUNK = 100;
 
@@ -1305,6 +1330,7 @@
   }
 
   async function resolvePivotSelection(b) {
+    if (!PIVOT_RESOLUTION_ENABLED) return null;
     if (!Office.context.requirements.isSetSupported('ExcelApi', '1.12')) return null;
     var out = null;
     await Excel.run(async function (ctx) {
@@ -1649,6 +1675,8 @@
         sent++;
       }
     } else {
+      if (!PIVOT_RESOLUTION_ENABLED) throw new Error(PIVOT_OFF_MSG);
+      if (!PIVOT_RESOLUTION_ENABLED) throw new Error(PIVOT_OFF_MSG);
       if (!Office.context.requirements.isSetSupported('ExcelApi', '1.12')) {
         throw new Error('Needs ExcelApi 1.12 to locate PivotTable cells by meaning.');
       }
@@ -1760,6 +1788,7 @@
       // A PivotTable's cells only reveal their meaning one at a time, so walk
       // the data body and resolve as we go. Bounded, and it reports what it
       // could not reach rather than pretending it covered everything.
+      if (!PIVOT_RESOLUTION_ENABLED) throw new Error(PIVOT_OFF_MSG);
       if (!Office.context.requirements.isSetSupported('ExcelApi', '1.12')) {
         throw new Error('Needs ExcelApi 1.12 to locate PivotTable cells by meaning.');
       }
