@@ -262,3 +262,23 @@ input:focus, select:focus {
 }
 .chip__x:hover { color: var(--danger); }
 .well--src .chip { background: var(--raise); color: var(--ink-mute); }
+
+.chip { padding: 3px 4px 3px 7px; touch-action: none; }
+.chip__t { pointer-events: none; }
+.chip__acts { display: inline-flex; gap: 1px; }
+.chip__b {
+  min-width: 17px;
+  height: 17px;
+  padding: 0 3px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--ink-faint);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.chip__b:hover { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); }
+.chip__b[data-act="remove"]:hover { background: var(--danger); border-color: var(--danger); color: #fff; }

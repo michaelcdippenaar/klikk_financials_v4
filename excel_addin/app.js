@@ -701,64 +701,102 @@
     wells[zone].forEach(function (key, idx) {
       var chip = document.createElement('span');
       chip.className = 'chip';
-      chip.draggable = true;
       chip.dataset.key = key;
       chip.dataset.zone = zone;
       chip.dataset.idx = idx;
-      chip.appendChild(document.createTextNode(dimLabel(key)));
-      if (zone !== 'avail') {
-        var x = document.createElement('span');
-        x.className = 'chip__x';
-        x.textContent = '\u00d7';
-        x.title = 'Remove';
-        x.addEventListener('click', function (e) {
-          e.stopPropagation();
-          moveField(key, zone, 'avail', -1);
-        });
-        chip.appendChild(x);
+
+      var txt = document.createElement('span');
+      txt.className = 'chip__t';
+      txt.textContent = dimLabel(key);
+      chip.appendChild(txt);
+
+      var acts = document.createElement('span');
+      acts.className = 'chip__acts';
+      function btn(act, glyph, title) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'chip__b';
+        b.dataset.act = act;
+        b.textContent = glyph;
+        b.title = title;
+        return b;
       }
+      if (zone === 'avail') {
+        acts.appendChild(btn('toRows', 'R', 'Move to Rows'));
+        acts.appendChild(btn('toCols', 'C', 'Move to Columns'));
+      } else {
+        acts.appendChild(btn('left', '\u2039', 'Move earlier'));
+        acts.appendChild(btn('right', '\u203a', 'Move later'));
+        acts.appendChild(btn('remove', '\u00d7', 'Remove'));
+      }
+      chip.appendChild(acts);
       host.appendChild(chip);
     });
   }
 
-  var dragging = null;
+  function reorder(zone, from, to) {
+    if (to < 0 || to >= wells[zone].length) return;
+    var arr = wells[zone];
+    var k = arr.splice(from, 1)[0];
+    arr.splice(to, 0, k);
+    reflowWells();
+    if (el.autoBuild.checked && wells.rows.length) run(buildCube);
+  }
+
+  /* Interaction deliberately does NOT use HTML5 drag-and-drop: dragstart/drop
+     do not fire reliably in Excel's macOS webview, which left the wells looking
+     interactive but inert. Every action has a button, and dragging is done with
+     pointer events, which the webview does support. */
+  var ptr = null;
+  var wellsWired = false;
 
   function wireWells() {
-    [el.wellAvail, el.wellRows, el.wellCols].forEach(function (host) {
-      if (host.dataset.wired) return;
-      host.dataset.wired = '1';
+    if (wellsWired) return;
+    wellsWired = true;
 
-      host.addEventListener('dragstart', function (e) {
-        var chip = e.target.closest ? e.target.closest('.chip') : null;
+    [el.wellAvail, el.wellRows, el.wellCols].forEach(function (host) {
+      host.addEventListener('click', function (e) {
+        var b = e.target.closest && e.target.closest('.chip__b');
+        if (!b) return;
+        var chip = b.closest('.chip');
+        var key = chip.dataset.key, zone = chip.dataset.zone;
+        var idx = parseInt(chip.dataset.idx, 10);
+        var act = b.dataset.act;
+        if (act === 'toRows') moveField(key, zone, 'rows', -1);
+        else if (act === 'toCols') moveField(key, zone, 'cols', -1);
+        else if (act === 'remove') moveField(key, zone, 'avail', -1);
+        else if (act === 'left') reorder(zone, idx, idx - 1);
+        else if (act === 'right') reorder(zone, idx, idx + 1);
+      });
+
+      host.addEventListener('pointerdown', function (e) {
+        if (e.target.closest && e.target.closest('.chip__b')) return;
+        var chip = e.target.closest && e.target.closest('.chip');
         if (!chip) return;
-        dragging = { key: chip.dataset.key, from: chip.dataset.zone };
+        ptr = { key: chip.dataset.key, from: chip.dataset.zone, moved: false };
         chip.classList.add('is-drag');
-        try { e.dataTransfer.setData('text/plain', chip.dataset.key); } catch (err) {}
-        e.dataTransfer.effectAllowed = 'move';
       });
-      host.addEventListener('dragend', function () {
-        dragging = null;
-        Array.prototype.forEach.call(document.querySelectorAll('.chip.is-drag'),
-          function (c) { c.classList.remove('is-drag'); });
-      });
-      host.addEventListener('dragover', function (e) {
-        if (!dragging) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = 'move';
-        host.classList.add('is-over');
-      });
-      host.addEventListener('dragleave', function () { host.classList.remove('is-over'); });
-      host.addEventListener('drop', function (e) {
-        e.preventDefault();
-        host.classList.remove('is-over');
-        if (!dragging) return;
-        var zone = host.dataset.zone;
-        // drop position = before the chip we landed on, so order is draggable
-        var over = e.target.closest ? e.target.closest('.chip') : null;
-        var at = over && over.dataset.zone === zone ? parseInt(over.dataset.idx, 10) : -1;
-        moveField(dragging.key, dragging.from, zone, at);
-        dragging = null;
-      });
+    });
+
+    document.addEventListener('pointermove', function () {
+      if (ptr) ptr.moved = true;
+    });
+
+    document.addEventListener('pointerup', function (e) {
+      if (!ptr) {
+        return;
+      }
+      var over = document.elementFromPoint(e.clientX, e.clientY);
+      var well = over && over.closest ? over.closest('.well') : null;
+      if (well && ptr.moved) {
+        var chip = over.closest('.chip');
+        var at = (chip && chip.dataset.zone === well.dataset.zone)
+          ? parseInt(chip.dataset.idx, 10) : -1;
+        moveField(ptr.key, ptr.from, well.dataset.zone, at);
+      }
+      Array.prototype.forEach.call(document.querySelectorAll('.chip.is-drag'),
+        function (c) { c.classList.remove('is-drag'); });
+      ptr = null;
     });
   }
 
