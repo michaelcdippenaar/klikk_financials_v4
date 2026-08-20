@@ -103,15 +103,60 @@ class TM1ExecuteView(APIView):
         return Response(result, status=http_status)
 
 
+def _paw_url():
+    """Public URL of the Planning Analytics Workspace UI, or '' if disabled.
+
+    Host/port come from settings (PAW_HOST / PAW_PORT); if PAW_HOST is unset we
+    fall back to the host of the configured TM1 base_url so the two can never
+    drift apart.
+    """
+    from django.conf import settings
+    from urllib.parse import urlparse
+
+    if not getattr(settings, 'AI_AGENT_PAW_ENABLED', True):
+        return ''
+
+    host = getattr(settings, 'AI_AGENT_PAW_HOST', '') or ''
+    if not host:
+        base_url, _, _ = _get_server_config_safe()
+        if base_url:
+            host = urlparse(base_url).hostname or ''
+    if not host:
+        return ''
+
+    port = getattr(settings, 'AI_AGENT_PAW_PORT', 8080)
+    return f'http://{host}:{port}/'
+
+
+def _get_server_config_safe():
+    cfg = TM1ServerConfig.get_active()
+    if cfg:
+        return cfg.base_url, cfg.username, cfg.password
+    return None, None, None
+
+
 class TM1TestConnectionView(APIView):
     permission_classes = [IsAuthenticated]
 
+    def get(self, request):
+        """Health probe for the dashboard — tests the stored credentials."""
+        user_tm1, user_pw = _get_user_tm1_creds(request)
+        result = test_connection(user=user_tm1, password=user_pw)
+        http_status = status.HTTP_200_OK if result['success'] else status.HTTP_502_BAD_GATEWAY
+        return Response(result, status=http_status)
+
     def post(self, request):
         user_tm1, user_pw = _get_user_tm1_creds(request)
+        # The config GET masks the stored password as '********'; the UI echoes
+        # it back unchanged. Treat the mask as "use the stored password", not a
+        # literal password (the Save path already does this).
+        password = request.data.get('password')
+        if password == '********':
+            password = None
         result = test_connection(
             base_url=request.data.get('base_url'),
             user=request.data.get('user') or user_tm1,
-            password=request.data.get('password') or user_pw,
+            password=password or user_pw,
         )
         http_status = status.HTTP_200_OK if result['success'] else status.HTTP_502_BAD_GATEWAY
         return Response(result, status=http_status)
@@ -124,12 +169,15 @@ class TM1ConfigView(APIView):
     def get(self, request):
         cfg = TM1ServerConfig.get_active()
         if not cfg:
-            return Response({'base_url': '', 'username': '', 'password': ''})
+            return Response({'base_url': '', 'username': '', 'password': '', 'paw_url': _paw_url()})
         return Response({
             'id': cfg.id,
             'base_url': cfg.base_url,
             'username': cfg.username,
             'password': '********' if cfg.password else '',
+            # Planning Analytics Workspace UI (LAN-only) — used by the console
+            # to offer a direct "open PA" link.
+            'paw_url': _paw_url(),
         })
 
     def post(self, request):
