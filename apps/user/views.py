@@ -170,12 +170,20 @@ class LoginView(TokenObtainPairView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Try to find user by username or email
+        # Try to find user by username or email.
+        # A service account may legitimately carry a person's email (the excel-addin
+        # user was created with mc@tremly.com), so an email lookup can match more than
+        # one row. get() raised MultipleObjectsReturned there and 500'd the whole login
+        # for everyone. Prefer an exact username match, then the oldest matching row.
         try:
             if '@' in username_or_email:
-                user = User.objects.get(email=username_or_email)
+                user = (User.objects.filter(username=username_or_email).first()
+                        or User.objects.filter(email=username_or_email).order_by('pk').first())
             else:
-                user = User.objects.get(username=username_or_email)
+                user = (User.objects.filter(username=username_or_email).order_by('pk').first()
+                        or User.objects.filter(email=username_or_email).order_by('pk').first())
+            if user is None:
+                raise User.DoesNotExist
         except User.DoesNotExist:
             return Response(
                 {"error": "Invalid credentials"},
