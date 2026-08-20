@@ -13,6 +13,9 @@
   var PAGE_SIZE = 1000;
   var WRITE_CHUNK = 2000;
   var SETTING_PREFIX = 'klikkJournalQuery::';
+  // Cube/pivot cell comments — GET lists them, POST upserts one, and
+  // <id>/status/ marks one actioned. Server route: journals/pivot/comments/.
+  var COMMENT_API = '/xero/data/journals/pivot/comments/';
 
   // Column order for the sheet. `fmt` drives the Excel number format.
   var COLUMNS = [
