@@ -382,21 +382,6 @@ input:focus, select:focus {
    starts on a trackpad. */
 .well, .chip { touch-action: none; }
 
-.picker {
-  border: 1px solid var(--line, #d8d8d8);
-  border-radius: 6px;
-  padding: 8px;
-  margin: 6px 0 10px;
-  background: var(--panel, #fafafa);
-}
-.picker__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.picker__acts { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
-.picker__n { font-size: 11px; opacity: .7; margin-left: auto; }
-.picker__list { max-height: 190px; overflow-y: auto; }
-.picker input[type="search"] { width: 100%; box-sizing: border-box; margin-top: 6px; }
-.pick { display: flex; align-items: center; gap: 6px; padding: 2px 0; font-size: 12px; }
-.pick__t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pick__n { opacity: .55; font-variant-numeric: tabular-nums; }
 
 /* Empty wells say what they are for. Without this an empty drop zone is an
    unlabelled blank strip and reads as a missing feature. */
@@ -409,3 +394,70 @@ input:focus, select:focus {
   padding: 3px 2px;
 }
 .well--over .well__ph { opacity: .95; font-style: normal; }
+
+/* ── subset editor (Planning-Analytics style two-pane picker) ───── */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  background: rgba(0, 0, 0, .38);
+}
+.modal[hidden] { display: none; }
+
+.modal__card {
+  width: 100%;
+  max-width: 560px;
+  max-height: 100%;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg, #fff);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, .3);
+}
+.modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.modal__x {
+  border: 0;
+  background: none;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+  color: inherit;
+}
+
+/* Two panes with the transfer buttons between them. The task pane can be
+   narrow, so the columns flex and the buttons keep a fixed, thumb-sized
+   column rather than being squeezed out. */
+.xfer { display: flex; align-items: stretch; gap: 6px; margin-top: 8px; }
+.xfer__col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; }
+.xfer__lbl { font-size: 11px; opacity: .75; margin-bottom: 3px; }
+.xfer__col select {
+  width: 100%;
+  box-sizing: border-box;
+  flex: 1;
+  min-height: 190px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.xfer__btns {
+  flex: 0 0 34px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+}
+.xfer__btns .btn { width: 100%; padding: 4px 0; font-size: 14px; line-height: 1; }
+
+.modal__card input[type="search"] { width: 100%; box-sizing: border-box; }

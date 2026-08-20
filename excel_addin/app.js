@@ -130,8 +130,10 @@
       'queryPanel', 'refreshPanel', 'commentPanel', 'settingsPanel',
       'suppress', 'btnCube', 'cubeMsg', 'btnDrill', 'btnReload', 'wellAvail', 'wellRows',
       'wellCols', 'wellFilt', 'autoBuild', 'outline',
-      'picker', 'pickerTitle', 'pickerClose', 'pickerSearch', 'pickerAll',
-      'pickerNone', 'pickerCount', 'pickerList',
+      'pickerModal', 'pickerTitle', 'pickerClose', 'pickerSearch',
+      'pickerAvail', 'pickerSel', 'pickerAvailCount', 'pickerSelCount',
+      'btnPickAdd', 'btnPickAddAll', 'btnPickRemove', 'btnPickRemoveAll',
+      'pickerApply', 'pickerCancel', 'pickerMsg',
       'commentPanel', 'commentAuthor', 'btnSyncComments', 'commentMsg',
       'btnFullPivot', 'selNone', 'selHas', 'selPath', 'selVal', 'selComment',
       'btnSaveComment', 'btnDeleteComment', 'selBox', 'markCells', 'btnPushComments',
@@ -1098,19 +1100,34 @@
     if (el.autoBuild.checked && wells.rows.length) run(buildCube);
   }
 
-  /* Value picker for one filtered dimension.
+  /* Subset editor for one filtered dimension.
 
-     Members come from the server under the CURRENT journal filters, so the
-     list is what is really in the data rather than a catalogue of everything
-     that ever existed. Cached per dimension+query for the session. */
+     Two panes, the way Planning Analytics does it: what exists on the left,
+     what you are keeping on the right. Members come from the server under the
+     CURRENT journal filters, so the list is what is really in the data rather
+     than a catalogue of everything that ever existed.
+
+     Edits are held in `working` and only committed on Apply. A filter that
+     rebuilt the sheet on every click would make assembling a five-value subset
+     five rebuilds of a cube that can take seconds.
+
+     Native <select multiple> rather than a custom list: ctrl/shift range
+     selection, type-to-jump and keyboard navigation come from the host and
+     work in Excel's webview, which a hand-rolled list would have to
+     reimplement and get wrong. */
   var pickerKey = null;
+  var working = [];
 
   async function openPicker(key) {
     pickerKey = key;
+    working = (filterVals[key] || []).slice();
     el.pickerTitle.textContent = dimLabel(key);
     el.pickerSearch.value = '';
-    el.picker.hidden = false;
-    el.pickerList.innerHTML = '<p class="hint">Loading values…</p>';
+    el.pickerMsg.textContent = '';
+    el.pickerModal.hidden = false;
+    el.pickerAvail.innerHTML = '';
+    el.pickerSel.innerHTML = '';
+    el.pickerAvailCount.textContent = '(loading…)';
 
     var qy = readQuery();
     var ck = key + '::' + JSON.stringify(toParams(qy));
@@ -1121,59 +1138,74 @@
       }
       renderPicker();
     } catch (e) {
-      el.pickerList.innerHTML = '<p class="msg msg--err">' + esc(e.message) + '</p>';
+      el.pickerAvailCount.textContent = '';
+      el.pickerMsg.textContent = e.message;
+      el.pickerMsg.className = 'msg msg--err';
     }
   }
 
   function pickerData() {
-    var qy = readQuery();
-    return memberCache[pickerKey + '::' + JSON.stringify(toParams(qy))];
+    return memberCache[pickerKey + '::' + JSON.stringify(toParams(readQuery()))];
+  }
+
+  function fillList(sel, items) {
+    sel.innerHTML = '';
+    var frag = document.createDocumentFragment();
+    items.forEach(function (m) {
+      var o = document.createElement('option');
+      o.value = m.value;
+      o.textContent = m.lines != null
+        ? m.value + '  (' + fmtNum(m.lines) + ')'
+        : m.value;
+      frag.appendChild(o);
+    });
+    sel.appendChild(frag);
   }
 
   function renderPicker() {
     var data = pickerData();
     if (!data) return;
     var term = (el.pickerSearch.value || '').toLowerCase();
-    var chosen = filterVals[pickerKey] || [];
-    var frag = document.createDocumentFragment();
-    var shown = 0;
+    var chosen = {};
+    working.forEach(function (v) { chosen[v] = true; });
 
-    data.members.forEach(function (m) {
-      if (term && m.value.toLowerCase().indexOf(term) === -1) return;
-      shown++;
-      var row = document.createElement('label');
-      row.className = 'pick';
-      var cb = document.createElement('input');
-      cb.type = 'checkbox';
-      cb.checked = chosen.indexOf(m.value) !== -1;
-      cb.dataset.value = m.value;
-      var t = document.createElement('span');
-      t.className = 'pick__t';
-      t.textContent = m.value;
-      var n = document.createElement('span');
-      n.className = 'pick__n';
-      n.textContent = fmtNum(m.lines);
-      row.appendChild(cb); row.appendChild(t); row.appendChild(n);
-      frag.appendChild(row);
+    var avail = data.members.filter(function (m) {
+      return !chosen[m.value] && (!term || m.value.toLowerCase().indexOf(term) !== -1);
     });
+    // Right-hand pane keeps the order values were added in, and shows line
+    // counts where we know them -- a value can be in the subset without being
+    // in the current member list if the filters moved under it.
+    var byVal = {};
+    data.members.forEach(function (m) { byVal[m.value] = m; });
+    var picked = working.map(function (v) { return byVal[v] || { value: v, lines: null }; });
 
-    el.pickerList.innerHTML = '';
-    if (!shown) {
-      el.pickerList.innerHTML = '<p class="hint">Nothing matches.</p>';
-    } else {
-      el.pickerList.appendChild(frag);
-    }
-    el.pickerCount.textContent = chosen.length
-      ? fmtNum(chosen.length) + ' of ' + fmtNum(data.count) + ' selected'
-      : 'all ' + fmtNum(data.count) + (data.truncated ? '+ (list capped)' : '');
+    fillList(el.pickerAvail, avail);
+    fillList(el.pickerSel, picked);
+    el.pickerAvailCount.textContent = '(' + fmtNum(avail.length)
+      + (term ? ' shown' : '') + (data.truncated ? ', list capped' : '') + ')';
+    el.pickerSelCount.textContent = working.length
+      ? '(' + fmtNum(working.length) + ')'
+      : '(none — no filter)';
   }
 
-  function setPicked(key, values) {
-    filterVals[key] = values;
-    reflowWells();
+  function chosenIn(sel) {
+    return Array.prototype.filter.call(sel.options, function (o) { return o.selected; })
+      .map(function (o) { return o.value; });
+  }
+
+  function addValues(vals) {
+    vals.forEach(function (v) { if (working.indexOf(v) === -1) working.push(v); });
     renderPicker();
-    rememberCubeSpec();
-    if (el.autoBuild.checked && wells.rows.length) run(buildCube);
+  }
+
+  function removeValues(vals) {
+    working = working.filter(function (v) { return vals.indexOf(v) === -1; });
+    renderPicker();
+  }
+
+  function closePicker() {
+    el.pickerModal.hidden = true;
+    pickerKey = null;
   }
 
   var pickerWired = false;
@@ -1181,36 +1213,40 @@
   function wirePicker() {
     if (pickerWired) return;
     pickerWired = true;
-    el.pickerClose.addEventListener('click', function () {
-      el.picker.hidden = true;
-      pickerKey = null;
-    });
+
     el.pickerSearch.addEventListener('input', renderPicker);
+    el.btnPickAdd.addEventListener('click', function () { addValues(chosenIn(el.pickerAvail)); });
+    el.btnPickRemove.addEventListener('click', function () { removeValues(chosenIn(el.pickerSel)); });
 
-    el.pickerList.addEventListener('change', function (e) {
-      var cb = e.target;
-      if (!cb || cb.type !== 'checkbox' || !pickerKey) return;
-      var cur = (filterVals[pickerKey] || []).slice();
-      var v = cb.dataset.value;
-      var i = cur.indexOf(v);
-      if (cb.checked && i === -1) cur.push(v);
-      if (!cb.checked && i !== -1) cur.splice(i, 1);
-      setPicked(pickerKey, cur);
+    el.btnPickAddAll.addEventListener('click', function () {
+      // "All" means all VISIBLE: with a search term active that is the useful
+      // meaning, and the only one that matches what is on screen.
+      addValues(Array.prototype.map.call(el.pickerAvail.options, function (o) { return o.value; }));
+    });
+    el.btnPickRemoveAll.addEventListener('click', function () { working = []; renderPicker(); });
+
+    el.pickerAvail.addEventListener('dblclick', function () { addValues(chosenIn(el.pickerAvail)); });
+    el.pickerSel.addEventListener('dblclick', function () { removeValues(chosenIn(el.pickerSel)); });
+
+    el.pickerApply.addEventListener('click', function () {
+      if (!pickerKey) return closePicker();
+      var key = pickerKey;
+      filterVals[key] = working.slice();
+      closePicker();
+      reflowWells();
+      rememberCubeSpec();
+      if (el.autoBuild.checked && wells.rows.length) run(buildCube);
     });
 
-    el.pickerAll.addEventListener('click', function () {
-      var data = pickerData();
-      if (!data || !pickerKey) return;
-      var term = (el.pickerSearch.value || '').toLowerCase();
-      // "All" means all VISIBLE — with a search term active, that is the
-      // useful meaning and the only one that matches what is on screen.
-      setPicked(pickerKey, data.members
-        .filter(function (m) { return !term || m.value.toLowerCase().indexOf(term) !== -1; })
-        .map(function (m) { return m.value; }));
-    });
+    el.pickerCancel.addEventListener('click', closePicker);
+    el.pickerClose.addEventListener('click', closePicker);
 
-    el.pickerNone.addEventListener('click', function () {
-      if (pickerKey) setPicked(pickerKey, []);
+    // Clicking the backdrop cancels; clicking the card must not.
+    el.pickerModal.addEventListener('click', function (e) {
+      if (e.target === el.pickerModal) closePicker();
+    });
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && !el.pickerModal.hidden) closePicker();
     });
   }
 

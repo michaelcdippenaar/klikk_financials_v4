@@ -183,21 +183,46 @@
       <label>Filters <span class="lbl-note">drop a field, then pick values</span></label>
       <div class="well well--filt" id="wellFilt" data-zone="filt"></div>
 
-      <!-- Value picker for one filtered dimension. Inline rather than a
-           dialog: Office dialogs are a separate runtime, and this needs the
-           pane's own state. -->
-      <div class="picker" id="picker" hidden>
-        <div class="picker__head">
-          <strong id="pickerTitle">Values</strong>
-          <button class="btn btn--tiny" id="pickerClose" type="button">Done</button>
+      <!-- Subset editor for one filtered dimension. Two panes, the way
+           Planning Analytics does it: everything available on the left, what
+           you are keeping on the right. Native multi-selects rather than a
+           custom list, so ctrl/shift multi-select, type-to-jump and keyboard
+           navigation are the host's, not a reimplementation of them. -->
+      <div class="modal" id="pickerModal" hidden>
+        <div class="modal__card">
+          <div class="modal__head">
+            <strong>Filter: <span id="pickerTitle">Values</span></strong>
+            <button class="modal__x" id="pickerClose" type="button" title="Close">&times;</button>
+          </div>
+
+          <input type="search" id="pickerSearch" placeholder="Find a value…">
+
+          <div class="xfer">
+            <div class="xfer__col">
+              <label class="xfer__lbl">Available <span id="pickerAvailCount"></span></label>
+              <select id="pickerAvail" multiple size="12"></select>
+            </div>
+            <div class="xfer__btns">
+              <button class="btn btn--tiny" id="btnPickAdd" type="button" title="Add selected">&rsaquo;</button>
+              <button class="btn btn--tiny" id="btnPickAddAll" type="button" title="Add all shown">&raquo;</button>
+              <button class="btn btn--tiny" id="btnPickRemove" type="button" title="Remove selected">&lsaquo;</button>
+              <button class="btn btn--tiny" id="btnPickRemoveAll" type="button" title="Remove all">&laquo;</button>
+            </div>
+            <div class="xfer__col">
+              <label class="xfer__lbl">In the subset <span id="pickerSelCount"></span></label>
+              <select id="pickerSel" multiple size="12"></select>
+            </div>
+          </div>
+
+          <p class="hint">Double-click moves an item. An empty subset means no
+            filter on this field — everything passes through.</p>
+
+          <div class="row">
+            <button class="btn btn--primary" id="pickerApply" type="button">Apply</button>
+            <button class="btn" id="pickerCancel" type="button">Cancel</button>
+          </div>
+          <p class="msg" id="pickerMsg"></p>
         </div>
-        <input type="search" id="pickerSearch" placeholder="Find a value…">
-        <div class="picker__acts">
-          <button class="btn btn--tiny" id="pickerAll" type="button">All</button>
-          <button class="btn btn--tiny" id="pickerNone" type="button">None</button>
-          <span class="picker__n" id="pickerCount"></span>
-        </div>
-        <div class="picker__list" id="pickerList"></div>
       </div>
 
       <div class="wellrow">
