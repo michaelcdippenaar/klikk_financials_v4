@@ -73,6 +73,17 @@ ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS tags text[] NOT NULL DEFA
 -- is the coordinate hash; for a bank transaction it is Investec's uuid (or the
 -- fallback hash when the API omits one). Never a row id that a reload could
 -- reassign, and never a position in a list.
+-- A VERDICT, separate from the note and from the workflow status.
+--
+-- Triaging bank transactions asks a specific question -- does this belong in
+-- the company's books? -- and the answer is a small fixed vocabulary, not
+-- prose. Kept apart from `status` (which tracks whether the item has been
+-- WORKED) and from `tags` (freeform, and freeform fragments on typos:
+-- "business-expense", "business expense", "buisness" are three tags and one
+-- meaning). A field with a vocabulary can be counted, filtered and reported.
+ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS decision text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS cube_comments_decision_idx ON app.cube_comments (decision)
+    WHERE decision <> '';
 ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS subject_type text NOT NULL DEFAULT 'cube_cell';
 ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS subject_key  text NOT NULL DEFAULT '';
 ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS subject_label text NOT NULL DEFAULT '';
@@ -214,7 +225,7 @@ def _author_identity(request, declared):
 
 
 COLS = ('id, cell_key, subject_type, subject_key, subject_label, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
-        'filters, cell_value, comment, author, author_key, status, created_at, updated_at, '
+        'filters, cell_value, comment, author, author_key, status, decision, created_at, updated_at, '
         'tags')
 
 
@@ -243,6 +254,41 @@ def _cube_label(row_path, col_path):
     if col_path and col_path != 'Total':
         bits += ' \u00d7 ' + str(col_path)
     return bits[:300]
+
+
+
+DECISIONS = {
+    'business_expense': 'A company cost, and it belongs in the books',
+    'personal': 'Not the company\'s — settle to the loan account',
+    'duplicate': 'Already captured elsewhere',
+    'needs_info': 'Cannot be decided without something else',
+    'no_action': 'Looked at, nothing to do',
+}
+
+
+def _norm_decision(raw):
+    """Accept the vocabulary, and the obvious spellings of it.
+
+    An agent or a person will write "business expense" or "business-expense";
+    refusing those would push people back to freeform tags, which is the thing
+    this field exists to replace.
+    """
+    d = str(raw or '').strip().lower().replace('-', '_').replace(' ', '_')
+    if not d:
+        return ''
+    if d in DECISIONS:
+        return d
+    aliases = {
+        'business': 'business_expense', 'company': 'business_expense',
+        'expense': 'business_expense', 'klikk': 'business_expense',
+        'private': 'personal', 'own': 'personal', 'loan_account': 'personal',
+        'dup': 'duplicate', 'info': 'needs_info', 'unknown': 'needs_info',
+        'none': 'no_action', 'ok': 'no_action',
+    }
+    if d in aliases:
+        return aliases[d]
+    raise ValueError('unknown decision %r — use one of: %s'
+                     % (raw, ', '.join(sorted(DECISIONS))))
 
 
 SUBJECT_KINDS = {
@@ -284,6 +330,7 @@ def _row_to_dict(r):
         'author': d['author'],
         'author_key': d['author_key'],
         'status': d['status'],
+        'decision': d['decision'],
         'tags': list(d['tags'] or []),
         'created_at': d['created_at'].isoformat() if d['created_at'] else None,
         'updated_at': d['updated_at'].isoformat() if d['updated_at'] else None,
@@ -584,7 +631,8 @@ class CommentsView(APIView):
             args.append(st)
 
         for param, col in (('subject_type', 'subject_type'), ('subject_key', 'subject_key'),
-                           ('author', 'author_key'), ('measure', 'measure')):
+                           ('author', 'author_key'), ('measure', 'measure'),
+                           ('decision', 'decision')):
             val = (p.get(param) or '').strip()
             if val:
                 where.append('%s = %%s' % col)
@@ -632,6 +680,11 @@ class CommentsView(APIView):
         comment = (d.get('comment') or '').strip()
         author_key, author_name, verified = _author_identity(request, d.get('author'))
         context = d.get('context') if isinstance(d.get('context'), dict) else {}
+        try:
+            decision = _norm_decision(d.get('decision'))
+        except ValueError as exc:
+            return Response({'error': str(exc), 'decisions': DECISIONS},
+                            status=http.HTTP_400_BAD_REQUEST)
 
         if not comment:
             with connection.cursor() as c:
@@ -653,12 +706,13 @@ class CommentsView(APIView):
                 'INSERT INTO app.cube_comments '
                 '(cell_key, subject_type, subject_key, subject_label, tenant_id, measure, '
                 ' row_dims, row_path, col_dims, col_path, filters, cell_value, '
-                ' comment, author, author_key, status, tags) '
-                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                ' comment, author, author_key, status, decision, tags) '
+                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
                 'ON CONFLICT (subject_type, subject_key, author_key) DO UPDATE SET '
                 '  comment = EXCLUDED.comment, subject_label = EXCLUDED.subject_label, '
                 '  tags = EXCLUDED.tags, cell_value = EXCLUDED.cell_value, '
-                '  filters = EXCLUDED.filters, status = EXCLUDED.status, updated_at = now() '
+                '  filters = EXCLUDED.filters, status = EXCLUDED.status, '
+                '  decision = EXCLUDED.decision, updated_at = now() '
                 'RETURNING ' + COLS,
                 [
                     # cell_key stays UNIQUE-shaped for the legacy column; for a
@@ -668,7 +722,7 @@ class CommentsView(APIView):
                     (context.get('tenant') or '').strip(), (d.get('measure') or '').strip(),
                     [], [], [], '', json.dumps(context), val,
                     comment, author_name, author_key,
-                    (d.get('status') or 'open').strip(), _norm_tags(d.get('tags')),
+                    (d.get('status') or 'open').strip(), decision, _norm_tags(d.get('tags')),
                 ],
             )
             row = c.fetchone()
