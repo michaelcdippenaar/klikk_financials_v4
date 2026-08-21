@@ -6,6 +6,8 @@ import uuid
 
 from django.conf import settings
 from django.http import HttpResponseNotAllowed
+from django.utils.decorators import method_decorator
+from django.views.decorators.csrf import csrf_exempt
 from strawberry.django.views import GraphQLView
 
 from .auth import (
@@ -18,6 +20,7 @@ from .errors import graphql_error_response
 logger = logging.getLogger(__name__)
 
 
+@method_decorator(csrf_exempt, name="dispatch")
 class AuthenticatedGraphQLView(GraphQLView):
     """JWT-only GraphQL transport for browser access.
 
@@ -72,18 +75,62 @@ class AuthenticatedGraphQLView(GraphQLView):
                 'GraphQL request is too large.', 'VALIDATION_ERROR', 413, correlation_id,
             )
 
-        operation_name = None
+        if request.content_type != "application/json":
+            return graphql_error_response(
+                "Content-Type must be application/json.",
+                "VALIDATION_ERROR",
+                400,
+                correlation_id,
+            )
         try:
-            payload = json.loads(request.body or b'{}')
-            candidate = payload.get('operationName') if isinstance(payload, dict) else None
-            if (
-                isinstance(candidate, str)
-                and len(candidate) <= 128
-                and re.fullmatch(r'[_A-Za-z][_0-9A-Za-z]*', candidate)
-            ):
-                operation_name = candidate
+            payload = json.loads(request.body)
         except (TypeError, ValueError, UnicodeDecodeError):
-            pass
+            return graphql_error_response(
+                "Request body must contain valid JSON.",
+                "VALIDATION_ERROR",
+                400,
+                correlation_id,
+            )
+        if not isinstance(payload, dict):
+            return graphql_error_response(
+                "GraphQL request body must be a JSON object.",
+                "VALIDATION_ERROR",
+                400,
+                correlation_id,
+            )
+        query = payload.get("query")
+        variables = payload.get("variables")
+        extensions = payload.get("extensions")
+        if not isinstance(query, str) or not query.strip():
+            return graphql_error_response(
+                "GraphQL query must be a non-empty string.",
+                "VALIDATION_ERROR",
+                400,
+                correlation_id,
+            )
+        if variables is not None and not isinstance(variables, dict):
+            return graphql_error_response(
+                "GraphQL variables must be an object or null.",
+                "VALIDATION_ERROR",
+                400,
+                correlation_id,
+            )
+        if extensions is not None and not isinstance(extensions, dict):
+            return graphql_error_response(
+                "GraphQL extensions must be an object or null.",
+                "VALIDATION_ERROR",
+                400,
+                correlation_id,
+            )
+
+        operation_name = None
+        candidate = payload.get("operationName")
+        if (
+            isinstance(candidate, str)
+            and len(candidate) <= 128
+            and re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*", candidate)
+        ):
+            operation_name = candidate
 
         started = time.monotonic()
         response = super().dispatch(request, *args, **kwargs)
