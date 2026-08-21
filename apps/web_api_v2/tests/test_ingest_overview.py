@@ -9,6 +9,8 @@ from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.web_api_v2.models import (
     IngestProcessRun,
+    IngestProcessAuditEvent,
+    IngestProcessRunPeriod,
     IngestSourceJobDefinition,
     UserEntityCapability,
     UserEntityMembership,
@@ -117,7 +119,7 @@ class IngestOverviewTests(TestCase):
     @patch('apps.web_api_v2.queries.ingest_overview.has_tenant_credentials', return_value=True)
     @patch('apps.web_api_v2.queries.ingest_overview.prerequisite_status', return_value=[])
     def test_no_period_data_is_distinct_from_not_run(self, prerequisites, credentials):
-        IngestProcessRun.objects.create(
+        run = IngestProcessRun.objects.create(
             entity=self.entity,
             actor=self.user,
             process_key='metadata',
@@ -128,6 +130,7 @@ class IngestOverviewTests(TestCase):
             started_at=timezone.now(),
             finished_at=timezone.now(),
         )
+        IngestProcessRunPeriod.objects.create(run=run, period='2026-06')
         overview = self._overview(self._query(periods=['2026-07']))
         metadata = next(item for item in overview['sourceJobDefinitions'] if item['key'] == 'metadata')
         self.assertEqual(metadata['periodRunSummaries'][0]['state'], 'NO_PERIOD_DATA')
@@ -161,7 +164,7 @@ class IngestOverviewTests(TestCase):
     @patch('apps.web_api_v2.queries.ingest_overview.prerequisite_status', return_value=[])
     def test_completion_reaches_100_only_when_all_required_jobs_validate(self, prerequisites, credentials):
         for definition in IngestSourceJobDefinition.objects.filter(entity=self.entity, required=True):
-            IngestProcessRun.objects.create(
+            run = IngestProcessRun.objects.create(
                 entity=self.entity,
                 actor=self.user,
                 process_key=definition.key,
@@ -172,6 +175,7 @@ class IngestOverviewTests(TestCase):
                 started_at=timezone.now(),
                 finished_at=timezone.now(),
             )
+            IngestProcessRunPeriod.objects.create(run=run, period='2026-07')
         overview = self._overview(self._query())
         self.assertEqual(overview['completionPercent'], 100)
         self.assertEqual(overview['stageState'], 'COMPLETE')
@@ -183,3 +187,74 @@ class IngestOverviewTests(TestCase):
         overview = self._overview(self._query())
         self.assertLess(overview['completionPercent'], 100)
         self.assertEqual(overview['stageState'], 'ATTENTION_REQUIRED')
+    @patch("apps.web_api_v2.queries.ingest_overview.has_tenant_credentials", return_value=True)
+    @patch("apps.web_api_v2.queries.ingest_overview.prerequisite_status", return_value=[])
+    @patch("apps.web_api_v2.schema.logger")
+    def test_generic_projection_redacts_stored_run_values(
+        self, schema_logger, prerequisites, credentials,
+    ):
+        marker = "SECRET-GENERIC-MARKER"
+        failed = IngestProcessRun.objects.create(
+            entity=self.entity,
+            actor=self.user,
+            process_key="metadata",
+            state=IngestProcessRun.State.FAILED,
+            idempotency_key="generic-redaction-failed",
+            request_fingerprint="f" * 64,
+            periods=["2026-07"],
+            records_summary={"read": 0},
+            output_summary={"token": marker, "raw": marker},
+            error_code=marker,
+            error_message=marker,
+            blocked_reason={"code": marker, "message": marker},
+            started_at=timezone.now(),
+            finished_at=timezone.now(),
+        )
+        IngestProcessRunPeriod.objects.create(run=failed, period="2026-07")
+        IngestProcessAuditEvent.objects.create(
+            run=failed,
+            entity=self.entity,
+            actor=self.user,
+            process_key=failed.process_key,
+            action="completed",
+            result_state=failed.state,
+            correlation_id=failed.correlation_id,
+            safe_metadata={"marker": marker},
+        )
+        response = self._query()
+        body = response.content.decode()
+        self.assertNotIn(marker, body)
+        self.assertNotIn(marker, str(schema_logger.mock_calls))
+        overview = self._overview(response)
+        metadata = next(item for item in overview["sourceJobDefinitions"] if item["key"] == "metadata")
+        summary = metadata["periodRunSummaries"][0]
+        self.assertEqual(summary["outputs"], {"read": 0})
+        self.assertEqual(summary["validation"]["code"], "PROCESS_FAILED")
+        self.assertEqual(summary["validation"]["message"], "The process run did not complete.")
+        self.assertIsNone(summary["blockedReason"])
+        self.assertTrue(response["X-Correlation-ID"])
+
+        failed.delete()
+        blocked = IngestProcessRun.objects.create(
+            entity=self.entity,
+            actor=self.user,
+            process_key="metadata",
+            state=IngestProcessRun.State.BLOCKED,
+            idempotency_key="generic-redaction-blocked",
+            request_fingerprint="b" * 64,
+            periods=["2026-07"],
+            error_code="RUN_LEASE_EXPIRED",
+            error_message=marker,
+            blocked_reason={"code": marker, "message": marker},
+            started_at=timezone.now(),
+            finished_at=timezone.now(),
+        )
+        IngestProcessRunPeriod.objects.create(run=blocked, period="2026-07")
+        response = self._query()
+        self.assertNotIn(marker, response.content.decode())
+        overview = self._overview(response)
+        metadata = next(item for item in overview["sourceJobDefinitions"] if item["key"] == "metadata")
+        summary = metadata["periodRunSummaries"][0]
+        self.assertEqual(summary["validation"]["code"], "RUN_LEASE_EXPIRED")
+        self.assertEqual(summary["blockedReason"]["code"], "RUN_LEASE_EXPIRED")
+        self.assertEqual(summary["blockedReason"]["message"], "The process run stopped before completion.")

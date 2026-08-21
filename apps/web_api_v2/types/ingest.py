@@ -61,6 +61,7 @@ class IngestPeriodRunState(Enum):
 @strawberry.enum
 class IngestValidationState(Enum):
     NOT_RUN = 'NOT_RUN'
+    UNAVAILABLE = 'UNAVAILABLE'
     PASSED = 'PASSED'
     FAILED = 'FAILED'
 

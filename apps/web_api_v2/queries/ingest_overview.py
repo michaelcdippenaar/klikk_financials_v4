@@ -34,6 +34,14 @@ RUN_STATE_MAP = {
     IngestProcessRun.State.CANCELLED: IngestPeriodRunState.CANCELLED,
     IngestProcessRun.State.BLOCKED: IngestPeriodRunState.BLOCKED,
 }
+SAFE_RUN_MESSAGES = {
+    "PROCESS_FAILED": "The process run did not complete.",
+    "PROCESS_BLOCKED": "The process run is blocked by a prerequisite.",
+    "RUN_LEASE_EXPIRED": "The process run stopped before completion.",
+    "XERO_REAUTHORIZATION_REQUIRED": "The Xero connection must be restored.",
+    "XERO_DAILY_LIMIT_REACHED": "The Xero daily limit has been reached.",
+    "DURABLE_WORKER_REQUIRED": "This process requires a durable background worker.",
+}
 
 
 def _iso(value):
@@ -50,23 +58,51 @@ def _connection_state(definition, entity):
     return IngestConnectionState.CONFIGURED
 
 
-def _latest_success(entity, process_key):
+def _latest_success(entity, process_key, period):
     return IngestProcessRun.objects.filter(
         entity=entity,
         process_key=process_key,
         state=IngestProcessRun.State.SUCCEEDED,
-    ).order_by('-finished_at').first()
+        run_periods__period=str(period),
+    ).order_by('-finished_at', '-id').first()
+
+
+def _numeric_value(values, *keys):
+    for key in keys:
+        value = values.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float) and value.is_integer():
+            return int(value)
+    return None
 
 
 def _records(run):
-    values = run.records_summary if run else {}
+    values = run.records_summary if run and isinstance(run.records_summary, dict) else {}
     return IngestRecordsSummary(
-        read=values.get('read') or values.get('records') or values.get('processed'),
-        created=values.get('created'),
-        updated=values.get('updated'),
-        skipped=values.get('skipped'),
-        failed=values.get('failed') or values.get('errors'),
+        read=_numeric_value(values, 'read', 'records', 'processed'),
+        created=_numeric_value(values, 'created'),
+        updated=_numeric_value(values, 'updated'),
+        skipped=_numeric_value(values, 'skipped'),
+        failed=_numeric_value(values, 'failed', 'errors'),
     )
+
+def _safe_error_values(run):
+    if run is None or run.state not in {IngestProcessRun.State.FAILED, IngestProcessRun.State.BLOCKED}:
+        return None, None
+    fallback = "PROCESS_BLOCKED" if run.state == IngestProcessRun.State.BLOCKED else "PROCESS_FAILED"
+    code = run.error_code if run.error_code in SAFE_RUN_MESSAGES else fallback
+    return code, SAFE_RUN_MESSAGES[code]
+
+
+def _safe_outputs(run):
+    if run is None:
+        return {}
+    records = _records(run)
+    fields = ("read", "created", "updated", "skipped", "failed")
+    return {field: getattr(records, field) for field in fields if getattr(records, field) is not None}
 
 
 def _blocked_reason(code, message):
@@ -75,11 +111,16 @@ def _blocked_reason(code, message):
 
 def _summary(definition, entity, period, can_run):
     connection_state = _connection_state(definition, entity)
+    latest_any = IngestProcessRun.objects.filter(
+        entity=entity,
+        process_key=definition.key,
+    ).order_by('-requested_at', '-id').first()
     latest = IngestProcessRun.objects.filter(
         entity=entity,
         process_key=definition.key,
-    ).order_by('-requested_at').first()
-    latest_success = _latest_success(entity, definition.key)
+        run_periods__period=str(period),
+    ).order_by('-requested_at', '-id').first()
+    latest_success = _latest_success(entity, definition.key, period)
     prerequisites = prerequisite_status(entity, definition.key)
     typed_prerequisites = [IngestPrerequisite(**item) for item in prerequisites]
     failed_prerequisite = next((item for item in prerequisites if not item['satisfied']), None)
@@ -87,23 +128,23 @@ def _summary(definition, entity, period, can_run):
 
     if connection_state == IngestConnectionState.NOT_CONFIGURED:
         state = IngestPeriodRunState.NOT_CONFIGURED
-        validation_state = IngestValidationState.NOT_RUN
+        validation_state = IngestValidationState.UNAVAILABLE
         next_action = IngestNextAction.CONFIGURE
         blocked_reason = _blocked_reason('NOT_CONFIGURED', 'This source is not configured.')
     elif connection_state == IngestConnectionState.TEMPORARILY_UNAVAILABLE:
         state = IngestPeriodRunState.TEMPORARILY_UNAVAILABLE
-        validation_state = IngestValidationState.FAILED
+        validation_state = IngestValidationState.UNAVAILABLE
         next_action = IngestNextAction.REAUTHORIZE
         blocked_reason = _blocked_reason(
             'XERO_REAUTHORIZATION_REQUIRED',
             'The Xero connection must be re-authorized.',
         )
     elif latest is None:
-        state = IngestPeriodRunState.NOT_RUN
-        validation_state = IngestValidationState.NOT_RUN
-        next_action = IngestNextAction.RUN if can_run and not failed_prerequisite else IngestNextAction.NONE
-    elif latest.periods and str(period) not in latest.periods:
-        state = IngestPeriodRunState.NO_PERIOD_DATA
+        state = (
+            IngestPeriodRunState.NO_PERIOD_DATA
+            if latest_any is not None
+            else IngestPeriodRunState.NOT_RUN
+        )
         validation_state = IngestValidationState.NOT_RUN
         next_action = IngestNextAction.RUN if can_run and not failed_prerequisite else IngestNextAction.NONE
     else:
@@ -125,27 +166,28 @@ def _summary(definition, entity, period, can_run):
             )
         else:
             next_action = IngestNextAction.RUN if can_run and not failed_prerequisite else IngestNextAction.NONE
-        if latest.blocked_reason:
-            blocked_reason = _blocked_reason(
-                latest.blocked_reason.get('code', 'BLOCKED'),
-                latest.blocked_reason.get('message', 'This source job is blocked.'),
-            )
+        if latest.state == IngestProcessRun.State.BLOCKED:
+            safe_code, safe_message = _safe_error_values(latest)
+            blocked_reason = _blocked_reason(safe_code, safe_message)
 
     if blocked_reason is None and failed_prerequisite:
         blocked_reason = _blocked_reason(failed_prerequisite['code'], failed_prerequisite['message'])
 
+    evidence_run = latest if connection_state == IngestConnectionState.CONFIGURED else None
+    evidence_success = latest_success if connection_state == IngestConnectionState.CONFIGURED else None
+    safe_code, safe_message = _safe_error_values(evidence_run)
     return IngestPeriodRunSummary(
         period=YearMonthValue(str(period)),
         state=state,
-        latest_attempt_at=_iso(latest.requested_at) if latest else None,
-        latest_success_at=_iso(latest_success.finished_at) if latest_success else None,
-        freshness_at=_iso(latest_success.finished_at) if latest_success else None,
-        records=_records(latest),
-        outputs=(latest.output_summary if latest else {}),
+        latest_attempt_at=_iso(evidence_run.requested_at) if evidence_run else None,
+        latest_success_at=_iso(evidence_success.finished_at) if evidence_success else None,
+        freshness_at=_iso(evidence_success.finished_at) if evidence_success else None,
+        records=_records(evidence_run),
+        outputs=_safe_outputs(evidence_run),
         validation=IngestValidation(
             state=validation_state,
-            code=(latest.error_code if latest and latest.error_code else None),
-            message=(latest.error_message if latest and latest.error_message else None),
+            code=safe_code,
+            message=safe_message,
         ),
         prerequisites=typed_prerequisites,
         blocked_reason=blocked_reason,

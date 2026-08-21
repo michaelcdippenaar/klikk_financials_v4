@@ -12,6 +12,7 @@ from rest_framework_simplejwt.tokens import AccessToken
 from apps.web_api_v2.models import (
     IngestProcessAuditEvent,
     IngestProcessRun,
+    IngestProcessRunPeriod,
     UserEntityCapability,
     UserEntityMembership,
 )
@@ -110,6 +111,10 @@ class IngestProcessApiTests(TestCase):
         run = IngestProcessRun.objects.get(pk=body['id'])
         self.assertEqual(run.actor, self.user)
         self.assertEqual(run.records_summary, {'created': 4})
+        self.assertEqual(
+            list(IngestProcessRunPeriod.objects.filter(run=run).values_list('period', flat=True)),
+            ['2026-07'],
+        )
         self.assertEqual(
             list(IngestProcessAuditEvent.objects.filter(run=run).values_list('action', flat=True)),
             ['requested', 'started', 'completed'],

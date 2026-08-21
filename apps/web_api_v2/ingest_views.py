@@ -19,7 +19,11 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
 from apps.web_api_v2.api_errors import error_response, request_correlation_id
-from apps.web_api_v2.models import IngestProcessAuditEvent, IngestProcessRun
+from apps.web_api_v2.models import (
+    IngestProcessAuditEvent,
+    IngestProcessRun,
+    IngestProcessRunPeriod,
+)
 from apps.web_api_v2.services.entity_access import (
     EntityAccessDenied,
     EntityCapabilityDenied,
@@ -119,6 +123,15 @@ def _audit(run, action):
         result_state=run.state,
         correlation_id=run.correlation_id,
         safe_metadata={'retryOfRunId': str(run.retry_of_id) if run.retry_of_id else None},
+    )
+
+
+def _replace_run_periods(run, periods):
+    normalized = sorted(set(periods))
+    run.run_periods.exclude(period__in=normalized).delete()
+    IngestProcessRunPeriod.objects.bulk_create(
+        [IngestProcessRunPeriod(run=run, period=period) for period in normalized],
+        ignore_conflicts=True,
     )
 
 
@@ -443,6 +456,7 @@ class ProcessRunListCreateView(V2IngestView):
                         + timedelta(seconds=settings.WEB_API_V2_INGEST_RUN_LEASE_SECONDS)
                     ),
                 )
+                _replace_run_periods(run, periods)
                 _audit(run, 'requested')
         except IntegrityError:
             duplicate = IngestProcessRun.objects.filter(
@@ -510,11 +524,15 @@ class ProcessRunListCreateView(V2IngestView):
             if result['periods']:
                 run.periods = result['periods']
         run.finished_at = timezone.now()
-        run.save(update_fields=(
-                'state', 'records_summary', 'output_summary', 'periods', 'error_code',
-            'error_message', 'retryable', 'blocked_reason', 'finished_at',
-        ))
-        _audit(run, 'completed')
+        with transaction.atomic():
+            run.save(update_fields=(
+                'state', 'records_summary', 'output_summary', 'periods',
+                'error_code', 'error_message', 'retryable',
+                'blocked_reason', 'finished_at',
+            ))
+            if run.state == IngestProcessRun.State.SUCCEEDED and result['periods']:
+                _replace_run_periods(run, result['periods'])
+            _audit(run, 'completed')
         logger.info(
             'v2_ingest_completed run=%s actor=%s entity=%s process=%s state=%s correlation_id=%s',
             run.pk, request.user.pk, membership.entity_id, process_key, run.state,

@@ -1,7 +1,7 @@
 import uuid
 
 from django.conf import settings
-from django.core.validators import MaxValueValidator, MinValueValidator
+from django.core.validators import MaxValueValidator, MinValueValidator, RegexValidator
 from django.db import models
 from django.db.models import Q
 
@@ -226,6 +226,38 @@ class IngestProcessRun(models.Model):
             ),
         ]
         ordering = ('-requested_at', '-id')
+
+
+class IngestProcessRunPeriod(models.Model):
+    run = models.ForeignKey(
+        IngestProcessRun,
+        on_delete=models.CASCADE,
+        related_name='run_periods',
+    )
+    period = models.CharField(
+        max_length=7,
+        validators=(
+            RegexValidator(
+                regex=r'^\d{4}-(0[1-9]|1[0-2])$',
+                message='Period must use YYYY-MM.',
+            ),
+        ),
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=('run', 'period'),
+                name='web_api_v2_unique_run_period',
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=('period', 'run'),
+                name='web_api_v2_period_run_idx',
+            ),
+        ]
+        ordering = ('period', 'pk')
 
 
 class IngestProcessAuditEvent(models.Model):

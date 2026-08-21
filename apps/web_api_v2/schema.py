@@ -12,8 +12,22 @@ from strawberry.extensions import (
 )
 
 from .queries.ingest_overview import build_ingest_overview
+from .queries.overview_ingest_sources import build_overview_ingest_sources
+from .queries.xero_pipeline import (
+    build_xero_pipeline_run_detail,
+    build_xero_pipeline_run_history,
+    build_xero_pipeline_summary,
+)
 from .queries.viewer_context import build_viewer_context
+from .types.financial_context import FinancialContextInput
 from .types.ingest import IngestOverview, IngestOverviewInput
+from .types.overview_ingest import OverviewIngestSources
+from .types.xero_pipeline import (
+    XeroPipelineRunDetail,
+    XeroPipelineRunHistory,
+    XeroPipelineStageKey,
+    XeroPipelineSummary,
+)
 from .types.viewer import ViewerContext
 from .validation import MaxFieldSelectionsRule
 
@@ -56,13 +70,14 @@ def _resolve_safely(info, operation, resolver):
                 'retryable': True,
             },
         ) from None
-    except Exception:
+    except Exception as exc:
         request = info.context.request
         correlation_id = getattr(request, 'graphql_correlation_id', '-')
         logger.error(
-            'graphql_data_failed operation=%s user=%s correlation_id=%s',
+            'graphql_data_failed operation=%s user=%s exception_type=%s correlation_id=%s',
             operation,
             request.user.pk,
+            type(exc).__name__,
             correlation_id,
         )
         raise GraphQLError(
@@ -94,6 +109,57 @@ class Query:
             info,
             'ingestOverview',
             lambda: build_ingest_overview(info, input),
+        )
+
+    @strawberry.field
+    def overview_ingest_sources(
+        self,
+        info: strawberry.Info,
+        context: FinancialContextInput,
+    ) -> OverviewIngestSources:
+        return _resolve_safely(
+            info,
+            'overviewIngestSources',
+            lambda: build_overview_ingest_sources(info, context),
+        )
+
+    @strawberry.field
+    def xero_pipeline_summary(
+        self,
+        info: strawberry.Info,
+        context: FinancialContextInput,
+    ) -> XeroPipelineSummary:
+        return _resolve_safely(
+            info,
+            'xeroPipelineSummary',
+            lambda: build_xero_pipeline_summary(info, context),
+        )
+
+    @strawberry.field
+    def xero_pipeline_run_history(
+        self,
+        info: strawberry.Info,
+        context: FinancialContextInput,
+        stage: XeroPipelineStageKey,
+        limit: int = 20,
+    ) -> XeroPipelineRunHistory:
+        return _resolve_safely(
+            info,
+            'xeroPipelineRunHistory',
+            lambda: build_xero_pipeline_run_history(info, context, stage, limit),
+        )
+
+    @strawberry.field
+    def xero_pipeline_run_detail(
+        self,
+        info: strawberry.Info,
+        context: FinancialContextInput,
+        run_id: strawberry.ID,
+    ) -> XeroPipelineRunDetail:
+        return _resolve_safely(
+            info,
+            'xeroPipelineRunDetail',
+            lambda: build_xero_pipeline_run_detail(info, context, run_id),
         )
 
 

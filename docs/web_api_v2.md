@@ -201,5 +201,159 @@ The Pinia boundary should preserve server enum values and keep preview data sepa
   }]
 }
 ```
+`ingestOverview.outputs` contains only allowlisted numeric record counts. Stored output JSON, raw error
+messages, blocker messages and audit metadata are never projected; known error codes use reviewed safe
+copy and unknown codes collapse to `PROCESS_FAILED` or `PROCESS_BLOCKED`.
+
 
 Demo/preview entities must never be sent to these REST commands.
+
+## Overview ingest sources (ING-CONNECT-001 v1.1)
+
+`overviewIngestSources(context: FinancialContextInput!)` is the server-owned eight-card Overview
+catalogue. It is distinct from `ingestOverview`, whose eight definitions are Xero pipeline jobs.
+
+Financial years use ending-year semantics. For an entity whose fiscal year starts in July, FY2026
+resolves to 1 July 2025 through 30 June 2026. The server validates the selected months against the
+entity fiscal calendar and echoes the resolved dates and ordered periods.
+
+```graphql
+query OverviewSources($context: FinancialContextInput!) {
+  overviewIngestSources(context: $context) {
+    context {
+      entityId
+      financialYear
+      fiscalYearStartMonth
+      startsOn
+      endsOn
+      selectionMode
+      selectedPeriods
+    }
+    actionableAttentionCount
+    sources {
+      key
+      label
+      provider
+      mode
+      availabilityCode
+      state
+      userSafeReason
+      remediation
+      latestAttemptAt
+      latestSuccessAt
+      freshnessAt
+      records { read created updated skipped failed }
+      outputs { code label count }
+      validation { state code message }
+      actions {
+        kind
+        permitted
+        processKey
+        requiredCapability
+        disabledCode
+        disabledReason
+      }
+      xeroPipelineAvailable
+    }
+  }
+}
+```
+
+```json
+{
+  "context": {
+    "entityId": "tenant-uuid",
+    "financialYear": 2026,
+    "periodSelection": {
+      "mode": "MONTHS",
+      "months": ["2025-07"]
+    }
+  }
+}
+```
+
+The source order is Xero, Investec bank, Investment holdings, Share transactions, WhatsApp
+receipts, Email documents, Manual document uploads, and Planning Analytics targets. Phase 1 has a
+live Xero projection. The remaining seven sources are persistently returned by the server with
+`ENTITY_BINDING_REQUIRED`, `DURABLE_STATUS_REQUIRED`, or `NOT_IMPLEMENTED`.
+
+For every non-`AVAILABLE` source, `records` and timestamps are null, `outputs` is empty, and
+validation is `UNAVAILABLE`. Zero is returned only when a successful available source actually
+recorded zero. `availabilityCode` is for machine branching; user interfaces display
+`userSafeReason` and optional truthful `remediation`, never an internal code as finance copy.
+
+## Xero pipeline workbench reads
+
+`xeroPipelineSummary(context: FinancialContextInput!)` exposes five ordered required stages and
+three supporting stages. The internal REST key remains `trail-balance`; GraphQL and display copy
+use `TRIAL_BALANCE` and **Trial Balance**.
+
+```graphql
+query XeroPipeline($context: FinancialContextInput!) {
+  xeroPipelineSummary(context: $context) {
+    context { entityId financialYear startsOn endsOn selectedPeriods }
+    state completionPercent attentionCount
+    firstBlocker { stage code userSafeReason remediation }
+    stages {
+      key processKey label category required state latestRunId
+      validation { state code }
+      blocker { stage code userSafeReason }
+      nextValidAction
+      periodRunSummaries { period state latestRunId nextValidAction }
+    }
+  }
+}
+```
+
+Required completion reaches 100% only when all five required stages have explicit selected-period
+run evidence, succeeded validation, and no blocker. Legacy or ambiguous runs without a normalized
+period link return `NO_PERIOD_DATA`; timestamps never imply period coverage.
+
+Stage/card run totals are returned only when every contributing run period is contained by the
+selected context and contributing run scopes do not overlap. A subset of a multi-period run,
+overlapping multi-period runs, or ambiguous legacy evidence returns null records and empty outputs.
+Multi-period counts remain run-level evidence and are never duplicated as per-period measurements.
+
+Recent stage history is bounded to 1-20 rows:
+
+```graphql
+query XeroHistory($context: FinancialContextInput!) {
+  xeroPipelineRunHistory(context: $context, stage: METADATA, limit: 10) {
+    stage
+    runs { id stage processKey state requestedAt startedAt finishedAt periods }
+  }
+}
+```
+
+Run detail is restricted to the authorized entity and selected context:
+
+```graphql
+query XeroRun($context: FinancialContextInput!, $runId: ID!) {
+  xeroPipelineRunDetail(context: $context, runId: $runId) {
+    id stage processKey state periods
+    records { read created updated skipped failed }
+    outputs { code label count }
+    validation { state code message }
+    retryable
+    safeError { code userSafeReason correlationId remediation }
+  }
+}
+```
+
+All four GraphQL reads require SimpleJWT, active entity membership, and `VIEW_FINANCIALS`.
+History/detail do not reuse or weaken the existing REST GET authorization. GraphQL never returns
+raw process output, idempotency fingerprints, credentials, audit metadata, or raw stored error
+messages. Missing and foreign runs are indistinguishable through the safe typed `RUN_NOT_FOUND`
+error.
+
+RUN and RETRY remain separate REST commands and still require the explicit active
+`RUN_INGESTION_PROCESS` grant; no grant is created by migration 0003. The GraphQL `processKey`,
+`latestRunId`, and action fields are read/navigation descriptors only. This candidate does not claim
+ING-RUN-001 manual-start compatibility: the existing command surface does not yet enforce the
+GraphQL `nextValidAction` or period/FY execution scope, and synchronous timeout behavior remains
+unbounded. Frontend command enablement remains release-gated pending the separate command contract.
+`standard-sync` remains blocked until a durable worker exists.
+
+`IngestProcessRunPeriod` is the additive period-evidence model. Migration 0003 backfills only
+canonical explicit values already stored in `IngestProcessRun.periods`; it never infers periods
+from timestamps, fiscal years, outputs, or an empty list.

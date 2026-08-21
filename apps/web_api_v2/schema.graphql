@@ -1,3 +1,6 @@
+"""Date (isoformat)"""
+scalar Date
+
 """Date with time (isoformat)"""
 scalar DateTime
 
@@ -30,6 +33,22 @@ enum EntitySelectionState {
 enum EntityStatus {
   AVAILABLE
   REAUTHORIZATION_REQUIRED
+}
+
+input FinancialContextInput {
+  entityId: ID!
+  financialYear: Int!
+  periodSelection: FinancialPeriodSelectionInput!
+}
+
+input FinancialPeriodSelectionInput {
+  mode: FinancialPeriodSelectionMode!
+  months: [YearMonth!] = null
+}
+
+enum FinancialPeriodSelectionMode {
+  MONTHS
+  ALL
 }
 
 type IngestBlockedReason {
@@ -141,6 +160,7 @@ type IngestValidation {
 
 enum IngestValidationState {
   NOT_RUN
+  UNAVAILABLE
   PASSED
   FAILED
 }
@@ -150,9 +170,107 @@ The `JSON` scalar type represents JSON values as specified by [ECMA-404](https:/
 """
 scalar JSON @specifiedBy(url: "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf")
 
+enum OverviewIngestSourceKey {
+  XERO
+  INVESTEC_BANK
+  INVESTMENT_HOLDINGS
+  SHARE_TRANSACTIONS
+  WHATSAPP_RECEIPTS
+  EMAIL_DOCUMENTS
+  MANUAL_DOCUMENT_UPLOADS
+  PLANNING_ANALYTICS_TARGETS
+}
+
+type OverviewIngestSourceSummary {
+  key: OverviewIngestSourceKey!
+  label: String!
+  provider: String!
+  mode: OverviewSourceMode!
+  availabilityCode: OverviewSourceAvailabilityCode!
+  state: OverviewSourceState!
+  userSafeReason: String
+  remediation: String
+  latestAttemptAt: DateTime
+  latestSuccessAt: DateTime
+  freshnessAt: DateTime
+  records: IngestRecordsSummary
+  outputs: [XeroPipelineOutput!]!
+  validation: IngestValidation!
+  actions: [OverviewSourceAction!]!
+  xeroPipelineAvailable: Boolean!
+}
+
+type OverviewIngestSources {
+  context: ResolvedFinancialContext!
+  sources: [OverviewIngestSourceSummary!]!
+  actionableAttentionCount: Int!
+  liveSourceCount: Int!
+  unavailableSourceCount: Int!
+}
+
+type OverviewSourceAction {
+  kind: OverviewSourceActionKind!
+  permitted: Boolean!
+  processKey: String
+  requiredCapability: String
+  disabledCode: String
+  disabledReason: String
+}
+
+enum OverviewSourceActionKind {
+  OPEN_WORKBENCH
+  VIEW_LAST_RUN
+  RUN
+  RETRY
+  CONFIGURE
+  UPLOAD
+  REFRESH_STATUS
+}
+
+enum OverviewSourceAvailabilityCode {
+  AVAILABLE
+  NOT_CONFIGURED
+  NO_PERIOD_DATA
+  TEMPORARILY_UNAVAILABLE
+  ENTITY_BINDING_REQUIRED
+  DURABLE_STATUS_REQUIRED
+  NOT_IMPLEMENTED
+}
+
+enum OverviewSourceMode {
+  AUTOMATIC
+  MANUAL_UPLOAD
+  NOT_CONNECTED
+  ON_DEMAND
+  READ_ONLY
+}
+
+enum OverviewSourceState {
+  CURRENT
+  NEEDS_ATTENTION
+  IN_PROGRESS
+  READY
+  NOT_RUN
+  UNAVAILABLE
+}
+
 type Query {
   viewerContext: ViewerContext!
   ingestOverview(input: IngestOverviewInput!): IngestOverview!
+  overviewIngestSources(context: FinancialContextInput!): OverviewIngestSources!
+  xeroPipelineSummary(context: FinancialContextInput!): XeroPipelineSummary!
+  xeroPipelineRunHistory(context: FinancialContextInput!, stage: XeroPipelineStageKey!, limit: Int! = 20): XeroPipelineRunHistory!
+  xeroPipelineRunDetail(context: FinancialContextInput!, runId: ID!): XeroPipelineRunDetail!
+}
+
+type ResolvedFinancialContext {
+  entityId: ID!
+  financialYear: Int!
+  fiscalYearStartMonth: Int!
+  startsOn: Date!
+  endsOn: Date!
+  selectionMode: FinancialPeriodSelectionMode!
+  selectedPeriods: [YearMonth!]!
 }
 
 type Viewer {
@@ -172,6 +290,129 @@ type ViewerContext {
 type ViewerPreferences {
   defaultEntityId: ID
   defaultFinancialYear: Int
+}
+
+type XeroPipelineBlocker {
+  stage: XeroPipelineStageKey!
+  code: String!
+  userSafeReason: String!
+  remediation: String
+}
+
+type XeroPipelineOutput {
+  code: XeroPipelineOutputCode!
+  label: String!
+  count: Int!
+}
+
+enum XeroPipelineOutputCode {
+  READ
+  CREATED
+  UPDATED
+  SKIPPED
+  FAILED
+}
+
+type XeroPipelinePeriodRunSummary {
+  period: YearMonth!
+  state: IngestPeriodRunState!
+  latestRunId: ID
+  latestAttemptAt: DateTime
+  latestSuccessAt: DateTime
+  freshnessAt: DateTime
+  records: IngestRecordsSummary
+  outputs: [XeroPipelineOutput!]!
+  validation: IngestValidation!
+  prerequisites: [IngestPrerequisite!]!
+  blockedReason: IngestBlockedReason
+  nextValidAction: IngestNextAction!
+}
+
+type XeroPipelineRunDetail {
+  context: ResolvedFinancialContext!
+  id: ID!
+  stage: XeroPipelineStageKey!
+  processKey: String!
+  state: IngestPeriodRunState!
+  requestedAt: DateTime!
+  startedAt: DateTime
+  finishedAt: DateTime
+  periods: [YearMonth!]!
+  records: IngestRecordsSummary
+  outputs: [XeroPipelineOutput!]!
+  validation: IngestValidation!
+  retryable: Boolean!
+  safeError: XeroPipelineSafeError
+}
+
+type XeroPipelineRunHistory {
+  context: ResolvedFinancialContext!
+  stage: XeroPipelineStageKey!
+  runs: [XeroPipelineRunSummary!]!
+}
+
+type XeroPipelineRunSummary {
+  id: ID!
+  stage: XeroPipelineStageKey!
+  processKey: String!
+  state: IngestPeriodRunState!
+  requestedAt: DateTime!
+  startedAt: DateTime
+  finishedAt: DateTime
+  periods: [YearMonth!]!
+}
+
+type XeroPipelineSafeError {
+  code: String!
+  userSafeReason: String!
+  correlationId: String!
+  remediation: String
+}
+
+enum XeroPipelineStageCategory {
+  REQUIRED
+  SUPPORTING
+}
+
+enum XeroPipelineStageKey {
+  METADATA
+  TRANSACTIONS_JOURNALS
+  INVOICES
+  PROCESS_JOURNAL_LINES
+  TRIAL_BALANCE
+  DOCUMENTS
+  AGED_PAYABLES
+  AGED_RECEIVABLES
+}
+
+type XeroPipelineStageSummary {
+  key: XeroPipelineStageKey!
+  processKey: String!
+  label: String!
+  order: Int!
+  category: XeroPipelineStageCategory!
+  required: Boolean!
+  state: IngestPeriodRunState!
+  latestRunId: ID
+  latestAttemptAt: DateTime
+  latestSuccessAt: DateTime
+  freshnessAt: DateTime
+  records: IngestRecordsSummary
+  outputs: [XeroPipelineOutput!]!
+  validation: IngestValidation!
+  prerequisites: [IngestPrerequisite!]!
+  blocker: XeroPipelineBlocker
+  nextValidAction: IngestNextAction!
+  periodRunSummaries: [XeroPipelinePeriodRunSummary!]!
+}
+
+type XeroPipelineSummary {
+  context: ResolvedFinancialContext!
+  state: IngestStageState!
+  completionPercent: Int!
+  attentionCount: Int!
+  firstBlocker: XeroPipelineBlocker
+  stages: [XeroPipelineStageSummary!]!
 }
 
 """An ISO accounting month in YYYY-MM form."""
