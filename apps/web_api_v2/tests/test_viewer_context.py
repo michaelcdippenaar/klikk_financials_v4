@@ -10,7 +10,7 @@ from django.urls import reverse
 from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.web_api_v2.auth import BrowserAuthenticationUnavailable
-from apps.web_api_v2.models import UserEntityMembership, ViewerPreference
+from apps.web_api_v2.models import UserEntityCapability, UserEntityMembership, ViewerPreference
 from apps.xero.xero_core.models import XeroTenant
 
 
@@ -162,6 +162,24 @@ class ViewerContextTests(TestCase):
         self.assertEqual(entity['status'], 'REAUTHORIZATION_REQUIRED')
         self.assertTrue(entity['active'])
         self.assertEqual(entity['capabilities'], ['VIEW_FINANCIALS'])
+
+    def test_explicit_ingest_grant_is_advertised_without_role_inference(self):
+        response = self._post(str(AccessToken.for_user(self.user)))
+        self.assertEqual(
+            response.json()['data']['viewerContext']['entities'][0]['capabilities'],
+            ['VIEW_FINANCIALS'],
+        )
+        membership = UserEntityMembership.objects.get(user=self.user, entity=self.allowed)
+        UserEntityCapability.objects.create(
+            membership=membership,
+            code=UserEntityCapability.Code.RUN_INGESTION_PROCESS,
+            granted_by=self.user,
+        )
+        response = self._post(str(AccessToken.for_user(self.user)))
+        self.assertEqual(
+            response.json()['data']['viewerContext']['entities'][0]['capabilities'],
+            ['VIEW_FINANCIALS', 'RUN_INGESTION_PROCESS'],
+        )
 
     def test_disallowed_default_entity_is_null(self):
         ViewerPreference.objects.create(

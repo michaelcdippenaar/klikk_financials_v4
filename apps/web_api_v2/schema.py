@@ -11,7 +11,9 @@ from strawberry.extensions import (
     QueryDepthLimiter,
 )
 
+from .queries.ingest_overview import build_ingest_overview
 from .queries.viewer_context import build_viewer_context
+from .types.ingest import IngestOverview, IngestOverviewInput
 from .types.viewer import ViewerContext
 from .validation import MaxFieldSelectionsRule
 
@@ -32,45 +34,67 @@ class SafeSchema(strawberry.Schema):
         )
 
 
+def _resolve_safely(info, operation, resolver):
+    try:
+        return resolver()
+    except GraphQLError:
+        raise
+    except DatabaseError:
+        request = info.context.request
+        correlation_id = getattr(request, 'graphql_correlation_id', '-')
+        logger.error(
+            'graphql_data_unavailable operation=%s user=%s correlation_id=%s',
+            operation,
+            request.user.pk,
+            correlation_id,
+        )
+        raise GraphQLError(
+            'Requested data is temporarily unavailable.',
+            extensions={
+                'code': 'TEMPORARILY_UNAVAILABLE',
+                'correlationId': correlation_id,
+                'retryable': True,
+            },
+        ) from None
+    except Exception:
+        request = info.context.request
+        correlation_id = getattr(request, 'graphql_correlation_id', '-')
+        logger.error(
+            'graphql_data_failed operation=%s user=%s correlation_id=%s',
+            operation,
+            request.user.pk,
+            correlation_id,
+        )
+        raise GraphQLError(
+            'Unable to load requested data.',
+            extensions={
+                'code': 'INTERNAL_ERROR',
+                'correlationId': correlation_id,
+            },
+        ) from None
+
+
 @strawberry.type
 class Query:
     @strawberry.field
     def viewer_context(self, info: strawberry.Info) -> ViewerContext:
-        try:
-            return build_viewer_context(info)
-        except GraphQLError:
-            raise
-        except DatabaseError:
-            request = info.context.request
-            correlation_id = getattr(request, 'graphql_correlation_id', '-')
-            logger.error(
-                'viewer_context_unavailable user=%s correlation_id=%s',
-                request.user.pk,
-                correlation_id,
-            )
-            raise GraphQLError(
-                'Viewer context is temporarily unavailable.',
-                extensions={
-                    'code': 'TEMPORARILY_UNAVAILABLE',
-                    'correlationId': correlation_id,
-                    'retryable': True,
-                },
-            ) from None
-        except Exception:
-            request = info.context.request
-            correlation_id = getattr(request, 'graphql_correlation_id', '-')
-            logger.error(
-                'viewer_context_failed user=%s correlation_id=%s',
-                request.user.pk,
-                correlation_id,
-            )
-            raise GraphQLError(
-                'Unable to load viewer context.',
-                extensions={
-                    'code': 'INTERNAL_ERROR',
-                    'correlationId': correlation_id,
-                },
-            ) from None
+        return _resolve_safely(
+            info,
+            'viewerContext',
+            lambda: build_viewer_context(info),
+        )
+
+    @strawberry.field
+    def ingest_overview(
+        self,
+        info: strawberry.Info,
+        input: IngestOverviewInput,
+    ) -> IngestOverview:
+        return _resolve_safely(
+            info,
+            'ingestOverview',
+            lambda: build_ingest_overview(info, input),
+        )
 
 
 schema = SafeSchema(

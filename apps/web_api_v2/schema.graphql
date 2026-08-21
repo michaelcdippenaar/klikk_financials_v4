@@ -1,5 +1,9 @@
+"""Date with time (isoformat)"""
+scalar DateTime
+
 enum EntityCapability {
   VIEW_FINANCIALS
+  RUN_INGESTION_PROCESS
 }
 
 type EntityOption {
@@ -28,8 +32,127 @@ enum EntityStatus {
   REAUTHORIZATION_REQUIRED
 }
 
+type IngestBlockedReason {
+  code: String!
+  message: String!
+}
+
+enum IngestConnectionState {
+  CONFIGURED
+  NOT_CONFIGURED
+  TEMPORARILY_UNAVAILABLE
+}
+
+enum IngestNextAction {
+  NONE
+  RUN
+  RETRY
+  WAIT
+  CONFIGURE
+  REAUTHORIZE
+}
+
+type IngestOverview {
+  entityId: ID!
+  selectedPeriods: [YearMonth!]!
+  sourceJobDefinitions: [IngestSourceJobDefinition!]!
+  attentionCount: Int!
+  stageState: IngestStageState!
+  completionPercent: Int!
+}
+
+input IngestOverviewInput {
+  entityId: ID!
+  periods: [YearMonth!]!
+}
+
+enum IngestPeriodRunState {
+  NOT_RUN
+  NO_PERIOD_DATA
+  NOT_CONFIGURED
+  TEMPORARILY_UNAVAILABLE
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  BLOCKED
+}
+
+type IngestPeriodRunSummary {
+  period: YearMonth!
+  state: IngestPeriodRunState!
+  latestAttemptAt: DateTime
+  latestSuccessAt: DateTime
+  freshnessAt: DateTime
+  records: IngestRecordsSummary!
+  outputs: JSON!
+  validation: IngestValidation!
+  prerequisites: [IngestPrerequisite!]!
+  blockedReason: IngestBlockedReason
+  nextValidAction: IngestNextAction!
+}
+
+type IngestPrerequisite {
+  code: String!
+  satisfied: Boolean!
+  message: String!
+}
+
+type IngestRecordsSummary {
+  read: Int
+  created: Int
+  updated: Int
+  skipped: Int
+  failed: Int
+}
+
+enum IngestSourceFamily {
+  XERO
+  INVESTEC
+  MANUAL
+  PLANNING_ANALYTICS
+}
+
+type IngestSourceJobDefinition {
+  id: ID!
+  key: String!
+  sourceFamily: IngestSourceFamily!
+  label: String!
+  required: Boolean!
+  connectionState: IngestConnectionState!
+  supportedOperations: [String!]!
+  readCapabilities: [String!]!
+  periodRunSummaries: [IngestPeriodRunSummary!]!
+}
+
+enum IngestStageState {
+  NOT_STARTED
+  IN_PROGRESS
+  ATTENTION_REQUIRED
+  COMPLETE
+}
+
+type IngestValidation {
+  state: IngestValidationState!
+  code: String
+  message: String
+}
+
+enum IngestValidationState {
+  NOT_RUN
+  PASSED
+  FAILED
+}
+
+"""
+The `JSON` scalar type represents JSON values as specified by [ECMA-404](https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf).
+"""
+scalar JSON @specifiedBy(url: "https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf")
+
 type Query {
   viewerContext: ViewerContext!
+  ingestOverview(input: IngestOverviewInput!): IngestOverview!
 }
 
 type Viewer {
@@ -50,3 +173,6 @@ type ViewerPreferences {
   defaultEntityId: ID
   defaultFinancialYear: Int
 }
+
+"""An ISO accounting month in YYYY-MM form."""
+scalar YearMonth

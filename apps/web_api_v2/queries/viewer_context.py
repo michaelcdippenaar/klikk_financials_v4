@@ -1,6 +1,11 @@
 import strawberry
+from django.db.models import Prefetch
 
-from apps.web_api_v2.models import UserEntityMembership, ViewerPreference
+from apps.web_api_v2.models import (
+    UserEntityCapability,
+    UserEntityMembership,
+    ViewerPreference,
+)
 from apps.web_api_v2.services.entity_access import capability_codes_for_membership
 from apps.web_api_v2.types.viewer import (
     EntityCapability,
@@ -19,6 +24,10 @@ def build_viewer_context(info) -> ViewerContext:
     memberships = list(
         UserEntityMembership.objects.filter(user=user, active=True)
         .select_related('entity')
+        .prefetch_related(Prefetch(
+            'capability_grants',
+            queryset=UserEntityCapability.objects.filter(active=True),
+        ))
         .order_by('entity__tenant_name', 'entity_id')
     )
     allowed_entity_ids = {membership.entity_id for membership in memberships}

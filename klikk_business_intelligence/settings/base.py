@@ -53,6 +53,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework.authtoken',
     'rest_framework_simplejwt',  # JWT authentication
+    'rest_framework_simplejwt.token_blacklist',  # Truthful v2 refresh-token logout
     'strawberry_django',
     # Local apps
     'apps.user',
@@ -178,6 +179,18 @@ WEB_API_V2_MAX_REQUEST_BYTES = int(os.environ.get('WEB_API_V2_MAX_REQUEST_BYTES'
 WEB_API_V2_MAX_QUERY_DEPTH = int(os.environ.get('WEB_API_V2_MAX_QUERY_DEPTH', '8'))
 WEB_API_V2_MAX_QUERY_TOKENS = int(os.environ.get('WEB_API_V2_MAX_QUERY_TOKENS', '1000'))
 WEB_API_V2_MAX_FIELD_SELECTIONS = int(os.environ.get('WEB_API_V2_MAX_FIELD_SELECTIONS', '50'))
+WEB_API_V2_AUTH_MAX_REQUEST_BYTES = int(
+    os.environ.get('WEB_API_V2_AUTH_MAX_REQUEST_BYTES', str(16 * 1024))
+)
+WEB_API_V2_INGEST_MAX_REQUEST_BYTES = int(
+    os.environ.get('WEB_API_V2_INGEST_MAX_REQUEST_BYTES', str(16 * 1024))
+)
+WEB_API_V2_INGEST_MAX_XERO_CALLS = int(
+    os.environ.get('WEB_API_V2_INGEST_MAX_XERO_CALLS', '50')
+)
+WEB_API_V2_INGEST_RUN_LEASE_SECONDS = int(
+    os.environ.get('WEB_API_V2_INGEST_RUN_LEASE_SECONDS', '1800')
+)
 
 # REST Framework Configuration
 REST_FRAMEWORK = {
@@ -205,6 +218,12 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_THROTTLE_RATES': {
         'anon': '60/min',
+        'v2_auth_login': '10/min',
+        'v2_auth_refresh': '30/min',
+        'v2_auth_verify': '60/min',
+        'v2_auth_logout': '30/min',
+        'v2_ingest_reads': '120/min',
+        'v2_ingest_commands': '10/hour',
     },
 }
 

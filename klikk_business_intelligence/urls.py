@@ -43,6 +43,8 @@ urlpatterns = [
     
     # Authentication endpoints
     path('api/auth/', include('apps.user.urls')),  # JWT registration/login
+    path('api/v2/auth/', include('apps.web_api_v2.auth_urls')),
+    path('api/v2/entities/', include('apps.web_api_v2.entity_urls')),
     path('api/v2/graphql/', include('apps.web_api_v2.urls')),
     path('api-token-auth/', obtain_auth_token, name='api_token_auth'),  # Legacy token auth
     path('login/', auth_views.LoginView.as_view(), name='login'),

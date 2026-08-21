@@ -26,8 +26,8 @@ class EntityStatus(Enum):
 
 @strawberry.enum
 class EntityCapability(Enum):
-    # Expand only when matching backend permission checks are implemented.
     VIEW_FINANCIALS = 'VIEW_FINANCIALS'
+    RUN_INGESTION_PROCESS = 'RUN_INGESTION_PROCESS'
 
 
 @strawberry.type
