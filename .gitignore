@@ -94,3 +94,6 @@ credentials/
 # Claude Code harness — local config + memory
 .claude/
 CLAUDE.md
+
+# Local dev compose override (machine-specific; auto-loaded by docker compose)
+docker-compose.override.yml
