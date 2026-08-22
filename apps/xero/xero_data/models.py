@@ -204,7 +204,7 @@ class XeroDocument(models.Model):
         upload_to=xero_document_upload_to,
         max_length=500,
         blank=True,
-        storage=_xero_documents_storage(),
+        storage=_xero_documents_storage,
     )
     content_type = models.CharField(max_length=128, blank=True)
     xero_attachment_id = models.CharField(max_length=64, blank=True, null=True)
