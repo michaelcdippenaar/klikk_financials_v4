@@ -208,6 +208,141 @@ copy and unknown codes collapse to `PROCESS_FAILED` or `PROCESS_BLOCKED`.
 
 Demo/preview entities must never be sent to these REST commands.
 
+## Source connections (SOURCE-CONNECTIONS-001 v1)
+
+`sourceConnections(context: FinancialContextInput!)` is an authenticated, read-only catalogue
+served only by `POST /api/v2/graphql/`. It reuses the backend-resolved financial context and
+requires an active entity membership plus `VIEW_FINANCIALS`.
+
+```graphql
+query SourceConnections($context: FinancialContextInput!) {
+  sourceConnections(context: $context) {
+    resolvedContext { entityId financialYear selectedPeriods }
+    checkedAt
+    summary { total active needsSetup readyDestinations }
+    connections {
+      key
+      displayName
+      category
+      configurationState
+      readinessState
+      availabilityCode
+      userSafeReason
+      sourceEvidenceCount
+      sourceEvidenceAt
+      lastSuccessfulRunAt
+      validationState
+      latestV2RunState
+      safeIdentity
+      actions { kind permitted reason requiredCapability expectedState }
+    }
+  }
+}
+```
+
+The stable order is `XERO`, `INVESTEC_SHARE_TRADING`, `WHATSAPP_RECEIPTS`,
+`EMAIL_RECEIPTS`, `PLANNING_ANALYTICS`, and `EXCEL_ADD_IN`. Xero configuration uses only
+entity-bound row-existence checks; credential values are never loaded or returned. Its
+`sourceEvidenceCount` is the exact number of locally persisted, entity-owned Xero transaction
+source rows. A configured source with zero rows is `EMPTY` with a measured count of `0`, while
+missing or unavailable evidence remains null. `sourceEvidenceAt`, `validationState`, and
+`lastSuccessfulRunAt`/`latestV2RunState` are separate evidence channels and must not be displayed
+as interchangeable freshness or success claims.
+
+The other five entries remain `UNAVAILABLE` until their documented ownership, privacy,
+destination, or client-identity decisions are approved. They are not omitted and no name,
+account, tenant-string, provider, legacy endpoint, or fixture fallback is used to manufacture a
+configured state. All returned actions are persistently `permitted: false` with safe reasons;
+this read exposes no connect, sync, import, submit, mapping, token-refresh, or other command.
+
+Anonymous requests are rejected by V2 browser authentication. Inactive, missing, wrong, and
+cross-entity memberships fail with the existing non-leaking `FORBIDDEN_ENTITY` contract, and a
+missing `VIEW_FINANCIALS` capability fails with `PERMISSION_DENIED`.
+
+The response enums are:
+
+- `SourceConnectionConfigurationState`: `CONFIGURED`, `NOT_CONFIGURED`, `UNAVAILABLE`, `ERROR`;
+- `SourceConnectionReadinessState`: `READY`, `EMPTY`, `NOT_CONFIGURED`, `UNAVAILABLE`,
+  `PERMISSION_DENIED`, `STALE`, `ERROR`;
+- `SourceConnectionAvailabilityCode`: `AVAILABLE`, `NOT_CONFIGURED`, `UNAVAILABLE`,
+  `PERMISSION_DENIED`, `STALE`, `ERROR`.
+
+Representative configured-but-empty and unavailable rows are:
+
+```json
+{
+  "data": {
+    "sourceConnections": {
+      "resolvedContext": {
+        "entityId": "entity-uuid",
+        "financialYear": 2026,
+        "selectedPeriods": ["2025-07"]
+      },
+      "summary": {
+        "total": 6,
+        "active": 1,
+        "needsSetup": 0,
+        "readyDestinations": 0
+      },
+      "connections": [
+        {
+          "key": "XERO",
+          "configurationState": "CONFIGURED",
+          "readinessState": "EMPTY",
+          "availabilityCode": "AVAILABLE",
+          "sourceEvidenceCount": 0,
+          "sourceEvidenceAt": null,
+          "lastSuccessfulRunAt": null,
+          "validationState": "UNAVAILABLE",
+          "latestV2RunState": null,
+          "safeIdentity": "Entity-bound Xero connection"
+        },
+        {
+          "key": "INVESTEC_SHARE_TRADING",
+          "configurationState": "UNAVAILABLE",
+          "readinessState": "UNAVAILABLE",
+          "availabilityCode": "UNAVAILABLE",
+          "sourceEvidenceCount": null,
+          "safeIdentity": null
+        }
+      ]
+    }
+  }
+}
+```
+
+Representative authorization errors retain the shared V2 GraphQL envelope:
+
+```json
+{
+  "errors": [
+    {
+      "message": "You do not have access to this entity.",
+      "extensions": {
+        "code": "FORBIDDEN_ENTITY",
+        "correlationId": "request-correlation-id"
+      }
+    }
+  ]
+}
+```
+
+```json
+{
+  "errors": [
+    {
+      "message": "You do not have permission to view financial source connections.",
+      "extensions": {
+        "code": "PERMISSION_DENIED",
+        "correlationId": "request-correlation-id",
+        "retryable": false,
+        "userSafeReason": "You do not have permission to view financial source connections."
+      }
+    }
+  ]
+}
+```
+
 ## Overview ingest sources (ING-CONNECT-001 v1.1)
 
 `overviewIngestSources(context: FinancialContextInput!)` is the server-owned eight-card Overview

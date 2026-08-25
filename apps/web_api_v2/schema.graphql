@@ -258,6 +258,7 @@ type Query {
   viewerContext: ViewerContext!
   ingestOverview(input: IngestOverviewInput!): IngestOverview!
   overviewIngestSources(context: FinancialContextInput!): OverviewIngestSources!
+  sourceConnections(context: FinancialContextInput!): SourceConnections!
   xeroPipelineSummary(context: FinancialContextInput!): XeroPipelineSummary!
   xeroPipelineRunHistory(context: FinancialContextInput!, stage: XeroPipelineStageKey!, limit: Int! = 20): XeroPipelineRunHistory!
   xeroPipelineRunDetail(context: FinancialContextInput!, runId: ID!): XeroPipelineRunDetail!
@@ -271,6 +272,97 @@ type ResolvedFinancialContext {
   endsOn: Date!
   selectionMode: FinancialPeriodSelectionMode!
   selectedPeriods: [YearMonth!]!
+}
+
+type SourceConnection {
+  key: SourceConnectionKey!
+  displayName: String!
+  category: SourceConnectionCategory!
+  configurationState: SourceConnectionConfigurationState!
+  readinessState: SourceConnectionReadinessState!
+  availabilityCode: SourceConnectionAvailabilityCode!
+  userSafeReason: String
+  sourceEvidenceCount: Int
+  sourceEvidenceAt: DateTime
+  lastSuccessfulRunAt: DateTime
+  validationState: IngestValidationState!
+  latestV2RunState: IngestPeriodRunState
+  safeIdentity: String
+  actions: [SourceConnectionAction!]!
+}
+
+type SourceConnectionAction {
+  kind: SourceConnectionActionKind!
+  permitted: Boolean!
+  reason: String!
+  requiredCapability: String
+  expectedState: String
+}
+
+enum SourceConnectionActionKind {
+  MANAGE_CONNECTION
+  SYNC
+  OPEN_WORKBENCH
+  CONFIGURE
+  SUBMIT
+  CONFIGURE_IDENTITY
+}
+
+enum SourceConnectionAvailabilityCode {
+  AVAILABLE
+  NOT_CONFIGURED
+  UNAVAILABLE
+  PERMISSION_DENIED
+  STALE
+  ERROR
+}
+
+enum SourceConnectionCategory {
+  ACCOUNTING
+  INVESTMENTS
+  RECEIPTS
+  DESTINATION
+  IDENTITY
+}
+
+enum SourceConnectionConfigurationState {
+  CONFIGURED
+  NOT_CONFIGURED
+  UNAVAILABLE
+  ERROR
+}
+
+enum SourceConnectionKey {
+  XERO
+  INVESTEC_SHARE_TRADING
+  WHATSAPP_RECEIPTS
+  EMAIL_RECEIPTS
+  PLANNING_ANALYTICS
+  EXCEL_ADD_IN
+}
+
+enum SourceConnectionReadinessState {
+  READY
+  EMPTY
+  NOT_CONFIGURED
+  UNAVAILABLE
+  PERMISSION_DENIED
+  STALE
+  ERROR
+}
+
+type SourceConnections {
+  resolvedContext: ResolvedFinancialContext!
+  checkedAt: DateTime!
+  summary: SourceConnectionsSummary!
+  connections: [SourceConnection!]!
+}
+
+type SourceConnectionsSummary {
+  total: Int!
+  active: Int!
+  needsSetup: Int!
+  readyDestinations: Int!
 }
 
 type Viewer {

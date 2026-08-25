@@ -13,6 +13,7 @@ from strawberry.extensions import (
 
 from .queries.ingest_overview import build_ingest_overview
 from .queries.overview_ingest_sources import build_overview_ingest_sources
+from .queries.source_connections import build_source_connections
 from .queries.xero_pipeline import (
     build_xero_pipeline_run_detail,
     build_xero_pipeline_run_history,
@@ -22,6 +23,7 @@ from .queries.viewer_context import build_viewer_context
 from .types.financial_context import FinancialContextInput
 from .types.ingest import IngestOverview, IngestOverviewInput
 from .types.overview_ingest import OverviewIngestSources
+from .types.source_connections import SourceConnections
 from .types.xero_pipeline import (
     XeroPipelineRunDetail,
     XeroPipelineRunHistory,
@@ -121,6 +123,18 @@ class Query:
             info,
             'overviewIngestSources',
             lambda: build_overview_ingest_sources(info, context),
+        )
+
+    @strawberry.field
+    def source_connections(
+        self,
+        info: strawberry.Info,
+        context: FinancialContextInput,
+    ) -> SourceConnections:
+        return _resolve_safely(
+            info,
+            'sourceConnections',
+            lambda: build_source_connections(info, context),
         )
 
     @strawberry.field
