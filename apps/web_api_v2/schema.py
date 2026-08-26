@@ -20,6 +20,7 @@ from .queries.xero_pipeline import (
     build_xero_pipeline_summary,
 )
 from .queries.viewer_context import build_viewer_context
+from .queries.xero_connection_status import build_xero_connection_status
 from .types.financial_context import FinancialContextInput
 from .types.ingest import IngestOverview, IngestOverviewInput
 from .types.overview_ingest import OverviewIngestSources
@@ -31,6 +32,7 @@ from .types.xero_pipeline import (
     XeroPipelineSummary,
 )
 from .types.viewer import ViewerContext
+from .types.xero_connection_status import XeroConnectionStatus
 from .validation import MaxFieldSelectionsRule
 
 
@@ -135,6 +137,18 @@ class Query:
             info,
             'sourceConnections',
             lambda: build_source_connections(info, context),
+        )
+
+    @strawberry.field
+    def xero_connection_status(
+        self,
+        info: strawberry.Info,
+        context: FinancialContextInput,
+    ) -> XeroConnectionStatus:
+        return _resolve_safely(
+            info,
+            'xeroConnectionStatus',
+            lambda: build_xero_connection_status(info, context),
         )
 
     @strawberry.field

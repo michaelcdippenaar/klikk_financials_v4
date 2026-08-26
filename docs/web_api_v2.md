@@ -343,6 +343,58 @@ Representative authorization errors retain the shared V2 GraphQL envelope:
 }
 ```
 
+## Xero connection status (XERO-CONNECTION-STATUS-001 v1)
+
+`xeroConnectionStatus(context: FinancialContextInput!)` is the authenticated,
+read-only Xero connection/readiness contract served only by
+`POST /api/v2/graphql/`. It resolves the same backend-authoritative entity and
+financial context as the other V2 reads and requires an active membership plus
+`VIEW_FINANCIALS`.
+
+```graphql
+query XeroConnectionStatus($context: FinancialContextInput!) {
+  xeroConnectionStatus(context: $context) {
+    resolvedContext { entityId financialYear selectedPeriods }
+    configured
+    authorizationState
+    tokenActionRequired
+    sourceEvidenceAt
+    lastSuccessfulRunAt
+    availabilityCode
+    userSafeReason
+    actions { kind permitted reason requiredCapability expectedState }
+  }
+}
+```
+
+`authorizationState` is one of `AUTHORIZED`, `NOT_CONFIGURED`,
+`REAUTHORIZATION_REQUIRED`, or `UNAVAILABLE`. `availabilityCode` is one of
+`AVAILABLE`, `NOT_CONFIGURED`, `UNAVAILABLE`, `PERMISSION_DENIED`, or `ERROR`.
+Permission failures remain GraphQL errors rather than returning a connection
+row for an entity the caller cannot access.
+
+Configuration is established only from the exact entity's active Xero job
+definition and canonical entity-keyed credential-slot existence. The read uses
+an existence query and never selects or returns credential/token payload
+columns. It never refreshes a token or contacts Xero. A configured connection
+with zero local source rows remains `AVAILABLE`; its `sourceEvidenceAt` may be
+null and must not be interpreted as missing configuration. A dead authorization
+returns `REAUTHORIZATION_REQUIRED`, `tokenActionRequired: true`, and a safe
+redacted reason without exposing the stored provider error.
+
+`sourceEvidenceAt` is the latest locally persisted Xero source timestamp.
+`lastSuccessfulRunAt` is the latest successful V2 run for the exact selected
+periods. They are separate evidence channels and neither is substituted for the
+other. The existing Source Connections Xero row and this operation use the same
+evidence service so their lifecycle facts remain consistent.
+
+All returned `MANAGE_CONNECTION` and `SYNC` action descriptors are
+`permitted: false`. This read exposes no configuration, reauthorization, token
+refresh, synchronization, or other operational command. Anonymous requests are
+rejected; inactive, missing, wrong, and cross-entity memberships retain the
+non-leaking `FORBIDDEN_ENTITY` behavior, while missing `VIEW_FINANCIALS` returns
+`PERMISSION_DENIED` with a safe correlation envelope.
+
 ## Overview ingest sources (ING-CONNECT-001 v1.1)
 
 `overviewIngestSources(context: FinancialContextInput!)` is the server-owned eight-card Overview

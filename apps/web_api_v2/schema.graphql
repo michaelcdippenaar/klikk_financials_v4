@@ -1,3 +1,26 @@
+type ActionDescriptor {
+  kind: XeroConnectionActionKind!
+  permitted: Boolean!
+  reason: String!
+  requiredCapability: String
+  expectedState: String
+}
+
+enum AuthorizationState {
+  AUTHORIZED
+  NOT_CONFIGURED
+  REAUTHORIZATION_REQUIRED
+  UNAVAILABLE
+}
+
+enum AvailabilityCode {
+  AVAILABLE
+  NOT_CONFIGURED
+  UNAVAILABLE
+  PERMISSION_DENIED
+  ERROR
+}
+
 """Date (isoformat)"""
 scalar Date
 
@@ -259,6 +282,7 @@ type Query {
   ingestOverview(input: IngestOverviewInput!): IngestOverview!
   overviewIngestSources(context: FinancialContextInput!): OverviewIngestSources!
   sourceConnections(context: FinancialContextInput!): SourceConnections!
+  xeroConnectionStatus(context: FinancialContextInput!): XeroConnectionStatus!
   xeroPipelineSummary(context: FinancialContextInput!): XeroPipelineSummary!
   xeroPipelineRunHistory(context: FinancialContextInput!, stage: XeroPipelineStageKey!, limit: Int! = 20): XeroPipelineRunHistory!
   xeroPipelineRunDetail(context: FinancialContextInput!, runId: ID!): XeroPipelineRunDetail!
@@ -382,6 +406,23 @@ type ViewerContext {
 type ViewerPreferences {
   defaultEntityId: ID
   defaultFinancialYear: Int
+}
+
+enum XeroConnectionActionKind {
+  MANAGE_CONNECTION
+  SYNC
+}
+
+type XeroConnectionStatus {
+  resolvedContext: ResolvedFinancialContext!
+  configured: Boolean!
+  authorizationState: AuthorizationState!
+  tokenActionRequired: Boolean!
+  sourceEvidenceAt: DateTime
+  lastSuccessfulRunAt: DateTime
+  availabilityCode: AvailabilityCode!
+  userSafeReason: String
+  actions: [ActionDescriptor!]!
 }
 
 type XeroPipelineBlocker {
