@@ -38,6 +38,7 @@ jobs:
       DB_PASSWORD: klikk_ci
       DB_HOST: 127.0.0.1
       DB_PORT: '5432'
+      DB_CONN_MAX_AGE: '0'
       SECRET_KEY: ci-only-not-a-real-secret
       # No provider credentials are supplied. Any code path that reaches Xero,
       # Investec or TM1 in CI is a defect, not something to configure around.
@@ -54,12 +55,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install factory_boy  # test-only fixture dependency
 
       # Fails if a model changed without a migration.
       - name: Migration drift check
         run: python manage.py makemigrations --check --dry-run
 
-      # Scoped to web_api_v2 until the apps/xero/xero_data tests.py + tests/
-      # name collision is repaired; project-wide discovery currently fails.
       - name: V2 API tests
         run: python manage.py test apps.web_api_v2 --verbosity 2
+
+      # Project-wide discovery is unblocked now that the empty
+      # apps/xero/xero_data/tests.py stub no longer shadows tests/.
+      #
+      # Reporting-only for now: 923 tests run, 23 still fail. Those are
+      # pre-existing defects (string tenant ids where an integer column is
+      # expected, several 404s, one over-length varchar), not environment.
+      # Fix them, then delete continue-on-error and make this the gate.
+      - name: Full test suite (reporting only)
+        run: python manage.py test --verbosity 1
+        continue-on-error: true

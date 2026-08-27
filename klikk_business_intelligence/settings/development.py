@@ -39,7 +39,9 @@ DATABASES = {
         'PASSWORD': os.environ.get('DB_PASSWORD', '9eab84e6550a7ffad074156848d1129a8e0889cb16e2325d'),
         'HOST': os.environ.get('DB_HOST', '127.0.0.1'),
         'PORT': os.environ.get('DB_PORT', '5432'),
-        'CONN_MAX_AGE': 600,  # Reuse connections for 10 minutes (connection pooling)
+        # Persistent connections help a long-lived dev server but break Django's
+        # test runner, which closes the connection between cases. Set to 0 in CI.
+        'CONN_MAX_AGE': int(os.environ.get('DB_CONN_MAX_AGE', '600')),
         'OPTIONS': {
             'connect_timeout': 10,
         }
