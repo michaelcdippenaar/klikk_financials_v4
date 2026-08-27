@@ -67,7 +67,7 @@ class XeroTenantListViewTest(TestCase):
     
     def test_list_tenants_success(self):
         """Test successful tenant listing."""
-        response = self.client.get('/xero/tenants/')
+        response = self.client.get('/xero/core/tenants/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 2)
         
@@ -78,14 +78,14 @@ class XeroTenantListViewTest(TestCase):
     def test_list_tenants_empty(self):
         """Test listing tenants when none exist."""
         XeroTenantToken.objects.all().delete()
-        response = self.client.get('/xero/tenants/')
+        response = self.client.get('/xero/core/tenants/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(len(response.data), 0)
     
     def test_list_tenants_unauthenticated(self):
         """Test listing tenants without authentication."""
         client = APIClient()
-        response = client.get('/xero/tenants/')
+        response = client.get('/xero/core/tenants/')
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
 

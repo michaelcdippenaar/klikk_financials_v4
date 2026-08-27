@@ -247,8 +247,8 @@ class JournalMigrationComparisonTest(TestCase):
         """Monthly account totals should match."""
         from apps.xero.xero_data.models import XeroJournals
         
-        jan_date = datetime.datetime(2024, 1, 15, tzinfo=timezone.utc)
-        feb_date = datetime.datetime(2024, 2, 15, tzinfo=timezone.utc)
+        jan_date = datetime.datetime(2024, 1, 15, tzinfo=datetime.timezone.utc)
+        feb_date = datetime.datetime(2024, 2, 15, tzinfo=datetime.timezone.utc)
         
         # Create entries for both months, both pipelines
         for month_date in [jan_date, feb_date]:

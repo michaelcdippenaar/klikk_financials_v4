@@ -35,9 +35,15 @@ class ProcessXeroDataServiceTest(TestCase):
         self.assertIn('message', result)
         self.assertIn('stats', result)
         self.assertTrue(result['stats']['trail_balance_created'])
+        # process_xero_data forwards the full rebuild contract, not just
+        # `incremental`. Pin every argument so a silent default change here
+        # (e.g. rebuild flipping to True) still fails the test.
         mock_create_trail_balance.assert_called_once_with(
             self.tenant.tenant_id,
-            incremental=True
+            incremental=True,
+            rebuild=False,
+            exclude_manual_journals=False,
+            affected_periods=None,
         )
     
     def test_process_xero_data_tenant_not_found(self):
