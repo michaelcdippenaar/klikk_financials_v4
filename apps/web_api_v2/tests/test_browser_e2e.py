@@ -21,6 +21,7 @@ default would let the regression back in unnoticed.
 import json
 
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
 
@@ -113,10 +114,30 @@ MARCH_FY2026 = [
 ]
 
 
-class BrowserEndToEndTests(TestCase):
+
+class ThrottleIsolatedTestCase(TestCase):
+    """Sign-in throttle state is process-global and cache-backed.
+
+    These tests each sign in for real, so without isolation they spend the
+    shared 10/min login budget and fail unrelated suites that run after them.
+    Clear on the way in so we inherit a clean budget, and on the way out so
+    the next suite does too.
+    """
+
+    def setUp(self):
+        cache.clear()
+        super().setUp()
+
+    def tearDown(self):
+        super().tearDown()
+        cache.clear()
+
+
+class BrowserEndToEndTests(ThrottleIsolatedTestCase):
     """Sign in as a browser would, then drive the real V2 documents."""
 
     def setUp(self):
+        super().setUp()
         self.graphql_url = reverse('web_api_v2:graphql')
         self.login_url = reverse('web_api_v2_auth:login')
         self.refresh_url = reverse('web_api_v2_auth:refresh')
@@ -333,7 +354,7 @@ class BrowserEndToEndTests(TestCase):
         self.assertEqual(replayed.status_code, 401)
 
 
-class BrowserEndToEndWithoutMembershipTests(TestCase):
+class BrowserEndToEndWithoutMembershipTests(ThrottleIsolatedTestCase):
     """Authentication and entity access are separate controls.
 
     The 2026-08-22 incident turned on exactly this: sign-in worked, so the
@@ -342,6 +363,7 @@ class BrowserEndToEndWithoutMembershipTests(TestCase):
     """
 
     def setUp(self):
+        super().setUp()
         self.graphql_url = reverse('web_api_v2:graphql')
         self.login_url = reverse('web_api_v2_auth:login')
         self.password = 'safe-e2e-pass-8823'
