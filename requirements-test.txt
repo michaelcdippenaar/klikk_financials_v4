@@ -1,0 +1,9 @@
+# Test-only dependencies. Kept out of requirements.txt so they never ship
+# in the runtime image.
+#
+# factory_boy was previously installed by an ad-hoc CI step and absent
+# locally. Its ImportError fired inside setUpClass after the class-level
+# atomics had opened, so tearDownClass never ran and 37 unrelated tests
+# died on 'InterfaceError: connection already closed'. A missing test
+# dependency should fail as one test, not as a phantom cascade.
+factory_boy>=3.3,<4.0
