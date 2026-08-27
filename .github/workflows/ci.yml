@@ -59,7 +59,10 @@ jobs:
       - name: Migration drift check
         run: python manage.py makemigrations --check --dry-run
 
-      # Scoped to web_api_v2 until the apps/xero/xero_data tests.py + tests/
-      # name collision is repaired; project-wide discovery currently fails.
       - name: V2 API tests
         run: python manage.py test apps.web_api_v2 --verbosity 2
+
+      # Project-wide discovery is unblocked now that the empty
+      # apps/xero/xero_data/tests.py stub no longer shadows tests/.
+      - name: Full test suite
+        run: python manage.py test --verbosity 1
