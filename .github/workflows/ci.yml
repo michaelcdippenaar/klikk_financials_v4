@@ -79,4 +79,3 @@ jobs:
       # Fix them, then delete continue-on-error and make this the gate.
       - name: Full test suite (reporting only)
         run: python manage.py test --verbosity 1
-        continue-on-error: true
