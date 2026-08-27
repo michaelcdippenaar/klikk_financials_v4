@@ -61,6 +61,12 @@ jobs:
       - name: Migration drift check
         run: python manage.py makemigrations --check --dry-run
 
+      # The committed schema snapshot is the contract the frontend is built
+      # against. If it drifts from the runtime schema, the frontend is
+      # validating against a document the server no longer serves.
+      - name: GraphQL schema drift check
+        run: python manage.py export_graphql_schema --check
+
       - name: V2 API tests
         run: python manage.py test apps.web_api_v2 --verbosity 2
 
