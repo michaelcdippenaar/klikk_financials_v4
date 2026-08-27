@@ -14,11 +14,17 @@ from rest_framework.test import APIClient
 from rest_framework import status
 from django.utils import timezone
 import datetime
+from urllib.parse import parse_qs, urlparse
 
 from apps.xero.xero_auth.models import XeroClientCredentials, XeroTenantToken, XeroAuthSettings
 from apps.xero.xero_core.models import XeroTenant
 
 User = get_user_model()
+
+
+def _redirect_params(response):
+    """Query params of a Location header, as {name: [values]}."""
+    return parse_qs(urlparse(response['Location']).query)
 
 
 class XeroAuthInitiateViewTest(TestCase):
@@ -131,12 +137,17 @@ class XeroCallbackViewTest(TestCase):
         mock_client_instance.api_client = Mock()
         
         response = self.client.get('/xero/callback/', {'code': 'test-code'})
-        
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn('message', response.data)
-        self.assertIn('tenant_ids', response.data)
-        self.assertEqual(response.data['tenant_ids'], ['test-tenant-123'])
-        
+
+        # XeroCallbackView is the OAuth redirect target for Xero, which lands a
+        # BROWSER here — so its contract is a 302 back to the frontend carrying
+        # the outcome in the query string, not a JSON body. See the comment on
+        # XeroCallbackView.
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        params = _redirect_params(response)
+        self.assertEqual(params['status'], ['success'])
+        self.assertEqual(params['tenants'], ['Test Tenant'])
+        self.assertEqual(params['count'], ['1'])
+
         # Verify tenant was created
         tenant = XeroTenant.objects.get(tenant_id='test-tenant-123')
         self.assertEqual(tenant.tenant_name, 'Test Tenant')
@@ -146,13 +157,20 @@ class XeroCallbackViewTest(TestCase):
         self.assertIsNotNone(token)
     
     def test_callback_no_code(self):
-        """Test callback without authorization code."""
+        """A callback with no ?code= must bounce to the frontend error page."""
         response = self.client.get('/xero/callback/')
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('error', response.data)
-    
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        params = _redirect_params(response)
+        self.assertEqual(params['status'], ['error'])
+        self.assertEqual(params['message'], ['No authorization code provided'])
+
     def test_callback_no_credentials(self):
-        """Test callback without credentials."""
+        """With no active credentials the callback must not attempt a token exchange."""
         self.credentials.delete()
         response = self.client.get('/xero/callback/', {'code': 'test-code'})
-        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.status_code, status.HTTP_302_FOUND)
+        params = _redirect_params(response)
+        self.assertEqual(params['status'], ['error'])
+        self.assertEqual(params['message'], ['No active Xero credentials found'])
+        # Nothing was persisted from an unauthenticatable callback.
+        self.assertFalse(XeroTenantToken.objects.exists())

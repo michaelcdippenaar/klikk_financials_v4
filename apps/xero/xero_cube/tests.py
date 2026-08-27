@@ -40,7 +40,11 @@ class XeroProcessDataViewTest(TestCase):
             tenant_name='Test Tenant'
         )
     
-    @patch('apps.xero.xero_cube.services.process_xero_data')
+    # Patch the name the VIEW resolves. views.py does
+    # `from apps.xero.xero_cube.services import process_xero_data`, so the view
+    # holds its own reference and patching the services module is a no-op that
+    # would silently run the real pipeline.
+    @patch('apps.xero.xero_cube.views.process_xero_data')
     def test_process_data_success(self, mock_process):
         """Test successful data processing."""
         mock_process.return_value = {
@@ -49,15 +53,20 @@ class XeroProcessDataViewTest(TestCase):
             'stats': {'trail_balance_created': True, 'duration_seconds': 10.0}
         }
         
-        response = self.client.post('/xero/process/', {'tenant_id': 'test-tenant'})
+        response = self.client.post('/xero/cube/process/', {'tenant_id': 'test-tenant'})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('message', response.data)
         self.assertIn('stats', response.data)
-        mock_process.assert_called_once_with('test-tenant')
+        mock_process.assert_called_once_with(
+            'test-tenant',
+            rebuild_trail_balance=False,
+            exclude_manual_journals=False,
+            calculate_pnl_ytd=True,
+        )
     
     def test_process_data_no_tenant_id(self):
         """Test process without tenant_id."""
-        response = self.client.post('/xero/process/', {})
+        response = self.client.post('/xero/cube/process/', {})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
 
@@ -80,7 +89,7 @@ class XeroDataSummaryViewTest(TestCase):
     
     def test_summary_success(self):
         """Test successful summary retrieval."""
-        response = self.client.get('/xero/summary/', {'tenant_id': 'test-tenant'})
+        response = self.client.get('/xero/cube/summary/', {'tenant_id': 'test-tenant'})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data['tenant_id'], 'test-tenant')
         self.assertEqual(response.data['tenant_name'], 'Test Tenant')
@@ -91,10 +100,10 @@ class XeroDataSummaryViewTest(TestCase):
     
     def test_summary_no_tenant_id(self):
         """Test summary without tenant_id."""
-        response = self.client.get('/xero/summary/')
+        response = self.client.get('/xero/cube/summary/')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
     
     def test_summary_tenant_not_found(self):
         """Test summary with non-existent tenant."""
-        response = self.client.get('/xero/summary/', {'tenant_id': 'non-existent'})
+        response = self.client.get('/xero/cube/summary/', {'tenant_id': 'non-existent'})
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)

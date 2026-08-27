@@ -9,15 +9,22 @@ from django.utils import timezone
 from .models import XeroAccount, XeroContacts
 
 
-def _request_glossary_refresh(organisation_id):
+def _request_glossary_refresh(tenant_id):
+    """Record which Xero tenant changed, on the singleton request row.
+
+    tenant_id is XeroTenant's primary key — a varchar(100) Xero org GUID, NOT a
+    number. It used to be written into GlossaryRefreshRequest.organisation_id,
+    an IntegerField, which raised ValueError out of post_save and took the
+    caller's XeroAccount/XeroContacts save() down with it.
+    """
     from apps.ai_agent.models import GlossaryRefreshRequest
     req, _ = GlossaryRefreshRequest.objects.get_or_create(
         pk=1,
-        defaults={'organisation_id': organisation_id},
+        defaults={'tenant_id': tenant_id},
     )
     req.requested_at = timezone.now()
-    req.organisation_id = organisation_id
-    req.save(update_fields=['requested_at', 'organisation_id'])
+    req.tenant_id = tenant_id
+    req.save(update_fields=['requested_at', 'tenant_id'])
 
 
 @receiver(post_save, sender=XeroAccount)

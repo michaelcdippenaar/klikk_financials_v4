@@ -95,11 +95,10 @@ class DocumentSearchFixtureMixin:
             password='testpass123',
         )
         # NOTE: tenant_id is the PK and would realistically be a Xero org
-        # UUID, but apps.xero.xero_metadata.signals stuffs it into
-        # GlossaryRefreshRequest.organisation_id (an IntegerField) on every
-        # XeroAccount save, so a non-numeric tenant_id crashes account
-        # creation (pre-existing bug, flagged in the test report). Numeric
-        # strings keep these tests focused on the search contract.
+        # UUID. Numeric strings were originally required here because the
+        # glossary-refresh receiver stuffed the tenant pk into an IntegerField
+        # and crashed every XeroAccount save; that is fixed. They are kept
+        # because they are unique per run and the search contract does not care.
         cls.tenant = XeroTenant.objects.create(
             tenant_id=str(1_900_000_000 + uuid.uuid4().int % 100_000_000),
             tenant_name='Doc Search Tenant A',

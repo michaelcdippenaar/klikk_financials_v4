@@ -93,6 +93,18 @@ class TransactionProcessor:
                    f"{len(self._contacts_dict)} contacts, "
                    f"{len(self._trackings_dict)} tracking options")
     
+    def _ensure_lookups(self):
+        """Load the lookup dicts once, if they have not been loaded yet.
+
+        process_all_transactions() calls _load_lookups() explicitly (and must
+        keep doing so — it needs a FRESH read each run). The per-transaction
+        process_*() methods are public and callable on their own, and used to
+        blow up with `'NoneType' object has no attribute 'get'` when they were,
+        because the lookups were still None.
+        """
+        if self._accounts_by_code is None:
+            self._load_lookups()
+
     def _get_system_account(self, account_type):
         """
         Get the system account for a given type (AR, AP, etc.).
@@ -440,6 +452,7 @@ class TransactionProcessor:
         Returns:
             list: Journal entry dicts
         """
+        self._ensure_lookups()
         entries = []
         invoice = transaction_source.collection
         
@@ -602,6 +615,7 @@ class TransactionProcessor:
         Returns:
             list: Journal entry dicts
         """
+        self._ensure_lookups()
         entries = []
         bank_txn = transaction_source.collection
         
@@ -748,6 +762,7 @@ class TransactionProcessor:
         Returns:
             list: Journal entry dicts
         """
+        self._ensure_lookups()
         entries = []
         payment = transaction_source.collection
         
@@ -841,6 +856,7 @@ class TransactionProcessor:
         Returns:
             list: Journal entry dicts
         """
+        self._ensure_lookups()
         entries = []
         credit_note = transaction_source.collection
         
@@ -996,6 +1012,7 @@ class TransactionProcessor:
         Returns:
             list: Journal entry dicts
         """
+        self._ensure_lookups()
         entries = []
         prepayment = transaction_source.collection
         
@@ -1058,6 +1075,7 @@ class TransactionProcessor:
         Returns:
             list: Journal entry dicts
         """
+        self._ensure_lookups()
         entries = []
         overpayment = transaction_source.collection
         
@@ -1122,6 +1140,7 @@ class TransactionProcessor:
         Net zero overall — which is exactly why the missing legs never showed
         as a trial-balance imbalance while individual bank balances drifted.
         """
+        self._ensure_lookups()
         transfer = transaction_source.collection
         transfer_id = transfer.get('BankTransferID')
         date = self._parse_date(transfer.get('Date'))

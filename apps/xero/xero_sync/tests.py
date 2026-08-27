@@ -39,8 +39,19 @@ class XeroUpdateModelsViewTest(TestCase):
             tenant_id='test-tenant',
             tenant_name='Test Tenant'
         )
-    
-    @patch('apps.xero.xero_sync.services.update_xero_models')
+        # XeroUpdateModelsView resolves an active credentials row before it will
+        # sync anything (403 otherwise), so the happy path needs one.
+        self.credentials = XeroClientCredentials.objects.create(
+            user=self.user,
+            client_id='test-client-id',
+            client_secret='test-client-secret',
+            scope=['accounting.transactions'],
+            active=True,
+        )
+
+    # views.py does `from apps.xero.xero_sync.services import update_xero_models`,
+    # so the view holds its own reference — patch the name the VIEW resolves.
+    @patch('apps.xero.xero_sync.views.update_xero_models')
     def test_update_models_success(self, mock_update):
         """Test successful model update."""
         mock_update.return_value = {
@@ -50,13 +61,13 @@ class XeroUpdateModelsViewTest(TestCase):
             'errors': []
         }
         
-        response = self.client.post('/xero/update/', {'tenant_id': 'test-tenant'})
+        response = self.client.post('/xero/sync/update/', {'tenant_id': 'test-tenant'})
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertIn('message', response.data)
         self.assertIn('stats', response.data)
         mock_update.assert_called_once_with('test-tenant', user=self.user)
     
-    @patch('apps.xero.xero_sync.services.update_xero_models')
+    @patch('apps.xero.xero_sync.views.update_xero_models')
     def test_update_models_with_errors(self, mock_update):
         """Test model update with errors."""
         mock_update.return_value = {
@@ -66,18 +77,18 @@ class XeroUpdateModelsViewTest(TestCase):
             'errors': ['Error 1', 'Error 2']
         }
         
-        response = self.client.post('/xero/update/', {'tenant_id': 'test-tenant'})
+        response = self.client.post('/xero/sync/update/', {'tenant_id': 'test-tenant'})
         self.assertEqual(response.status_code, status.HTTP_207_MULTI_STATUS)
         self.assertIn('errors', response.data)
     
     def test_update_models_no_tenant_id(self):
         """Test update without tenant_id."""
-        response = self.client.post('/xero/update/', {})
+        response = self.client.post('/xero/sync/update/', {})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
     
     def test_update_models_tenant_not_found(self):
         """Test update with non-existent tenant."""
-        response = self.client.post('/xero/update/', {'tenant_id': 'non-existent'})
+        response = self.client.post('/xero/sync/update/', {'tenant_id': 'non-existent'})
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
 

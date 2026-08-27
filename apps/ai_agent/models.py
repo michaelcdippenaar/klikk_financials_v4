@@ -81,10 +81,30 @@ class GlossaryRefreshRequest(models.Model):
     after Xero metadata changes. A management command or cron runs refresh and clears this.
     """
     requested_at = models.DateTimeField(auto_now=True)
+
+    # XeroTenant's primary key is tenant_id, a varchar(100) holding a Xero org
+    # GUID. `organisation_id` below was declared IntegerField, so the
+    # post_save receivers in apps/xero/xero_metadata/signals.py raised
+    # "Field 'organisation_id' expected a number but got '<guid>'" on EVERY
+    # ORM save() of a XeroAccount / XeroContacts. Production only survived it
+    # because the sync path uses bulk_create(), which sends no signals — every
+    # single-row save was broken, and three separate test modules had to route
+    # around it with bulk_create or numeric-string tenant ids.
+    #
+    # tenant_id is the correct-width replacement and is what the signal and
+    # refresh_ai_glossary now read/write. organisation_id is retained,
+    # unwritten, purely so this stays an additive migration on an existing
+    # table; it can be dropped in a follow-up once nothing reads it.
+    tenant_id = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        help_text='XeroTenant.tenant_id that changed; null = refresh for all orgs',
+    )
     organisation_id = models.IntegerField(
         null=True,
         blank=True,
-        help_text='XeroTenant id that changed; null = refresh for all orgs',
+        help_text='DEPRECATED — wrong type for a Xero tenant id. Use tenant_id.',
     )
 
     class Meta:

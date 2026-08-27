@@ -39,80 +39,83 @@ class UpdateXeroModelsServiceTest(TestCase):
             active=True
         )
     
+    # update_xero_models has TWO outbound surfaces, and both must be stubbed or
+    # the test reaches for a live Xero token:
+    #   Group 1 (accounts / tracking / contacts) is delegated to
+    #     apps.xero.xero_metadata.services.update_metadata, which builds its OWN
+    #     XeroApiClient — patching xero_sync.services.XeroApiClient does not
+    #     reach it. Left unpatched it raises "No token found for tenant ...",
+    #     which update_xero_models swallows into errors[] -> success False.
+    #   Group 2 (bank_transactions / invoices / payments / manual_journals) goes
+    #     through xero_sync.services.XeroAccountingApi.
+    @patch('apps.xero.xero_metadata.services.update_metadata')
     @patch('apps.xero.xero_sync.services.XeroApiClient')
     @patch('apps.xero.xero_sync.services.XeroAccountingApi')
-    def test_update_xero_models_success(self, mock_api_class, mock_client_class):
+    def test_update_xero_models_success(self, mock_api_class, mock_client_class, mock_update_metadata):
         """Test update_xero_models with successful execution."""
-        # Mock API responses
+        mock_update_metadata.return_value = {
+            'success': True,
+            'errors': [],
+            'stats': {
+                'accounts_updated': 1,
+                'tracking_categories_updated': 1,
+                'contacts_updated': 1,
+                'api_calls': 3,
+            },
+        }
+
         mock_api = MagicMock()
         mock_api_class.return_value = mock_api
-        
-        # Mock the API methods to return empty results
-        accounts_mock = MagicMock()
-        accounts_mock.get.return_value = None
-        mock_api.accounts.return_value = accounts_mock
-        
-        tracking_mock = MagicMock()
-        tracking_mock.get.return_value = None
-        mock_api.tracking_categories.return_value = tracking_mock
-        
-        contacts_mock = MagicMock()
-        contacts_mock.get.return_value = None
-        mock_api.contacts.return_value = contacts_mock
-        
-        bank_transactions_mock = MagicMock()
-        bank_transactions_mock.get.return_value = None
-        mock_api.bank_transactions.return_value = bank_transactions_mock
-        
-        invoices_mock = MagicMock()
-        invoices_mock.get.return_value = None
-        mock_api.invoices.return_value = invoices_mock
-        
-        payments_mock = MagicMock()
-        payments_mock.get.return_value = None
-        mock_api.payments.return_value = payments_mock
-        
-        journals_mock = MagicMock()
-        journals_mock.get.return_value = None
-        mock_api.journals.return_value = journals_mock
-        
+
+        # Group 2 endpoints all answer without raising.
+        for endpoint in ('bank_transactions', 'invoices', 'payments', 'manual_journals'):
+            endpoint_mock = MagicMock()
+            endpoint_mock.get.return_value = None
+            getattr(mock_api, endpoint).return_value = endpoint_mock
+
         # Call the function
         result = update_xero_models(self.tenant.tenant_id, user=self.user)
-        
+
         # Assertions
+        self.assertEqual(result.get('errors', []), [])
         self.assertTrue(result['success'])
         self.assertIn('message', result)
         self.assertIn('stats', result)
-        self.assertEqual(len(result.get('errors', [])), 0)
         self.assertIn('duration_seconds', result['stats'])
-    
+        mock_update_metadata.assert_called_once_with(self.tenant.tenant_id, user=self.user)
+
+    @patch('apps.xero.xero_metadata.services.update_metadata')
     @patch('apps.xero.xero_sync.services.XeroApiClient')
     @patch('apps.xero.xero_sync.services.XeroAccountingApi')
-    def test_update_xero_models_with_errors(self, mock_api_class, mock_client_class):
-        """Test update_xero_models with some API errors."""
+    def test_update_xero_models_with_errors(self, mock_api_class, mock_client_class, mock_update_metadata):
+        """One failing endpoint must be collected, not raised, and flip success."""
+        mock_update_metadata.return_value = {
+            'success': True,
+            'errors': [],
+            'stats': {},
+        }
+
         mock_api = MagicMock()
         mock_api_class.return_value = mock_api
-        
-        # Mock one failing call
-        accounts_mock = MagicMock()
-        accounts_mock.get.side_effect = Exception("API Error")
-        mock_api.accounts.return_value = accounts_mock
-        
-        tracking_mock = MagicMock()
-        tracking_mock.get.return_value = None
-        mock_api.tracking_categories.return_value = tracking_mock
-        
-        contacts_mock = MagicMock()
-        contacts_mock.get.return_value = None
-        mock_api.contacts.return_value = contacts_mock
-        
+
+        for endpoint in ('invoices', 'payments', 'manual_journals'):
+            endpoint_mock = MagicMock()
+            endpoint_mock.get.return_value = None
+            getattr(mock_api, endpoint).return_value = endpoint_mock
+
+        failing = MagicMock()
+        failing.get.side_effect = Exception("API Error")
+        mock_api.bank_transactions.return_value = failing
+
         # Call the function
         result = update_xero_models(self.tenant.tenant_id, user=self.user)
-        
+
         # Should have errors but still return result
         self.assertFalse(result['success'])
-        self.assertGreater(len(result.get('errors', [])), 0)
-    
+        self.assertEqual(len(result.get('errors', [])), 1)
+        self.assertIn('bank_transactions', result['errors'][0])
+
+
     def test_update_xero_models_tenant_not_found(self):
         """Test update_xero_models with non-existent tenant."""
         with self.assertRaises(ValueError) as context:
