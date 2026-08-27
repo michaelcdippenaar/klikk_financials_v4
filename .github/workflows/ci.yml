@@ -38,6 +38,7 @@ jobs:
       DB_PASSWORD: klikk_ci
       DB_HOST: 127.0.0.1
       DB_PORT: '5432'
+      DB_CONN_MAX_AGE: '0'
       SECRET_KEY: ci-only-not-a-real-secret
       # No provider credentials are supplied. Any code path that reaches Xero,
       # Investec or TM1 in CI is a defect, not something to configure around.
@@ -54,6 +55,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install factory_boy  # test-only fixture dependency
 
       # Fails if a model changed without a migration.
       - name: Migration drift check
