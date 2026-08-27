@@ -51,15 +51,14 @@ def _make_tenant():
 def _make_contact(name, contacts_id=None):
     """XeroContacts needs a NOT NULL organisation (XeroTenant); PK is the contacts_id string.
 
-    Created with ``bulk_create`` **on purpose**: ``XeroContacts.save()`` fires the
-    ``request_glossary_refresh_on_contact`` post_save receiver
-    (apps/xero/xero_metadata/signals.py), which writes ``XeroTenant.tenant_id`` — a
-    varchar UUID — into ``ai_agent.GlossaryRefreshRequest.organisation_id``, which is an
-    ``IntegerField``. That raises ``ValueError: Field 'organisation_id' expected a number``.
-    It is a PRE-EXISTING bug in another app, unrelated to the price list; production never
-    trips it because ``XeroContactsModelManager.create_contacts_from_xero`` also uses
-    ``bulk_create`` (which does not send signals). Reported to MC separately — do NOT
-    "fix" it here by changing another app's model.
+    Created with ``bulk_create``, matching what
+    ``XeroContactsModelManager.create_contacts_from_xero`` does in production
+    (bulk_create sends no signals). It also used to be a necessary workaround:
+    ``XeroContacts.save()`` fires ``request_glossary_refresh_on_contact``
+    (apps/xero/xero_metadata/signals.py), which wrote the varchar tenant pk into
+    ``ai_agent.GlossaryRefreshRequest.organisation_id``, an ``IntegerField``, and
+    raised ``ValueError``. That is fixed — the receiver now writes
+    ``GlossaryRefreshRequest.tenant_id`` — so a plain ``create()`` would work too.
     """
     _contact_seq['n'] += 1
     cid = contacts_id or f'00000000-0000-0000-0000-{_contact_seq["n"]:012d}'

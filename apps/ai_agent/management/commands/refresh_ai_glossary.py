@@ -49,7 +49,9 @@ class Command(BaseCommand):
             self.stdout.write('No glossary refresh requested. Use --force to run anyway.')
             return
 
-        org_id = req.organisation_id if req else None
+        # req.tenant_id is XeroTenant's pk; refresh_glossary_documents filters
+        # XeroAccount/XeroContacts by organisation_id, which IS that pk.
+        org_id = req.tenant_id if req else None
         self.stdout.write('Refreshing glossary documents from Xero accounts and contacts...')
         updated = refresh_glossary_documents(project_id=project_id, organisation_id=org_id)
         self.stdout.write(self.style.SUCCESS(f'Updated {updated} glossary doc(s).'))

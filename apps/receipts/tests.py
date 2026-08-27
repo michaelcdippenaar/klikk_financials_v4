@@ -114,9 +114,9 @@ def make_tenant(tenant_id, name):
 
 
 def make_account(tenant, account_id, code, name, type_):
-    # bulk_create: skips post_save. apps/xero/xero_metadata/signals.py writes
-    # GlossaryRefreshRequest.organisation_id (IntegerField) from a UUID-string tenant pk and
-    # raises ValueError on every ORM save() of an account/contact — pre-existing bug, not receipts'.
+    # bulk_create: skips post_save, matching the production sync path. (It was
+    # also a workaround for the glossary-refresh receiver writing a varchar
+    # tenant pk into an IntegerField; that is fixed, so create() works now too.)
     return XeroAccount.objects.bulk_create(
         [XeroAccount(organisation=tenant, account_id=account_id, code=code, name=name, type=type_)])[0]
 
