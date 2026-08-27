@@ -335,6 +335,10 @@ TM1_REQUEST_TIMEOUT = int(os.environ.get('TM1_REQUEST_TIMEOUT', '300'))
 # ---------------------------------------------------------------------------
 
 # AI Provider toggle: "anthropic" or "openai"
+# Prewarming opens a connection to TM1 at startup. It is additionally gated to
+# serving processes only; see apps/ai_agent/apps.py.
+AI_AGENT_TM1_PREWARM = os.environ.get('AI_AGENT_TM1_PREWARM', 'true').lower() not in {'0', 'false', 'no'}
+
 AI_AGENT_PROVIDER = os.environ.get('AI_AGENT_PROVIDER') or os.environ.get('AI_PROVIDER', 'openai')
 
 # Anthropic (Claude)
