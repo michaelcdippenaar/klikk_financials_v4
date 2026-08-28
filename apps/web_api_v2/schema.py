@@ -24,6 +24,7 @@ from .queries.xero_reconciliation import (
     build_xero_reconciliation_account,
 )
 from .queries.investec_bank import build_investec_bank_transactions
+from .queries.investec_shares import build_investec_share_account
 from .queries.planning_target import build_planning_analytics_target
 from .queries.viewer_context import build_viewer_context
 from .queries.xero_connection_status import build_xero_connection_status
@@ -39,6 +40,7 @@ from .types.xero_pipeline import (
 )
 from .types.xero_reconciliation import ReconciliationAccountDetail, XeroReconciliation
 from .types.investec_bank import InvestecBankTransactions
+from .types.investec_shares import InvestecShareAccount
 from .types.planning_target import PlanningAnalyticsTarget
 from .types.viewer import ViewerContext
 from .types.xero_connection_status import XeroConnectionStatus
@@ -185,6 +187,19 @@ class Query:
             info,
             'investecBankTransactions',
             lambda: build_investec_bank_transactions(info, context, limit, offset),
+        )
+
+    @strawberry.field
+    def investec_share_account(
+        self,
+        info: strawberry.Info,
+        context: FinancialContextInput,
+        limit: int = 100,
+    ) -> InvestecShareAccount:
+        return _resolve_safely(
+            info,
+            'investecShareAccount',
+            lambda: build_investec_share_account(info, context, limit),
         )
 
     @strawberry.field
