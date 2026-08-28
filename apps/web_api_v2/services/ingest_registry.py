@@ -273,6 +273,41 @@ def run_standard_sync(entity):
     }
 
 
+def _aged_result(process_key, label, stats):
+    """Judge an aged sweep instead of reporting whatever it returns as success.
+
+    On 28 Aug 2026 a Standard sync reported `succeeded` with 274 errors and no
+    rows written, because these two stages were the only ones whose result was
+    never checked. Every other stage already tests `success` or `errors`.
+    """
+    errors = int(stats.get('errors') or 0)
+    if errors:
+        processed = int(stats.get('contacts_processed') or 0)
+        raise ProcessCommandError(
+            'PROCESS_FAILED',
+            f'{label} failed for {errors} of {processed} contacts.',
+            retryable=True,
+        )
+    # Stopping at a budget is a legitimate partial result, not a failure, but it
+    # must not be presented as a completed sweep.
+    stopped = stats.get('stopped_early')
+    if stopped in {'daily-limit', 'headroom-floor'}:
+        raise ProcessCommandError(
+            'XERO_DAILY_LIMIT_REACHED',
+            f'{label} stopped to preserve the remaining Xero daily allowance.',
+            retryable=True,
+            blocked=True,
+        )
+    if stopped == 'max-api-calls':
+        raise ProcessCommandError(
+            'PROCESS_INCOMPLETE',
+            f'{label} reached its API-call budget after '
+            f'{stats.get("contacts_processed", 0)} of {stats.get("contact_count", 0)} contacts.',
+            retryable=True,
+        )
+    return normalize_result(process_key, stats)
+
+
 def execute_process(process_key, entity):
     """Execute one allowlisted synchronous process using reviewed Python services."""
     try:
@@ -335,10 +370,14 @@ def execute_process(process_key, entity):
             return normalize_result(process_key, result)
         if process_key == 'aged-payables':
             from apps.xero.xero_data.aged_reports_service import sync_aged_payables
-            return normalize_result(process_key, sync_aged_payables(entity))
+            return _aged_result(process_key, 'Aged payables', sync_aged_payables(
+                entity, max_api_calls=settings.WEB_API_V2_INGEST_MAX_XERO_CALLS,
+            ))
         if process_key == 'aged-receivables':
             from apps.xero.xero_data.aged_reports_service import sync_aged_receivables
-            return normalize_result(process_key, sync_aged_receivables(entity))
+            return _aged_result(process_key, 'Aged receivables', sync_aged_receivables(
+                entity, max_api_calls=settings.WEB_API_V2_INGEST_MAX_XERO_CALLS,
+            ))
         raise ProcessCommandError('UNKNOWN_PROCESS', 'The requested process is not allowlisted.')
     except TenantReauthRequired:
         raise ProcessCommandError(

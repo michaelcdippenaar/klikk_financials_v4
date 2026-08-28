@@ -26,7 +26,6 @@ Two passes (2026-08-19 redesign — see Klikk-Xero-Code-Audit-2026-08-19.md):
 import logging
 import os
 import re
-import time
 from datetime import datetime, timezone as dt_timezone
 
 from django.core.files.base import ContentFile
@@ -35,18 +34,22 @@ from django.db.models import Exists, OuterRef
 from django.db.models.fields.json import KeyTextTransform
 from django.utils import timezone
 
-from xero_python.exceptions import RateLimitException
 
 from apps.xero.xero_core.exceptions import DailyLimitReached
 from apps.xero.xero_core.models import XeroTenant
 from apps.xero.xero_data.models import XeroTransactionSource, XeroDocument
 from apps.xero.xero_data.services import _get_credentials_for_tenant
 from apps.xero.xero_core.services import (
-    MAX_RETRY_AFTER_SLEEP,
     XeroApiClient,
     XeroAccountingApi,
-    retry_after_seconds,
     serialize_model,
+)
+# One implementation of Xero pacing, shared with the aged-report sweep.
+from apps.xero.xero_core.throttle import (
+    DEFAULT_CALLS_PER_MINUTE,
+    DEFAULT_HEADROOM,
+    HeadroomFloorReached,
+    RateLimitedCaller as _RateLimitedCaller,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,18 +59,8 @@ logger = logging.getLogger(__name__)
 # but live in XeroJournalsSource; not covered here.)
 SUPPORTED_SOURCE_TYPES = ('Invoice', 'CreditNote', 'BankTransaction')
 
-# Xero tenant limits: 60 calls/min, 5000 calls/day.
-DEFAULT_CALLS_PER_MINUTE = 55
-
 # Largest page Xero accepts on Invoices / BankTransactions / CreditNotes.
 DISCOVERY_PAGE_SIZE = 1000
-
-# Default floor of X-DayLimit-Remaining below which discretionary fetch work
-# stops cleanly, so the 02:45 nightly pipeline never starves. MEASURED
-# 2026-08-19: the Klikk tenant's X-DayLimit-Remaining reads 999 right after the
-# daily reset, i.e. the cap is 1,000/day (Xero's lower tier), not 5,000 — so the
-# floor is 300 (30%); pass --headroom to override per tenant.
-DEFAULT_HEADROOM = 300
 
 _XERO_DATE_RE = re.compile(r'/Date\((\d+)(?:[+-]\d{4})?\)/')
 
@@ -92,65 +85,6 @@ def parse_xero_date(value):
 
 # Back-compat name; the canonical exception lives in apps.xero.xero_core.exceptions.
 XeroDailyLimitReached = DailyLimitReached
-
-
-class HeadroomFloorReached(Exception):
-    """X-DayLimit-Remaining fell below the configured floor; stop discretionary work."""
-
-    def __init__(self, remaining, floor):
-        super().__init__(
-            f"Xero X-DayLimit-Remaining={remaining} is below the floor of {floor}; "
-            f"stopping to preserve nightly headroom"
-        )
-        self.remaining = remaining
-        self.floor = floor
-
-
-class _RateLimitedCaller:
-    """Throttles Xero API calls under the per-minute limit; waits out minute-window 429s,
-    raises DailyLimitReached when the daily limit is hit, and HeadroomFloorReached when
-    the tenant's remaining daily allowance (from X-DayLimit-Remaining) drops below ``headroom``."""
-
-    def __init__(self, calls_per_minute=DEFAULT_CALLS_PER_MINUTE, api_client=None, headroom=None):
-        self.min_interval = 60.0 / calls_per_minute
-        self.calls = 0
-        self._last_call = 0.0
-        self.api_client = api_client      # XeroApiClient (exposes day_limit_remaining)
-        self.headroom = headroom
-
-    @property
-    def day_limit_remaining(self):
-        return getattr(self.api_client, 'day_limit_remaining', None)
-
-    def check_headroom(self):
-        remaining = self.day_limit_remaining
-        if self.headroom is not None and remaining is not None and remaining < self.headroom:
-            raise HeadroomFloorReached(remaining, self.headroom)
-
-    def __call__(self, fn, *args, **kwargs):
-        self.check_headroom()
-        for attempt in (1, 2):
-            wait = self.min_interval - (time.monotonic() - self._last_call)
-            if wait > 0:
-                time.sleep(wait)
-            self._last_call = time.monotonic()
-            self.calls += 1
-            try:
-                return fn(*args, **kwargs)
-            except RateLimitException as e:
-                # Day-window 429s are normally converted to DailyLimitReached by
-                # XeroApiClient's HTTP guard before reaching here; this branch
-                # handles minute-window 429s, with the same cap as a backstop.
-                problem = (e.rate_limit or '').lower()
-                delay = retry_after_seconds(e)
-                if problem == 'day' or delay > MAX_RETRY_AFTER_SLEEP or attempt == 2:
-                    raise DailyLimitReached(
-                        f"Xero rate limit ({problem or 'unknown window'}, "
-                        f"Retry-After={delay}s) — aborting instead of sleeping",
-                        retry_after=delay,
-                    ) from e
-                logger.warning("Xero per-minute rate limit hit; sleeping %ss before retry", delay)
-                time.sleep(delay)
 
 
 # Map our transaction_source string to (list_attachments_method, get_content_method) on AccountingApi

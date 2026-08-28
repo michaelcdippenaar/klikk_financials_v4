@@ -10,9 +10,11 @@ Strategy:
   - Call the per-contact endpoint, parse the six-bucket header row, upsert.
 
 Rate limiting:
-  Xero allows 60 calls/minute. For tenants with hundreds of contacts we add a
-  1-second sleep after every 50 calls — well within the budget but prevents
-  burst spikes that would error on Xero's per-minute window.
+  Xero allows 60 calls/minute and (on this tenant's tier) 1,000/day. Every call
+  is paced by the shared RateLimitedCaller, the sweep stops at a call budget
+  and at a day-allowance floor, and a minute-window 429 is waited out rather
+  than skipped past. The previous 'sleep 1.1s after every 50 calls' was a
+  ~2,700/min burst against a 60/min limit.
 
 Response shape (serialized ReportWithRows → reports[0]):
   {
@@ -36,7 +38,6 @@ The SummaryRow contains the totals for the contact. We store only the summary
 row (one row per contact per date). If there is no SummaryRow (empty contact),
 we skip to avoid storing zero-rows for every contact.
 """
-import time
 import logging
 from datetime import date as date_type, datetime
 from decimal import Decimal, InvalidOperation
@@ -47,13 +48,14 @@ from apps.xero.xero_metadata.models import XeroContacts
 from apps.xero.xero_data.models import AgedPayable, AgedReceivable
 from apps.xero.xero_data.services import _get_credentials_for_tenant
 from apps.xero.xero_core.services import XeroApiClient, XeroAccountingApi, serialize_model
+from apps.xero.xero_core.throttle import (
+    DEFAULT_CALLS_PER_MINUTE,
+    DEFAULT_HEADROOM,
+    HeadroomFloorReached,
+    RateLimitedCaller,
+)
 
 logger = logging.getLogger(__name__)
-
-# Sleep after this many API calls to respect the 60 calls/minute rate limit
-_RATE_LIMIT_BATCH = 50
-_RATE_LIMIT_SLEEP = 1.1  # seconds
-
 
 def _parse_decimal(value):
     """Parse a cell value string to Decimal. Returns Decimal(0) on any error."""
@@ -102,11 +104,16 @@ def _extract_buckets(cells):
 
 
 def _get_api(tenant: XeroTenant):
-    """Build an authenticated AccountingApi for the tenant."""
+    """Build an authenticated AccountingApi, with the client that tracks budget.
+
+    Returns (accounting_api, xero_api_client). The second is the only object
+    carrying day_limit_remaining — reading it off the raw AccountingApi gives
+    the xero_python client instead, so the headroom check silently never fires.
+    """
     credentials = _get_credentials_for_tenant(tenant.tenant_id)
     api_client = XeroApiClient(credentials.user, tenant.tenant_id)
     accounting = XeroAccountingApi(api_client, tenant.tenant_id)
-    return accounting.api_client  # the raw AccountingApi instance
+    return accounting.api_client, api_client
 
 
 def _contacts_for_tenant(tenant: XeroTenant, flag: str):
@@ -133,198 +140,156 @@ def _contacts_for_tenant(tenant: XeroTenant, flag: str):
     return contacts
 
 
-def sync_aged_payables(tenant: XeroTenant, report_date: date_type | None = None) -> dict:
-    """
-    Iterate over supplier contacts, fetch aged payables per contact, upsert rows.
+def _sync_aged(
+    tenant: XeroTenant,
+    *,
+    kind: str,
+    contact_flag: str,
+    fetch_name: str,
+    model,
+    report_date: date_type | None = None,
+    max_api_calls: int | None = None,
+    calls_per_minute: int = DEFAULT_CALLS_PER_MINUTE,
+    headroom: int | None = DEFAULT_HEADROOM,
+) -> dict:
+    """One contact-by-contact aged-report sweep, used for payables and receivables.
 
-    Returns:
-        {
-          'created': int,
-          'updated': int,
-          'skipped': int,   # contacts with no payables data (empty report)
-          'errors': int,
-          'contact_count': int,
-          'completed_at': str (ISO-8601),
-        }
+    This endpoint has no bulk form: it is one API call per contact, so a tenant
+    with hundreds of contacts can spend a large share of the daily allowance in
+    a single sweep. Three things keep that bounded, and all three were missing
+    on 28 Aug 2026 when one run spent ~83% of the day's budget and reported
+    success anyway:
+
+      - every call is paced under the per-minute limit, and a minute-window 429
+        is waited out rather than counted as a per-contact error and skipped
+        past (which kept issuing calls that could not succeed);
+      - the sweep stops at ``max_api_calls`` and at the day-allowance floor,
+        reporting where it stopped instead of running the list to the end;
+      - errors are returned for the caller to judge. A sweep that wrote nothing
+        must not be reported as a success.
+
+    Returns created/updated/skipped/errors, contact_count, contacts_processed,
+    api_calls, stopped_early (None | 'max-api-calls' | 'daily-limit' |
+    'headroom-floor' | 'reauth-required') and completed_at.
     """
     if report_date is None:
         report_date = date_type.today()
 
-    stats = {'created': 0, 'updated': 0, 'skipped': 0, 'errors': 0}
+    stats = {
+        'created': 0, 'updated': 0, 'skipped': 0, 'errors': 0,
+        'contacts_processed': 0, 'api_calls': 0, 'stopped_early': None,
+    }
 
-    contacts = list(_contacts_for_tenant(tenant, 'IsSupplier'))
+    contacts = list(_contacts_for_tenant(tenant, contact_flag))
     stats['contact_count'] = len(contacts)
-
     if not contacts:
         stats['completed_at'] = datetime.utcnow().isoformat() + 'Z'
         return stats
 
-    api = _get_api(tenant)
-
-    for idx, contact in enumerate(contacts, start=1):
-        # Rate-limit: sleep after every N calls
-        if idx > 1 and (idx - 1) % _RATE_LIMIT_BATCH == 0:
-            logger.info('Aged payables: pausing after %d calls to respect rate limit.', idx - 1)
-            time.sleep(_RATE_LIMIT_SLEEP)
-
-        try:
-            raw = api.get_report_aged_payables_by_contact(
-                tenant.tenant_id,
-                contact.contacts_id,
-                date=report_date,
-            )
-            serialized = serialize_model(raw)
-        except (DailyLimitReached, TenantReauthRequired):
-            # One call per contact: swallowing these would walk every remaining
-            # supplier issuing calls that cannot possibly succeed (~317/run).
-            # Abort the sweep and let the caller handle it.
-            raise
-        except Exception as exc:
-            logger.error(
-                'Aged payables API error for contact %s (%s): %s',
-                contact.contacts_id, contact.name, exc,
-            )
-            stats['errors'] += 1
-            continue
-
-        # Navigate: Reports[0].Rows
-        reports_list = serialized.get('Reports', [])
-        if not reports_list:
-            stats['skipped'] += 1
-            continue
-
-        report = reports_list[0]
-        rows = report.get('Rows', [])
-        summary_cells = _find_summary_row(rows)
-
-        if summary_cells is None:
-            # Empty report — no payables for this contact
-            stats['skipped'] += 1
-            continue
-
-        buckets = _extract_buckets(summary_cells)
-        if buckets is None:
-            logger.warning(
-                'Aged payables: unexpected cell count for contact %s, skipping.',
-                contact.contacts_id,
-            )
-            stats['skipped'] += 1
-            continue
-
-        # All buckets zero → contact has no payables → skip (don't clutter DB)
-        if all(v == Decimal('0') for v in buckets.values()):
-            stats['skipped'] += 1
-            continue
-
-        obj, created = AgedPayable.objects.update_or_create(
-            tenant=tenant,
-            contact_id=contact.contacts_id,
-            report_date=report_date,
-            defaults={
-                'contact_name': contact.name or '',
-                **buckets,
-            },
-        )
-        if created:
-            stats['created'] += 1
-        else:
-            stats['updated'] += 1
-
-    stats['completed_at'] = datetime.utcnow().isoformat() + 'Z'
-    logger.info(
-        'Aged payables sync complete for tenant %s: %s',
-        tenant.tenant_id, stats,
+    api, budget_client = _get_api(tenant)
+    call = RateLimitedCaller(
+        calls_per_minute=calls_per_minute,
+        api_client=budget_client,
+        headroom=headroom,
     )
-    return stats
+    fetch = getattr(api, fetch_name)
 
-
-def sync_aged_receivables(tenant: XeroTenant, report_date: date_type | None = None) -> dict:
-    """
-    Iterate over customer contacts, fetch aged receivables per contact, upsert rows.
-
-    Returns same shape as sync_aged_payables.
-    """
-    if report_date is None:
-        report_date = date_type.today()
-
-    stats = {'created': 0, 'updated': 0, 'skipped': 0, 'errors': 0}
-
-    contacts = list(_contacts_for_tenant(tenant, 'IsCustomer'))
-    stats['contact_count'] = len(contacts)
-
-    if not contacts:
-        stats['completed_at'] = datetime.utcnow().isoformat() + 'Z'
-        return stats
-
-    api = _get_api(tenant)
-
-    for idx, contact in enumerate(contacts, start=1):
-        if idx > 1 and (idx - 1) % _RATE_LIMIT_BATCH == 0:
-            logger.info('Aged receivables: pausing after %d calls to respect rate limit.', idx - 1)
-            time.sleep(_RATE_LIMIT_SLEEP)
+    for contact in contacts:
+        if max_api_calls is not None and call.calls >= max_api_calls:
+            stats['stopped_early'] = 'max-api-calls'
+            logger.info(
+                'Aged %s: stopping at the %d-call budget with %d of %d contacts done.',
+                kind, max_api_calls, stats['contacts_processed'], len(contacts),
+            )
+            break
 
         try:
-            raw = api.get_report_aged_receivables_by_contact(
-                tenant.tenant_id,
-                contact.contacts_id,
-                date=report_date,
-            )
+            raw = call(fetch, tenant.tenant_id, contact.contacts_id, date=report_date)
             serialized = serialize_model(raw)
-        except (DailyLimitReached, TenantReauthRequired):
-            # See aged payables above: never keep looping contacts once the
-            # daily budget is gone or the tenant needs re-authorization.
+        except DailyLimitReached:
+            # One call per contact: walking the rest would issue hundreds of
+            # calls that cannot succeed. Stop and say so.
+            stats['stopped_early'] = 'daily-limit'
+            break
+        except HeadroomFloorReached as exc:
+            stats['stopped_early'] = 'headroom-floor'
+            logger.info('Aged %s: %s', kind, exc)
+            break
+        except TenantReauthRequired:
+            stats['stopped_early'] = 'reauth-required'
             raise
         except Exception as exc:
             logger.error(
-                'Aged receivables API error for contact %s (%s): %s',
-                contact.contacts_id, contact.name, exc,
+                'Aged %s API error for contact %s (%s): %s',
+                kind, contact.contacts_id, contact.name, exc,
             )
             stats['errors'] += 1
+            stats['contacts_processed'] += 1
             continue
+
+        stats['contacts_processed'] += 1
 
         reports_list = serialized.get('Reports', [])
         if not reports_list:
             stats['skipped'] += 1
             continue
 
-        report = reports_list[0]
-        rows = report.get('Rows', [])
+        rows = reports_list[0].get('Rows', [])
         summary_cells = _find_summary_row(rows)
-
         if summary_cells is None:
+            # Empty report — no aged balance for this contact.
             stats['skipped'] += 1
             continue
 
         buckets = _extract_buckets(summary_cells)
         if buckets is None:
             logger.warning(
-                'Aged receivables: unexpected cell count for contact %s, skipping.',
-                contact.contacts_id,
+                'Aged %s: unexpected cell count for contact %s, skipping.',
+                kind, contact.contacts_id,
             )
             stats['skipped'] += 1
             continue
 
-        if all(v == Decimal('0') for v in buckets.values()):
+        # All buckets zero → nothing owed → skip (don't clutter the table).
+        if all(value == Decimal('0') for value in buckets.values()):
             stats['skipped'] += 1
             continue
 
-        obj, created = AgedReceivable.objects.update_or_create(
+        _, created = model.objects.update_or_create(
             tenant=tenant,
             contact_id=contact.contacts_id,
             report_date=report_date,
-            defaults={
-                'contact_name': contact.name or '',
-                **buckets,
-            },
+            defaults={'contact_name': contact.name or '', **buckets},
         )
-        if created:
-            stats['created'] += 1
-        else:
-            stats['updated'] += 1
+        stats['created' if created else 'updated'] += 1
 
+    stats['api_calls'] = call.calls
     stats['completed_at'] = datetime.utcnow().isoformat() + 'Z'
-    logger.info(
-        'Aged receivables sync complete for tenant %s: %s',
-        tenant.tenant_id, stats,
-    )
+    logger.info('Aged %s sync complete for tenant %s: %s', kind, tenant.tenant_id, stats)
     return stats
+
+
+def sync_aged_payables(tenant: XeroTenant, report_date: date_type | None = None, **kwargs) -> dict:
+    """Aged payables per supplier contact. See _sync_aged for the guard rails."""
+    return _sync_aged(
+        tenant,
+        kind='payables',
+        contact_flag='IsSupplier',
+        fetch_name='get_report_aged_payables_by_contact',
+        model=AgedPayable,
+        report_date=report_date,
+        **kwargs,
+    )
+
+
+def sync_aged_receivables(tenant: XeroTenant, report_date: date_type | None = None, **kwargs) -> dict:
+    """Aged receivables per customer contact. See _sync_aged for the guard rails."""
+    return _sync_aged(
+        tenant,
+        kind='receivables',
+        contact_flag='IsCustomer',
+        fetch_name='get_report_aged_receivables_by_contact',
+        model=AgedReceivable,
+        report_date=report_date,
+        **kwargs,
+    )
