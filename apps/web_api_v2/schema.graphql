@@ -27,6 +27,9 @@ scalar Date
 """Date with time (isoformat)"""
 scalar DateTime
 
+"""Decimal (fixed-point)"""
+scalar Decimal
+
 enum EntityCapability {
   VIEW_FINANCIALS
   RUN_INGESTION_PROCESS
@@ -281,11 +284,57 @@ type Query {
   viewerContext: ViewerContext!
   ingestOverview(input: IngestOverviewInput!): IngestOverview!
   overviewIngestSources(context: FinancialContextInput!): OverviewIngestSources!
+  xeroReconciliation(context: FinancialContextInput!): XeroReconciliation!
   sourceConnections(context: FinancialContextInput!): SourceConnections!
   xeroConnectionStatus(context: FinancialContextInput!): XeroConnectionStatus!
   xeroPipelineSummary(context: FinancialContextInput!): XeroPipelineSummary!
   xeroPipelineRunHistory(context: FinancialContextInput!, stage: XeroPipelineStageKey!, limit: Int! = 20): XeroPipelineRunHistory!
   xeroPipelineRunDetail(context: FinancialContextInput!, runId: ID!): XeroPipelineRunDetail!
+}
+
+enum ReconciliationAccountClass {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum ReconciliationBasis {
+  FISCAL_YEAR_TO_DATE
+  INCEPTION_TO_DATE
+}
+
+type ReconciliationRow {
+  accountId: String
+  accountCode: String!
+  accountName: String!
+  accountClass: ReconciliationAccountClass
+  basis: ReconciliationBasis
+  xeroValue: Decimal
+  ledgerValue: Decimal
+  variance: Decimal
+  status: ReconciliationStatus!
+  userSafeReason: String
+}
+
+enum ReconciliationStatus {
+  MATCHED
+  VARIANCE
+  MISSING_IN_LEDGER
+  MISSING_IN_XERO
+  UNCLASSIFIED
+}
+
+type ReconciliationSummary {
+  accountsCompared: Int!
+  reconciled: Int!
+  needsAttention: Int!
+  netVariance: Decimal!
+  varianceCount: Int!
+  missingInLedgerCount: Int!
+  missingInXeroCount: Int!
+  unclassifiedCount: Int!
 }
 
 type ResolvedFinancialContext {
@@ -547,6 +596,18 @@ type XeroPipelineSummary {
   attentionCount: Int!
   firstBlocker: XeroPipelineBlocker
   stages: [XeroPipelineStageSummary!]!
+}
+
+type XeroReconciliation {
+  context: ResolvedFinancialContext!
+  available: Boolean!
+  userSafeReason: String
+  reportDate: Date
+  importedAt: DateTime
+  fiscalYearStartMonth: Int
+  tolerance: Decimal
+  summary: ReconciliationSummary
+  rows: [ReconciliationRow!]!
 }
 
 type XeroSourceEvidence {
