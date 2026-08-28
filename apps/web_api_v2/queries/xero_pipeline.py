@@ -1,6 +1,7 @@
 import uuid
 
 import strawberry
+from django.db import DatabaseError
 from django.db.models import F, Window
 from django.db.models.functions import RowNumber
 from graphql import GraphQLError
@@ -28,6 +29,7 @@ from apps.web_api_v2.types.ingest import (
     IngestValidationState,
     YearMonthValue,
 )
+from apps.web_api_v2.services.xero_source_evidence import measure_stage_source
 from apps.web_api_v2.types.xero_pipeline import (
     XeroPipelineBlocker,
     XeroPipelineOutput,
@@ -40,6 +42,8 @@ from apps.web_api_v2.types.xero_pipeline import (
     XeroPipelineStageCategory,
     XeroPipelineStageKey,
     XeroPipelineStageSummary,
+    XeroSourceEvidence,
+    XeroSourceEvidenceState,
     XeroPipelineSummary,
 )
 
@@ -387,6 +391,52 @@ def _first_blocker_for_stage(stage_key, state, blocker):
     )
 
 
+def _source_evidence(stage_key, entity, starts_on, ends_on):
+    """Source evidence for one stage, kept separate from run evidence.
+
+    Aggregate-only: a count and a max per stage, so the whole summary stays at
+    a bounded number of queries regardless of how many periods are selected.
+    A DatabaseError becomes UNAVAILABLE rather than a fabricated zero — the
+    difference between "you have none" and "we could not tell" is exactly what
+    the 2026-08-22 postmortem was about.
+    """
+    try:
+        measurement = measure_stage_source(
+            stage_key.value, entity=entity, starts_on=starts_on, ends_on=ends_on,
+        )
+    except DatabaseError:
+        return XeroSourceEvidence(
+            state=XeroSourceEvidenceState.UNAVAILABLE,
+            label='source records', period_scoped=False, record_count=None,
+            latest_record_at=None,
+            user_safe_reason='Source evidence is temporarily unavailable.',
+        )
+    if measurement is None:
+        return None
+    if measurement.count is None:
+        return XeroSourceEvidence(
+            state=XeroSourceEvidenceState.UNAVAILABLE,
+            label=measurement.label, period_scoped=measurement.period_scoped,
+            record_count=None, latest_record_at=None,
+            user_safe_reason=measurement.reason,
+        )
+    return XeroSourceEvidence(
+        state=(
+            XeroSourceEvidenceState.PRESENT
+            if measurement.count
+            else XeroSourceEvidenceState.ABSENT
+        ),
+        label=measurement.label,
+        period_scoped=measurement.period_scoped,
+        record_count=measurement.count,
+        latest_record_at=measurement.latest_at,
+        user_safe_reason=(
+            None if measurement.count
+            else 'No source records were found for the selected scope.'
+        ),
+    )
+
+
 def build_xero_pipeline_summary(info, context_input):
     membership, context = resolve_financial_context(info, context_input)
     _require_view(membership, info)
@@ -490,6 +540,9 @@ def build_xero_pipeline_summary(info, context_input):
             blocker=blocker,
             next_valid_action=next_action,
             period_run_summaries=summaries,
+            source_evidence=_source_evidence(
+                stage_key, membership.entity, context.starts_on, context.ends_on,
+            ),
         )
         stages.append(stage)
 

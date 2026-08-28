@@ -216,9 +216,15 @@ class ViewerContextTests(TestCase):
         self.assertIn('disabled', response.json()['errors'][0]['message'].lower())
 
     def test_query_complexity_limit_is_enforced(self):
+        # Derive the size from the configured ceiling. Hardcoding a repetition
+        # count pins the test to one particular limit, so raising the ceiling
+        # silently stops the test exercising it.
+        from django.conf import settings
+        per_alias = 3  # viewerContext { user { id } }
+        aliases = settings.WEB_API_V2_MAX_FIELD_SELECTIONS // per_alias + 1
         repeated_fields = ' '.join(
             f'context{index}: viewerContext {{ user {{ id }} }}'
-            for index in range(18)
+            for index in range(aliases)
         )
         query = f'query TooComplex {{ {repeated_fields} }}'
         with self.assertLogs('apps.web_api_v2.schema', level='WARNING') as captured:

@@ -178,7 +178,11 @@ KLIKK_API_TOKEN = (os.environ.get('KLIKK_API_TOKEN') or '').strip()
 WEB_API_V2_MAX_REQUEST_BYTES = int(os.environ.get('WEB_API_V2_MAX_REQUEST_BYTES', str(256 * 1024)))
 WEB_API_V2_MAX_QUERY_DEPTH = int(os.environ.get('WEB_API_V2_MAX_QUERY_DEPTH', '8'))
 WEB_API_V2_MAX_QUERY_TOKENS = int(os.environ.get('WEB_API_V2_MAX_QUERY_TOKENS', '1000'))
-WEB_API_V2_MAX_FIELD_SELECTIONS = int(os.environ.get('WEB_API_V2_MAX_FIELD_SELECTIONS', '50'))
+# The real browser documents measure 17-51 field selections; the Xero pipeline
+# read is the largest and grew past the original ceiling of 50 when source
+# evidence was added. 100 keeps a genuine ceiling with roughly 2x headroom.
+# Query depth (8) and token count remain the other two guards.
+WEB_API_V2_MAX_FIELD_SELECTIONS = int(os.environ.get('WEB_API_V2_MAX_FIELD_SELECTIONS', '100'))
 WEB_API_V2_AUTH_MAX_REQUEST_BYTES = int(
     os.environ.get('WEB_API_V2_AUTH_MAX_REQUEST_BYTES', str(16 * 1024))
 )

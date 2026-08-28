@@ -537,6 +537,7 @@ type XeroPipelineStageSummary {
   blocker: XeroPipelineBlocker
   nextValidAction: IngestNextAction!
   periodRunSummaries: [XeroPipelinePeriodRunSummary!]!
+  sourceEvidence: XeroSourceEvidence
 }
 
 type XeroPipelineSummary {
@@ -546,6 +547,21 @@ type XeroPipelineSummary {
   attentionCount: Int!
   firstBlocker: XeroPipelineBlocker
   stages: [XeroPipelineStageSummary!]!
+}
+
+type XeroSourceEvidence {
+  state: XeroSourceEvidenceState!
+  label: String!
+  periodScoped: Boolean!
+  recordCount: Int
+  latestRecordAt: DateTime
+  userSafeReason: String
+}
+
+enum XeroSourceEvidenceState {
+  PRESENT
+  ABSENT
+  UNAVAILABLE
 }
 
 """An ISO accounting month in YYYY-MM form."""
