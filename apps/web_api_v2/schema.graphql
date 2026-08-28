@@ -191,6 +191,41 @@ enum IngestValidationState {
   FAILED
 }
 
+type InvestecBankAccountRef {
+  id: String!
+  maskedNumber: String!
+  name: String!
+}
+
+type InvestecBankSummary {
+  transactionCount: Int!
+  netAmount: Decimal
+  earliestDate: Date
+  latestDate: Date
+  freshnessAt: DateTime
+}
+
+type InvestecBankTransactionRow {
+  id: String!
+  date: Date
+  accountMasked: String!
+  description: String!
+  transactionType: String!
+  status: String!
+  amount: Decimal!
+  runningBalance: Decimal
+}
+
+type InvestecBankTransactions {
+  context: ResolvedFinancialContext!
+  available: Boolean!
+  userSafeReason: String
+  accounts: [InvestecBankAccountRef!]!
+  summary: InvestecBankSummary
+  totalCount: Int!
+  rows: [InvestecBankTransactionRow!]!
+}
+
 """
 The `JSON` scalar type represents JSON values as specified by [ECMA-404](https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf).
 """
@@ -306,6 +341,7 @@ type Query {
   xeroReconciliation(context: FinancialContextInput!): XeroReconciliation!
   xeroReconciliationAccount(context: FinancialContextInput!, accountId: String!): ReconciliationAccountDetail!
   planningAnalyticsTarget(context: FinancialContextInput!): PlanningAnalyticsTarget!
+  investecBankTransactions(context: FinancialContextInput!, limit: Int! = 100, offset: Int! = 0): InvestecBankTransactions!
   sourceConnections(context: FinancialContextInput!): SourceConnections!
   xeroConnectionStatus(context: FinancialContextInput!): XeroConnectionStatus!
   xeroPipelineSummary(context: FinancialContextInput!): XeroPipelineSummary!
