@@ -66,6 +66,18 @@ STATUS_MISSING_IN_XERO = 'MISSING_IN_XERO'
 STATUS_UNCLASSIFIED = 'UNCLASSIFIED'
 
 
+def reporting_group(account):
+    """Xero's own statement grouping for an account, if it published one."""
+    value = (getattr(account, 'grouping', '') or '').strip()
+    return value or None
+
+
+def reporting_line(account):
+    """Xero's reporting-code name — the statement line this account rolls into."""
+    value = (getattr(account, 'reporting_code_name', '') or '').strip()
+    return value or None
+
+
 def account_class(account):
     """Xero's own Class for an account, or None when it cannot be determined."""
     collection = getattr(account, 'collection', None) or {}
@@ -150,6 +162,8 @@ def build_reconciliation(entity, report_date=None, tolerance=DEFAULT_TOLERANCE):
                 'accountCode': line.account_code or '',
                 'accountName': line.account_name or '',
                 'accountClass': None,
+                'reportingGroup': None,
+                'reportingLine': None,
                 'basis': None,
                 'xeroValue': line.value,
                 'ledgerValue': None,
@@ -171,6 +185,8 @@ def build_reconciliation(entity, report_date=None, tolerance=DEFAULT_TOLERANCE):
                 'accountCode': line.account_code or '',
                 'accountName': line.account_name or '',
                 'accountClass': klass,
+                'reportingGroup': reporting_group(line.account),
+                'reportingLine': reporting_line(line.account),
                 'basis': None,
                 'xeroValue': line.value,
                 'ledgerValue': None,
@@ -191,6 +207,8 @@ def build_reconciliation(entity, report_date=None, tolerance=DEFAULT_TOLERANCE):
             'accountCode': line.account_code or '',
             'accountName': line.account_name or '',
             'accountClass': klass,
+            'reportingGroup': reporting_group(line.account),
+            'reportingLine': reporting_line(line.account),
             'basis': basis,
             'xeroValue': line.value,
             'ledgerValue': ledger_value,
@@ -249,6 +267,8 @@ def _ledger_only_rows(entity, ledger, seen_accounts, tolerance):
             'accountCode': account.code or '',
             'accountName': account.name or '',
             'accountClass': account_class(account),
+            'reportingGroup': reporting_group(account),
+            'reportingLine': reporting_line(account),
             'basis': BASIS_INCEPTION,
             'xeroValue': Decimal('0'),
             'ledgerValue': value,
@@ -257,3 +277,54 @@ def _ledger_only_rows(entity, ledger, seen_accounts, tolerance):
             'reason': 'The local ledger holds a balance that Xero\'s report does not report.',
         })
     return rows
+
+
+# How many ledger lines a single drill-down will return. An account like
+# Retained Earnings carries 158 period buckets and far more journal lines;
+# the screen needs the recent ones, not the whole history.
+ACCOUNT_LINE_LIMIT = 200
+
+
+def account_lines(entity, account_id, *, limit=ACCOUNT_LINE_LIMIT):
+    """The ledger journal lines composing one account's balance.
+
+    This is the evidence behind a variance: which entries make up our side of
+    it. Reading it costs no Xero API calls.
+
+    There is deliberately no Xero figure per line. Xero's trial balance is an
+    account-level report — it publishes no line-level equivalent — so a
+    per-line comparison cannot be made, and inventing one would be a fabricated
+    finding. The caller is told this rather than shown an empty column.
+    """
+    from apps.xero.xero_data.models import XeroJournals
+
+    account = XeroAccount.objects.filter(
+        organisation=entity, account_id=account_id,
+    ).first()
+    if account is None:
+        return None
+
+    rows = (
+        XeroJournals.objects
+        .filter(organisation=entity, account=account)
+        .order_by('-date', '-journal_number')[:limit + 1]
+    )
+    rows = list(rows)
+    truncated = len(rows) > limit
+    return {
+        'accountId': account_id,
+        'accountCode': account.code or '',
+        'accountName': account.name or '',
+        'reportingGroup': reporting_group(account),
+        'reportingLine': reporting_line(account),
+        'truncated': truncated,
+        'limit': limit,
+        'lines': [{
+            'id': str(row.pk),
+            'date': row.date,
+            'reference': row.reference or row.journal_number or '',
+            'description': row.description or '',
+            'source': row.journal_source or row.transaction_source or '',
+            'ledgerValue': row.amount,
+        } for row in rows[:limit]],
+    }

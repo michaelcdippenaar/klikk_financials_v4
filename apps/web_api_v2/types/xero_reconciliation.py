@@ -45,6 +45,10 @@ class ReconciliationRow:
     account_code: str
     account_name: str
     account_class: Optional[ReconciliationAccountClass]
+    # Xero's own statement grouping and reporting line, so the P&L and
+    # balance-sheet views group the way the statements do.
+    reporting_group: Optional[str]
+    reporting_line: Optional[str]
     # Null wherever the account could not be classified: the row is reported
     # without a comparison rather than compared on a guessed basis.
     basis: Optional[ReconciliationBasis]
@@ -82,3 +86,30 @@ class XeroReconciliation:
     tolerance: Optional[Decimal]
     summary: Optional[ReconciliationSummary]
     rows: List[ReconciliationRow]
+
+
+@strawberry.type
+class ReconciliationAccountLine:
+    id: str
+    date: Optional[datetime.date]
+    reference: str
+    description: str
+    source: str
+    ledger_value: Optional[Decimal]
+    # Deliberately absent: Xero's trial balance is an account-level report and
+    # publishes no line-level figure, so there is nothing truthful to compare
+    # a single ledger line against.
+
+
+@strawberry.type
+class ReconciliationAccountDetail:
+    account_id: str
+    account_code: str
+    account_name: str
+    reporting_group: Optional[str]
+    reporting_line: Optional[str]
+    truncated: bool
+    limit: int
+    lines: List[ReconciliationAccountLine]
+    # Says why no Xero column appears beside these lines.
+    comparison_note: str
