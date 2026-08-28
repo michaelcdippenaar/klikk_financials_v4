@@ -56,6 +56,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-test.txt
 
+      # The compose file is a deployment artefact. A service declared in the
+      # wrong block parses as YAML but is rejected by compose, and nothing in
+      # the Python suite would notice.
+      - name: Compose file validation
+        run: docker compose -f docker-compose.yml config --quiet
+
       # Fails if a model changed without a migration.
       - name: Migration drift check
         run: python manage.py makemigrations --check --dry-run

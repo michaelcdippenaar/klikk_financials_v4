@@ -16,21 +16,27 @@ services:
       - media_files:/app/media
       - static_files:/app/staticfiles
 
-volumes:
-  media_files:
-  static_files:
-
   # Executes queued V2 ingest runs outside the request cycle. Standard sync
   # additionally requires WEB_API_V2_INGEST_WORKER_ENABLED; see
   # docs/ingest_worker.md before enabling it — it spends Xero API budget.
-  klikk-financials-ingest-worker:
+  #
+  # entrypoint is cleared deliberately: the image entrypoint runs
+  # `migrate --noinput` and ignores the command it is given, so a worker
+  # started without this would migrate the database instead of draining runs.
+  ingest-worker:
     build: .
-    image: klikk-financials-v4:local
-    container_name: klikk-financials-ingest-worker
     restart: unless-stopped
+    env_file: .env
+    environment:
+      DJANGO_SETTINGS_MODULE: klikk_business_intelligence.settings.staging
+      DB_HOST: host-gateway
+    extra_hosts:
+      - "host-gateway:host-gateway"
     entrypoint: []
     command: ["python", "manage.py", "run_ingest_worker"]
-    env_file:
-      - ./.env.app-docker
     depends_on:
-      - klikk-financials
+      - web
+
+volumes:
+  media_files:
+  static_files:
