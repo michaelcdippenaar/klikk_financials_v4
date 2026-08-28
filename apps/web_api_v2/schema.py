@@ -23,6 +23,7 @@ from .queries.xero_reconciliation import (
     build_xero_reconciliation,
     build_xero_reconciliation_account,
 )
+from .queries.planning_target import build_planning_analytics_target
 from .queries.viewer_context import build_viewer_context
 from .queries.xero_connection_status import build_xero_connection_status
 from .types.financial_context import FinancialContextInput
@@ -36,6 +37,7 @@ from .types.xero_pipeline import (
     XeroPipelineSummary,
 )
 from .types.xero_reconciliation import ReconciliationAccountDetail, XeroReconciliation
+from .types.planning_target import PlanningAnalyticsTarget
 from .types.viewer import ViewerContext
 from .types.xero_connection_status import XeroConnectionStatus
 from .validation import MaxFieldSelectionsRule
@@ -155,6 +157,18 @@ class Query:
             info,
             'xeroReconciliationAccount',
             lambda: build_xero_reconciliation_account(info, context, account_id),
+        )
+
+    @strawberry.field
+    def planning_analytics_target(
+        self,
+        info: strawberry.Info,
+        context: FinancialContextInput,
+    ) -> PlanningAnalyticsTarget:
+        return _resolve_safely(
+            info,
+            'planningAnalyticsTarget',
+            lambda: build_planning_analytics_target(info, context),
         )
 
     @strawberry.field
