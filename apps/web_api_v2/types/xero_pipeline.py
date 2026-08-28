@@ -75,6 +75,34 @@ class XeroPipelinePeriodRunSummary:
     next_valid_action: IngestNextAction
 
 
+@strawberry.enum
+class XeroSourceEvidenceState(Enum):
+    """Whether the entity holds source data for this stage."""
+
+    PRESENT = 'PRESENT'
+    ABSENT = 'ABSENT'
+    UNAVAILABLE = 'UNAVAILABLE'
+
+
+@strawberry.type
+class XeroSourceEvidence:
+    """What data the entity holds, as distinct from what V2 has run.
+
+    The 2026-08-22 postmortem requires these stay in separate typed fields:
+    a source count must never be read as a successful V2 run. A measured zero
+    is PRESENT with recordCount 0; not knowing is UNAVAILABLE.
+    """
+
+    state: XeroSourceEvidenceState
+    label: str
+    # False means the count is entity-wide reference data with no period at
+    # all — an entity has accounts, not accounts-for-March.
+    period_scoped: bool
+    record_count: Optional[int]
+    latest_record_at: Optional[datetime.datetime]
+    user_safe_reason: Optional[str]
+
+
 @strawberry.type
 class XeroPipelineStageSummary:
     key: XeroPipelineStageKey
@@ -95,6 +123,7 @@ class XeroPipelineStageSummary:
     blocker: Optional[XeroPipelineBlocker]
     next_valid_action: IngestNextAction
     period_run_summaries: list[XeroPipelinePeriodRunSummary]
+    source_evidence: Optional[XeroSourceEvidence]
 
 
 @strawberry.type

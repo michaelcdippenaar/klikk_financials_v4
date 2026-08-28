@@ -77,6 +77,7 @@ query LiveXeroPipeline($context: FinancialContextInput!) {
       prerequisites { code satisfied message }
       blocker { userSafeReason }
       nextValidAction
+      sourceEvidence { state label periodScoped recordCount latestRecordAt userSafeReason }
     }
   }
 }
@@ -352,6 +353,48 @@ class BrowserEndToEndTests(ThrottleIsolatedTestCase):
             content_type='application/json',
         )
         self.assertEqual(replayed.status_code, 401)
+
+
+class BrowserDocumentComplexityTests(TestCase):
+    """The complexity ceiling must fit the documents the browser really sends.
+
+    Adding source evidence pushed the Xero pipeline read to 51 field
+    selections against a ceiling of 50, so the live page would have failed
+    with 'GraphQL operation is too complex'. A unit test cannot see that; only
+    validating the real documents can.
+    """
+
+    def test_every_browser_document_fits_the_complexity_ceiling(self):
+        from django.conf import settings
+        from graphql import parse
+        from graphql.language.ast import FieldNode
+
+        def selections(node):
+            total = 1 if isinstance(node, FieldNode) else 0
+            selection_set = getattr(node, 'selection_set', None)
+            if selection_set:
+                total += sum(selections(child) for child in selection_set.selections)
+            return total
+
+        documents = dict(CONTEXT_SCOPED, ViewerContext=VIEWER_CONTEXT)
+        ceiling = settings.WEB_API_V2_MAX_FIELD_SELECTIONS
+        for name, document in documents.items():
+            with self.subTest(document=name):
+                ast = parse(document)
+                count = sum(
+                    selections(selection)
+                    for definition in ast.definitions
+                    for selection in definition.selection_set.selections
+                )
+                self.assertLessEqual(
+                    count, ceiling,
+                    f'{name} needs {count} field selections, ceiling is {ceiling}',
+                )
+                # Headroom, so the next field added does not break production.
+                self.assertLessEqual(
+                    count, ceiling * 0.8,
+                    f'{name} is within 20% of the ceiling; raise it deliberately',
+                )
 
 
 class BrowserEndToEndWithoutMembershipTests(ThrottleIsolatedTestCase):
