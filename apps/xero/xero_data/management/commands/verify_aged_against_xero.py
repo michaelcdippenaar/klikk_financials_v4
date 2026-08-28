@@ -67,7 +67,7 @@ class Command(BaseCommand):
         call = RateLimitedCaller(api_client=budget_client, headroom=options['headroom'])
         fetch = getattr(api, fetch_name)
 
-        agreed = disagreed = 0
+        agreed = disagreed = bucket_disagreements = 0
         for contact_id in contacts:
             try:
                 raw = call(fetch, tenant.tenant_id, contact_id, date=report_date)
@@ -99,6 +99,7 @@ class Command(BaseCommand):
             ]
             if differences:
                 disagreed += 1
+                bucket_disagreements += 1
                 self.stdout.write(self.style.WARNING(f'  {mine["contact_name"][:34]:<36} differs:'))
                 for bucket, ours, theirs in differences:
                     self.stdout.write(f'      {bucket:<14} local {ours:>14,.2f}   xero {theirs:>14,.2f}')
@@ -109,7 +110,14 @@ class Command(BaseCommand):
         self.stdout.write(
             f'{agreed} contact(s) agree, {disagreed} differ, {call.calls} API call(s) spent.'
         )
-        if disagreed:
+        if bucket_disagreements:
             self.stdout.write(self.style.WARNING(
                 'Bucket boundaries in aged_from_invoices.bucket_for need adjusting to match Xero.'
+            ))
+        elif disagreed:
+            # "Xero reported nothing" is not evidence about bucket boundaries.
+            # Saying so sent the last run chasing the wrong defect.
+            self.stdout.write(self.style.WARNING(
+                'Differences were all "Xero reported no rows", which says nothing about bucket '
+                'boundaries — check the report parse or the freshness of local invoices first.'
             ))

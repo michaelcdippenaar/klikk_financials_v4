@@ -68,13 +68,22 @@ def _parse_decimal(value):
 
 
 def _find_summary_row(rows):
+    """First SummaryRow's cells anywhere in a ReportWithRows tree, or None.
+
+    Xero nests: the top-level Rows are Section rows, and the SummaryRow lives
+    inside a Section's own Rows. This used to scan only the top level, so it
+    never found one — every contact parsed as "empty report" and was skipped.
+    That is why no AgedPayable or AgedReceivable row had ever been written for
+    any tenant: the calls were made and paid for, and the answers discarded.
     """
-    Given the serialized Rows list from a ReportWithRows report,
-    return the first SummaryRow's cells list, or None if absent.
-    """
-    for row in rows:
+    for row in rows or ():
+        if not isinstance(row, dict):
+            continue
         if row.get('RowType') == 'SummaryRow':
             return row.get('Cells', [])
+        nested = _find_summary_row(row.get('Rows'))
+        if nested is not None:
+            return nested
     return None
 
 
