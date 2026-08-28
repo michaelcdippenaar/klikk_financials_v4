@@ -21,6 +21,13 @@ from apps.web_api_v2.types.xero_connection_status import (
 )
 
 
+from apps.web_api_v2.services.planning_target import (
+    STATE_NOT_APPROVED,
+    STATE_READY,
+    describe_target,
+)
+
+
 def _disabled_action(kind, reason):
     return SourceConnectionAction(
         kind=kind,
@@ -127,6 +134,61 @@ def _unavailable_connection(key, display_name, category, reason, action_kinds):
     )
 
 
+def _planning_analytics_connection(entity):
+    """Planning Analytics reports what its entity binding actually says.
+
+    It used to be a flat "unavailable until an entity-bound destination is
+    approved" for every entity. Now that the binding exists, an entity with an
+    approved destination says so and names it, and an entity without one says
+    which of the two things is missing — nobody bound a destination, or nobody
+    approved the one that is bound. Those need different actions from different
+    people, so one message for both was never enough to act on.
+    """
+    described = describe_target(entity)
+    state = described['state']
+    ready = state == STATE_READY
+
+    if ready:
+        configuration = SourceConnectionConfigurationState.CONFIGURED
+        readiness = SourceConnectionReadinessState.READY
+        availability = SourceConnectionAvailabilityCode.AVAILABLE
+    elif state == STATE_NOT_APPROVED:
+        configuration = SourceConnectionConfigurationState.CONFIGURED
+        readiness = SourceConnectionReadinessState.NOT_CONFIGURED
+        availability = SourceConnectionAvailabilityCode.NOT_CONFIGURED
+    else:
+        configuration = SourceConnectionConfigurationState.NOT_CONFIGURED
+        readiness = SourceConnectionReadinessState.NOT_CONFIGURED
+        availability = SourceConnectionAvailabilityCode.NOT_CONFIGURED
+
+    reason = described['userSafeReason']
+    return SourceConnection(
+        key=SourceConnectionKey.PLANNING_ANALYTICS,
+        display_name='Planning Analytics',
+        category=SourceConnectionCategory.DESTINATION,
+        configuration_state=configuration,
+        readiness_state=readiness,
+        availability_code=availability,
+        user_safe_reason=reason,
+        source_evidence_count=None,
+        source_evidence_at=None,
+        last_successful_run_at=None,
+        validation_state=(
+            IngestValidationState.NOT_RUN if ready else IngestValidationState.UNAVAILABLE
+        ),
+        latest_v2_run_state=None,
+        # The destination's name, never the TM1 server's address or credentials.
+        safe_identity=described['displayName'],
+        actions=[
+            _disabled_action(SourceConnectionActionKind.CONFIGURE, reason or 'No configuration route exists in V2.'),
+            _disabled_action(
+                SourceConnectionActionKind.SUBMIT,
+                reason or 'Submission is not available in this read-only V2 integration.',
+            ),
+        ],
+    )
+
+
 def read_source_connections(entity, resolved_context):
     xero = _xero_connection(
         read_xero_connection_evidence(entity, resolved_context.selected_periods),
@@ -166,16 +228,7 @@ def read_source_connections(entity, resolved_context):
             ),
             (SourceConnectionActionKind.CONFIGURE, SourceConnectionActionKind.SYNC),
         ),
-        _unavailable_connection(
-            SourceConnectionKey.PLANNING_ANALYTICS,
-            'Planning Analytics',
-            SourceConnectionCategory.DESTINATION,
-            (
-                'Planning Analytics readiness is unavailable until an '
-                'entity-bound destination is approved.'
-            ),
-            (SourceConnectionActionKind.CONFIGURE, SourceConnectionActionKind.SUBMIT),
-        ),
+        _planning_analytics_connection(entity),
         _unavailable_connection(
             SourceConnectionKey.EXCEL_ADD_IN,
             'Excel Add-in',

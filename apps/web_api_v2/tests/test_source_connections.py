@@ -154,7 +154,10 @@ class SourceConnectionsTests(TestCase):
         )
         self.assertEqual(
             data['summary'],
-            {'total': 6, 'active': 1, 'needsSetup': 0, 'readyDestinations': 0},
+            # Planning Analytics counts as needing setup, not as unavailable:
+            # with no destination bound to this entity, setup is exactly what
+            # it needs, and someone can act on that.
+            {'total': 6, 'active': 1, 'needsSetup': 1, 'readyDestinations': 0},
         )
         xero = data['connections'][0]
         self.assertEqual(xero['configurationState'], 'CONFIGURED')
@@ -166,7 +169,13 @@ class SourceConnectionsTests(TestCase):
         self.assertEqual(xero['validationState'], 'UNAVAILABLE')
         self.assertTrue(all(not action['permitted'] for action in xero['actions']))
         for row in data['connections'][1:]:
-            self.assertEqual(row['availabilityCode'], 'UNAVAILABLE')
+            # Planning Analytics distinguishes "nobody bound a destination"
+            # from "we cannot tell you anything": the first is actionable, so
+            # it reports NOT_CONFIGURED rather than UNAVAILABLE.
+            expected = (
+                'NOT_CONFIGURED' if row['key'] == 'PLANNING_ANALYTICS' else 'UNAVAILABLE'
+            )
+            self.assertEqual(row['availabilityCode'], expected)
             self.assertIsNone(row['sourceEvidenceCount'])
             self.assertIsNone(row['sourceEvidenceAt'])
             self.assertTrue(all(not action['permitted'] for action in row['actions']))
@@ -233,7 +242,9 @@ class SourceConnectionsTests(TestCase):
         self.assertEqual(xero['readinessState'], 'NOT_CONFIGURED')
         self.assertEqual(xero['availabilityCode'], 'NOT_CONFIGURED')
         self.assertIsNone(xero['sourceEvidenceCount'])
-        self.assertEqual(data['summary']['needsSetup'], 1)
+        # Two: the source under test, plus Planning Analytics, which has no
+        # destination bound to this entity.
+        self.assertEqual(data['summary']['needsSetup'], 2)
 
     def test_reauthorization_is_safe_unavailable_without_stored_reason(self):
         self._configure_xero()

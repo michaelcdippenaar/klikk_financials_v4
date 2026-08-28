@@ -280,12 +280,32 @@ enum OverviewSourceState {
   UNAVAILABLE
 }
 
+type PlanningAnalyticsTarget {
+  context: ResolvedFinancialContext!
+  state: PlanningTargetState!
+  canSubmit: Boolean!
+  userSafeReason: String
+  displayName: String
+  workspace: String
+  defaultScenario: String
+  defaultVersion: String
+  approvedAt: DateTime
+  approvalNote: String
+}
+
+enum PlanningTargetState {
+  NOT_BOUND
+  NOT_APPROVED
+  READY
+}
+
 type Query {
   viewerContext: ViewerContext!
   ingestOverview(input: IngestOverviewInput!): IngestOverview!
   overviewIngestSources(context: FinancialContextInput!): OverviewIngestSources!
   xeroReconciliation(context: FinancialContextInput!): XeroReconciliation!
   xeroReconciliationAccount(context: FinancialContextInput!, accountId: String!): ReconciliationAccountDetail!
+  planningAnalyticsTarget(context: FinancialContextInput!): PlanningAnalyticsTarget!
   sourceConnections(context: FinancialContextInput!): SourceConnections!
   xeroConnectionStatus(context: FinancialContextInput!): XeroConnectionStatus!
   xeroPipelineSummary(context: FinancialContextInput!): XeroPipelineSummary!

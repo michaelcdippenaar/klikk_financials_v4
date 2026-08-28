@@ -188,3 +188,91 @@ class CostBehaviour(models.Model):
 
     def __str__(self):
         return f"{self.account_key} -> {self.behaviour} ({self.source})"
+
+
+class EntityPlanningTarget(models.Model):
+    """Which Planning Analytics destination an entity submits to.
+
+    TM1ServerConfig and TM1ProcessConfig are global: they describe how to reach
+    the TM1 server, not who may send what to it. Without a per-entity binding,
+    "submit this entity's close to Planning Analytics" has no defined
+    destination, which is why the V2 connection reports Planning Analytics as
+    unavailable until an entity-bound destination is approved.
+
+    This model is that binding, and nothing more. It deliberately holds no
+    connection details of its own: the server row owns those, TM1 is reachable
+    only from inside the network, and the presentation-safe read for the
+    browser exposes names alone. A destination is usable only once someone has
+    approved it — created is not approved.
+    """
+
+    entity = models.ForeignKey(
+        'xero_core.XeroTenant',
+        on_delete=models.CASCADE,
+        related_name='planning_targets',
+        help_text='The Xero tenant whose data this destination receives.',
+    )
+    server = models.ForeignKey(
+        TM1ServerConfig,
+        on_delete=models.PROTECT,
+        related_name='entity_targets',
+        help_text='TM1 server. Its credentials never leave the server side.',
+    )
+    display_name = models.CharField(
+        max_length=200,
+        help_text='Human name for the destination, e.g. "PA Production · Finance".',
+    )
+    workspace = models.CharField(
+        max_length=300,
+        help_text='Cube or application path within TM1, e.g. "Group Finance / General Ledger".',
+    )
+    default_scenario = models.CharField(max_length=120, blank=True, default='')
+    default_version = models.CharField(max_length=120, blank=True, default='')
+
+    active = models.BooleanField(default=True)
+    # Separate from `active` on purpose. A binding can exist, be switched on,
+    # and still not be approved to receive an entity's financial data; those
+    # are different questions and conflating them is how data reaches the wrong
+    # destination.
+    approved_at = models.DateTimeField(null=True, blank=True)
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    approval_note = models.TextField(blank=True, default='')
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Entity Planning Target'
+        verbose_name_plural = 'Entity Planning Targets'
+        ordering = ['entity_id', 'display_name']
+        constraints = [
+            # One active destination per entity: two would make "submit this
+            # entity" ambiguous, and an ambiguous destination is a wrong one.
+            models.UniqueConstraint(
+                fields=['entity'],
+                condition=models.Q(active=True),
+                name='pa_one_active_target_per_entity',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['entity', 'active'], name='pa_target_entity_active_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.entity_id}: {self.display_name}'
+
+    @property
+    def approved(self):
+        return self.approved_at is not None
+
+    @classmethod
+    def for_entity(cls, entity_id):
+        return (
+            cls.objects.select_related('server')
+            .filter(entity_id=entity_id, active=True)
+            .first()
+        )
