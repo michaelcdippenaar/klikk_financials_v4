@@ -41,15 +41,19 @@ PROCESS_DEFINITIONS = {
         'required': False,
         'prerequisites': ('transaction-journal-sync',),
     },
+    # Aged figures are bucketed from invoices held locally, so the real
+    # prerequisite is the invoice sync, not metadata. Declaring metadata let
+    # both stages run against an empty invoice table and report a confident
+    # zero.
     'aged-payables': {
         'display_name': 'Aged payables',
         'required': False,
-        'prerequisites': ('metadata',),
+        'prerequisites': ('invoice-sync',),
     },
     'aged-receivables': {
         'display_name': 'Aged receivables',
         'required': False,
-        'prerequisites': ('metadata',),
+        'prerequisites': ('invoice-sync',),
     },
     'standard-sync': {
         'display_name': 'Standard sync',
@@ -368,16 +372,18 @@ def execute_process(process_key, entity):
             if not result.get('success'):
                 raise ProcessCommandError('PROCESS_FAILED', 'Document sync failed.', retryable=True)
             return normalize_result(process_key, result)
+        # Both aged stages are computed from invoices already held, so they
+        # cost no Xero API calls. Xero has no bulk aged endpoint, and the
+        # per-contact sweep they replace called every contact in the ledger to
+        # discover that only a couple of dozen carry a balance.
         if process_key == 'aged-payables':
-            from apps.xero.xero_data.aged_reports_service import sync_aged_payables
-            return _aged_result(process_key, 'Aged payables', sync_aged_payables(
-                entity, max_api_calls=settings.WEB_API_V2_INGEST_MAX_XERO_CALLS,
-            ))
+            from apps.xero.xero_data.aged_from_invoices import sync_aged_payables_from_invoices
+            return _aged_result(process_key, 'Aged payables',
+                                sync_aged_payables_from_invoices(entity))
         if process_key == 'aged-receivables':
-            from apps.xero.xero_data.aged_reports_service import sync_aged_receivables
-            return _aged_result(process_key, 'Aged receivables', sync_aged_receivables(
-                entity, max_api_calls=settings.WEB_API_V2_INGEST_MAX_XERO_CALLS,
-            ))
+            from apps.xero.xero_data.aged_from_invoices import sync_aged_receivables_from_invoices
+            return _aged_result(process_key, 'Aged receivables',
+                                sync_aged_receivables_from_invoices(entity))
         raise ProcessCommandError('UNKNOWN_PROCESS', 'The requested process is not allowlisted.')
     except TenantReauthRequired:
         raise ProcessCommandError(
