@@ -1,5 +1,12 @@
 """An aged stage that wrote nothing must not report success.
 
+The aged stages are now computed from local invoices and spend no API calls,
+so the daily-limit and call-budget outcomes below are no longer reachable from
+this path. They are kept because _aged_result is the shared judgement for any
+aged sweep, including the opt-in verify_aged_against_xero command, and because
+the rule they encode — a stage that wrote nothing must not report success — is
+what actually failed on 28 Aug 2026.
+
 On 28 Aug 2026 a Standard sync finished as `succeeded` with 274 errors and zero
 rows written. Aged payables and receivables were the only two stages in the
 sequence whose result was never inspected — every other stage already checks
@@ -35,7 +42,7 @@ class AgedStageTruthfulnessTests(TestCase):
         )
 
     def test_a_sweep_with_errors_fails_instead_of_reporting_success(self):
-        with patch('apps.xero.xero_data.aged_reports_service.sync_aged_payables',
+        with patch('apps.xero.xero_data.aged_from_invoices.sync_aged_payables_from_invoices',
                    return_value=_stats(errors=274, contacts_processed=274)):
             with self.assertRaises(ProcessCommandError) as caught:
                 execute_process('aged-payables', self.tenant)
@@ -45,7 +52,7 @@ class AgedStageTruthfulnessTests(TestCase):
         self.assertTrue(caught.exception.retryable)
 
     def test_stopping_on_the_daily_allowance_is_reported_as_blocked(self):
-        with patch('apps.xero.xero_data.aged_reports_service.sync_aged_receivables',
+        with patch('apps.xero.xero_data.aged_from_invoices.sync_aged_receivables_from_invoices',
                    return_value=_stats(stopped_early='daily-limit')):
             with self.assertRaises(ProcessCommandError) as caught:
                 execute_process('aged-receivables', self.tenant)
@@ -54,7 +61,7 @@ class AgedStageTruthfulnessTests(TestCase):
         self.assertTrue(caught.exception.blocked)
 
     def test_stopping_at_the_call_budget_is_not_presented_as_a_full_sweep(self):
-        with patch('apps.xero.xero_data.aged_reports_service.sync_aged_payables',
+        with patch('apps.xero.xero_data.aged_from_invoices.sync_aged_payables_from_invoices',
                    return_value=_stats(stopped_early='max-api-calls', contacts_processed=2)):
             with self.assertRaises(ProcessCommandError) as caught:
                 execute_process('aged-payables', self.tenant)
@@ -63,7 +70,7 @@ class AgedStageTruthfulnessTests(TestCase):
         self.assertIn('2 of 5', caught.exception.safe_message)
 
     def test_a_clean_sweep_still_succeeds(self):
-        with patch('apps.xero.xero_data.aged_reports_service.sync_aged_payables',
+        with patch('apps.xero.xero_data.aged_from_invoices.sync_aged_payables_from_invoices',
                    return_value=_stats(created=3, skipped=2)):
             result = execute_process('aged-payables', self.tenant)
 
