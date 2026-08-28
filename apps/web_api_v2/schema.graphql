@@ -285,6 +285,7 @@ type Query {
   ingestOverview(input: IngestOverviewInput!): IngestOverview!
   overviewIngestSources(context: FinancialContextInput!): OverviewIngestSources!
   xeroReconciliation(context: FinancialContextInput!): XeroReconciliation!
+  xeroReconciliationAccount(context: FinancialContextInput!, accountId: String!): ReconciliationAccountDetail!
   sourceConnections(context: FinancialContextInput!): SourceConnections!
   xeroConnectionStatus(context: FinancialContextInput!): XeroConnectionStatus!
   xeroPipelineSummary(context: FinancialContextInput!): XeroPipelineSummary!
@@ -300,6 +301,27 @@ enum ReconciliationAccountClass {
   EXPENSE
 }
 
+type ReconciliationAccountDetail {
+  accountId: String!
+  accountCode: String!
+  accountName: String!
+  reportingGroup: String
+  reportingLine: String
+  truncated: Boolean!
+  limit: Int!
+  lines: [ReconciliationAccountLine!]!
+  comparisonNote: String!
+}
+
+type ReconciliationAccountLine {
+  id: String!
+  date: Date
+  reference: String!
+  description: String!
+  source: String!
+  ledgerValue: Decimal
+}
+
 enum ReconciliationBasis {
   FISCAL_YEAR_TO_DATE
   INCEPTION_TO_DATE
@@ -310,6 +332,8 @@ type ReconciliationRow {
   accountCode: String!
   accountName: String!
   accountClass: ReconciliationAccountClass
+  reportingGroup: String
+  reportingLine: String
   basis: ReconciliationBasis
   xeroValue: Decimal
   ledgerValue: Decimal

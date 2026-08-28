@@ -19,7 +19,10 @@ from .queries.xero_pipeline import (
     build_xero_pipeline_run_history,
     build_xero_pipeline_summary,
 )
-from .queries.xero_reconciliation import build_xero_reconciliation
+from .queries.xero_reconciliation import (
+    build_xero_reconciliation,
+    build_xero_reconciliation_account,
+)
 from .queries.viewer_context import build_viewer_context
 from .queries.xero_connection_status import build_xero_connection_status
 from .types.financial_context import FinancialContextInput
@@ -32,7 +35,7 @@ from .types.xero_pipeline import (
     XeroPipelineStageKey,
     XeroPipelineSummary,
 )
-from .types.xero_reconciliation import XeroReconciliation
+from .types.xero_reconciliation import ReconciliationAccountDetail, XeroReconciliation
 from .types.viewer import ViewerContext
 from .types.xero_connection_status import XeroConnectionStatus
 from .validation import MaxFieldSelectionsRule
@@ -139,6 +142,19 @@ class Query:
             info,
             'xeroReconciliation',
             lambda: build_xero_reconciliation(info, context),
+        )
+
+    @strawberry.field
+    def xero_reconciliation_account(
+        self,
+        info: strawberry.Info,
+        context: FinancialContextInput,
+        account_id: str,
+    ) -> ReconciliationAccountDetail:
+        return _resolve_safely(
+            info,
+            'xeroReconciliationAccount',
+            lambda: build_xero_reconciliation_account(info, context, account_id),
         )
 
     @strawberry.field

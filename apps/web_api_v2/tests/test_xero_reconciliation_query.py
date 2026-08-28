@@ -1,5 +1,6 @@
 """The reconciliation GraphQL read: access, honesty, and separated counts."""
 from datetime import date
+from unittest.mock import patch
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
@@ -146,3 +147,95 @@ class ReconciliationQueryTests(TestCase):
 
         self.assertTrue(result.errors)
         self.assertIn(result.errors[0].extensions['code'], {'FORBIDDEN_ENTITY', 'FORBIDDEN'})
+
+
+ACCOUNT_QUERY = """
+query A($context: FinancialContextInput!, $accountId: String!) {
+  xeroReconciliationAccount(context: $context, accountId: $accountId) {
+    accountCode accountName reportingGroup reportingLine truncated limit
+    comparisonNote
+    lines { id date reference description source ledgerValue }
+  }
+}
+"""
+
+
+class ReconciliationAccountQueryTests(ReconciliationQueryTests):
+    """Drill-down from a variance into the ledger entries behind it."""
+
+    def _execute_account(self, account_id='acc-1'):
+        return schema.execute_sync(
+            ACCOUNT_QUERY,
+            variable_values={
+                'context': {
+                    'entityId': self.tenant.tenant_id,
+                    'financialYear': 2026,
+                    'periodSelection': {'mode': 'ALL', 'months': []},
+                },
+                'accountId': account_id,
+            },
+            context_value=type('Ctx', (), {'request': _Request(self.user)})(),
+        )
+
+    def _journal(self, account, **kwargs):
+        from apps.xero.xero_data.models import XeroJournals
+        defaults = {
+            'organisation': self.tenant, 'account': account,
+            'journal_id': f'j-{XeroJournals.objects.count() + 1}',
+            'journal_number': 100 + XeroJournals.objects.count(),
+            'date': date(2026, 8, 10), 'description': 'Rent for August',
+            'reference': 'INV-1', 'amount': Decimal('900'),
+            'tax_amount': Decimal('0'),
+        }
+        defaults.update(kwargs)
+        return XeroJournals.objects.create(**defaults)
+
+    def test_it_returns_the_ledger_entries_behind_an_account(self):
+        self._seed()
+        from apps.xero.xero_metadata.models import XeroAccount
+        account = XeroAccount.objects.get(account_id='acc-1')
+        account.grouping = 'EXPENSE'
+        account.reporting_code_name = 'Operating expenses'
+        account.save()
+        self._journal(account)
+
+        payload = self._execute_account().data['xeroReconciliationAccount']
+
+        self.assertEqual(payload['accountCode'], '5000')
+        self.assertEqual(payload['reportingGroup'], 'EXPENSE')
+        self.assertEqual(payload['reportingLine'], 'Operating expenses')
+        self.assertEqual(len(payload['lines']), 1)
+        self.assertEqual(payload['lines'][0]['description'], 'Rent for August')
+        self.assertEqual(Decimal(payload['lines'][0]['ledgerValue']), Decimal('900'))
+
+    def test_it_says_why_there_is_no_xero_figure_per_line(self):
+        # Xero's trial balance is account-level. Showing an empty Xero column
+        # without saying so reads as "Xero reports nothing here", which is a
+        # different and false claim.
+        self._seed()
+        payload = self._execute_account().data['xeroReconciliationAccount']
+
+        self.assertIn('account-level report', payload['comparisonNote'])
+        self.assertNotIn('xeroValue', payload['lines'][0] if payload['lines'] else {})
+
+    def test_an_unknown_account_is_refused_rather_than_returned_empty(self):
+        self._seed()
+
+        result = self._execute_account(account_id='acc-does-not-exist')
+
+        self.assertTrue(result.errors)
+        self.assertEqual(result.errors[0].extensions['code'], 'NOT_FOUND')
+
+    def test_a_long_history_is_truncated_and_says_so(self):
+        self._seed()
+        from apps.xero.xero_metadata.models import XeroAccount
+        from apps.web_api_v2.services import xero_reconciliation as service
+        account = XeroAccount.objects.get(account_id='acc-1')
+        for index in range(5):
+            self._journal(account, date=date(2026, 8, index + 1))
+
+        with patch.object(service, 'ACCOUNT_LINE_LIMIT', 3):
+            detail = service.account_lines(self.tenant, 'acc-1', limit=3)
+
+        self.assertTrue(detail['truncated'])
+        self.assertEqual(len(detail['lines']), 3)
