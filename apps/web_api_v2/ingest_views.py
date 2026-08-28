@@ -494,51 +494,15 @@ class ProcessRunListCreateView(V2IngestView):
             _audit(run, 'blocked')
             return Response(serialize_run(run, include_idempotency=True), status=status.HTTP_201_CREATED)
 
-        run.state = IngestProcessRun.State.RUNNING
-        run.started_at = timezone.now()
-        run.save(update_fields=('state', 'started_at'))
-        _audit(run, 'started')
-        try:
-            result = execute_process(process_key, membership.entity)
-        except ProcessCommandError as exc:
-            run.state = IngestProcessRun.State.BLOCKED if exc.blocked else IngestProcessRun.State.FAILED
-            run.error_code = exc.code
-            run.error_message = exc.safe_message
-            run.retryable = exc.retryable
-            if exc.blocked:
-                run.blocked_reason = {'code': exc.code, 'message': exc.safe_message}
-        except Exception as exc:
-            logger.error(
-                'v2_ingest_failed run=%s actor=%s entity=%s process=%s exception_type=%s correlation_id=%s',
-                run.pk, request.user.pk, membership.entity_id, process_key,
-                type(exc).__name__, run.correlation_id,
-            )
-            run.state = IngestProcessRun.State.FAILED
-            run.error_code = 'PROCESS_FAILED'
-            run.error_message = 'The process run failed.'
-            run.retryable = True
-        else:
-            run.state = IngestProcessRun.State.SUCCEEDED
-            run.records_summary = result['records']
-            run.output_summary = result['output']
-            if result['periods']:
-                run.periods = result['periods']
-        run.finished_at = timezone.now()
-        with transaction.atomic():
-            run.save(update_fields=(
-                'state', 'records_summary', 'output_summary', 'periods',
-                'error_code', 'error_message', 'retryable',
-                'blocked_reason', 'finished_at',
-            ))
-            if run.state == IngestProcessRun.State.SUCCEEDED and result['periods']:
-                _replace_run_periods(run, result['periods'])
-            _audit(run, 'completed')
+        # The run stays QUEUED. A durable worker claims and executes it, so a
+        # browser request never holds a connection open for a full provider
+        # sync and never consumes Xero budget inline. Follow the returned run
+        # resource for its terminal state.
         logger.info(
-            'v2_ingest_completed run=%s actor=%s entity=%s process=%s state=%s correlation_id=%s',
-            run.pk, request.user.pk, membership.entity_id, process_key, run.state,
-            run.correlation_id,
+            'v2_ingest_queued run=%s actor=%s entity=%s process=%s correlation_id=%s',
+            run.pk, request.user.pk, membership.entity_id, process_key, run.correlation_id,
         )
-        return Response(serialize_run(run, include_idempotency=True), status=status.HTTP_201_CREATED)
+        return Response(serialize_run(run, include_idempotency=True), status=status.HTTP_202_ACCEPTED)
 
 
 class ProcessRunDetailView(V2IngestView):

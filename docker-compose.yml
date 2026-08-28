@@ -19,3 +19,18 @@ services:
 volumes:
   media_files:
   static_files:
+
+  # Executes queued V2 ingest runs outside the request cycle. Standard sync
+  # additionally requires WEB_API_V2_INGEST_WORKER_ENABLED; see
+  # docs/ingest_worker.md before enabling it — it spends Xero API budget.
+  klikk-financials-ingest-worker:
+    build: .
+    image: klikk-financials-v4:local
+    container_name: klikk-financials-ingest-worker
+    restart: unless-stopped
+    entrypoint: []
+    command: ["python", "manage.py", "run_ingest_worker"]
+    env_file:
+      - ./.env.app-docker
+    depends_on:
+      - klikk-financials
