@@ -420,3 +420,74 @@ class CashflowForecast(models.Model):
 
     def __str__(self):
         return f"{self.run_id}/{self.scenario} W{self.week_index} {self.direction} {self.category} {self.amount}"
+
+class InvestecEntityAccount(models.Model):
+    """Binds one Investec account to the entity whose books it belongs to.
+
+    This replaces two hard-coded dictionaries — INVESTEC_BANK_ENTITY_BINDINGS
+    and INVESTEC_SHARE_ENTITY_BINDINGS — which needed a code change and a
+    deploy to attribute an account. Attribution is an ownership fact about a
+    real bank or stockbroking account, and the people who know it should not
+    need a release to record it.
+
+    The binding is per ACCOUNT, not per owner label. The bank read previously
+    went entity → owner label → INVESTEC_OWNER_MAP → account numbers; that map
+    still serves the cash-position and forecast views, where the entity and
+    capacity roll-up is the point. For deciding which accounts an entity may
+    see, the indirection only added a place for the two to disagree.
+
+    Binding is deliberate: it attributes a real portfolio or bank balance to a
+    real company's books, so an entity with no binding sees nothing rather than
+    inheriting somebody else's account.
+    """
+
+    class Kind(models.TextChoices):
+        BANK = 'BANK', 'Bank account'
+        SHARE = 'SHARE', 'Share trading account'
+
+    entity = models.ForeignKey(
+        'xero_core.XeroTenant',
+        on_delete=models.CASCADE,
+        related_name='investec_accounts',
+        help_text='The Xero tenant whose books this account belongs to.',
+    )
+    account_number = models.CharField(
+        max_length=50,
+        help_text='Investec account number, exactly as it appears on the source rows.',
+    )
+    kind = models.CharField(max_length=8, choices=Kind.choices, db_index=True)
+    label = models.CharField(
+        max_length=200, blank=True, default='',
+        help_text='Optional human name. The account number is never shown to the browser.',
+    )
+    active = models.BooleanField(default=True)
+    note = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = 'Investec entity account'
+        verbose_name_plural = 'Investec entity accounts'
+        ordering = ['entity_id', 'kind', 'account_number']
+        constraints = [
+            # An account belongs to one entity. Two claims on the same account
+            # would put the same money in two sets of books.
+            models.UniqueConstraint(
+                fields=['account_number', 'kind'],
+                condition=models.Q(active=True),
+                name='investec_account_bound_once',
+            ),
+        ]
+        indexes = [
+            models.Index(fields=['entity', 'kind', 'active'], name='investec_entity_kind_idx'),
+        ]
+
+    def __str__(self):
+        return f'{self.entity_id}: {self.get_kind_display()} {self.account_number}'
+
+    @classmethod
+    def numbers_for(cls, entity_id, kind):
+        return list(
+            cls.objects.filter(entity_id=str(entity_id), kind=kind, active=True)
+            .values_list('account_number', flat=True)
+        )

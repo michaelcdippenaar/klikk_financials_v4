@@ -13,10 +13,9 @@ corresponding benefit.
 from django.db.models import Count, Max, Min, Sum
 
 from apps.investec.models import InvestecBankAccount, InvestecBankTransaction
-from apps.investec.owner_map import INVESTEC_OWNER_MAP
 from apps.web_api_v2.services.investec_bank_status import (
-    INVESTEC_BANK_ENTITY_BINDINGS,
     _selected_period_filter,
+    bank_account_numbers,
 )
 
 # A page of transactions. A Klikk month runs to a few hundred rows; the cap is
@@ -41,14 +40,9 @@ def mask_account_number(account_number):
 
 
 def entity_accounts(entity_id):
-    owner = INVESTEC_BANK_ENTITY_BINDINGS.get(str(entity_id))
-    if owner is None:
+    account_numbers = bank_account_numbers(entity_id)
+    if not account_numbers:
         return None
-    account_numbers = tuple(
-        account_number
-        for account_number, attribution in INVESTEC_OWNER_MAP.items()
-        if attribution['entity'] == owner
-    )
     return list(
         InvestecBankAccount.objects.filter(account_number__in=account_numbers)
         .order_by('account_number')

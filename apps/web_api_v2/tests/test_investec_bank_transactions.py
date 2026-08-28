@@ -8,8 +8,6 @@ which is all the screen needs.
 """
 from datetime import date
 from decimal import Decimal
-from unittest.mock import patch
-
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
@@ -24,9 +22,6 @@ from apps.xero.xero_core.models import XeroTenant
 
 KLIKK_TENANT = '41ebfa0e-012e-4ff1-82ba-a9a7585c536c'
 TEST_ACCOUNT = '10012345678'
-# A stand-in owner map, so the test does not depend on which real accounts
-# happen to be attributed to Klikk today.
-TEST_OWNER_MAP = {TEST_ACCOUNT: {'entity': 'Klikk', 'capacity': 'business', 'liquid': True}}
 
 QUERY = """
 query B($context: FinancialContextInput!, $limit: Int!) {
@@ -62,10 +57,13 @@ class InvestecBankTransactionTests(TestCase):
                 user=self.user, entity=tenant, role='VIEWER', active=True,
             )
 
-    def _account(self, number='10012345678', name='Business Current'):
-        return InvestecBankAccount.objects.create(
+    def _account(self, number=TEST_ACCOUNT, name='Business Current'):
+        """Create the account AND bind it to Klikk, the way production does."""
+        account = InvestecBankAccount.objects.create(
             account_number=number, account_name=name,
         )
+        self._bind(self.klikk, number)
+        return account
 
     def _txn(self, account, **kwargs):
         defaults = {
@@ -77,10 +75,15 @@ class InvestecBankTransactionTests(TestCase):
         defaults.update(kwargs)
         return InvestecBankTransaction.objects.create(**defaults)
 
+    def _bind(self, tenant, account_number=TEST_ACCOUNT):
+        from apps.investec.models import InvestecEntityAccount
+        return InvestecEntityAccount.objects.create(
+            entity=tenant, account_number=account_number,
+            kind=InvestecEntityAccount.Kind.BANK, active=True,
+        )
+
     def _execute(self, tenant, limit=100):
-        with patch('apps.web_api_v2.services.investec_bank_transactions.INVESTEC_OWNER_MAP',
-                   TEST_OWNER_MAP):
-            return self._run(tenant, limit)
+        return self._run(tenant, limit)
 
     def _run(self, tenant, limit):
         return schema.execute_sync(
@@ -106,6 +109,7 @@ class InvestecBankTransactionTests(TestCase):
     def test_a_bound_entity_with_no_synced_account_says_which_problem_it_is(self):
         # Bound-but-unsynced is a different problem from unbound, and needs a
         # different action.
+        self._bind(self.klikk)
         payload = self._execute(self.klikk).data['investecBankTransactions']
 
         self.assertFalse(payload['available'])
@@ -174,8 +178,6 @@ class InvestecBankTransactionTests(TestCase):
         account = self._account()
         self._txn(account)
 
-        with patch('apps.web_api_v2.services.investec_bank_transactions.INVESTEC_OWNER_MAP',
-                   TEST_OWNER_MAP):
-            result = read_bank_transactions(self.klikk.pk, ['2025-08'], limit=10_000)
+        result = read_bank_transactions(self.klikk.pk, ['2025-08'], limit=10_000)
 
         self.assertLessEqual(len(result['rows']), 500)

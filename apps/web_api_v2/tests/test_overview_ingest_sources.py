@@ -14,11 +14,16 @@ from apps.web_api_v2.models import (
     UserEntityCapability,
     UserEntityMembership,
 )
-from apps.investec.models import InvestecBankAccount, InvestecBankTransaction
-from apps.web_api_v2.services.investec_bank_status import (
-    INVESTEC_BANK_ENTITY_BINDINGS,
+from apps.investec.models import (
+    InvestecBankAccount,
+    InvestecBankTransaction,
+    InvestecEntityAccount,
 )
 from apps.xero.xero_core.models import XeroTenant
+
+# The tenant the seed migration binds to Klikk's Investec bank accounts. These
+# tests used to read it out of a dict in the service; the binding is now a row.
+BOUND_BANK_TENANT = '41ebfa0e-012e-4ff1-82ba-a9a7585c536c'
 
 
 QUERY = '''
@@ -263,11 +268,17 @@ class OverviewIngestSourcesTests(TestCase):
         prerequisites,
     ):
         bound_entity = XeroTenant.objects.create(
-            tenant_id=next(iter(INVESTEC_BANK_ENTITY_BINDINGS)),
+            tenant_id=BOUND_BANK_TENANT,
             tenant_name='Klikk (Pty) Ltd',
             fiscal_year_start_month=7,
         )
         UserEntityMembership.objects.create(user=self.user, entity=bound_entity)
+        # The binding is a row now, not a dict. A tenant created inside a test
+        # was not present when the seed migration ran, so it binds its own.
+        InvestecEntityAccount.objects.create(
+            entity=bound_entity, account_number='10011924075',
+            kind=InvestecEntityAccount.Kind.BANK, active=True,
+        )
         klikk_account = InvestecBankAccount.objects.create(
             account_id='investec-klikk-account',
             account_number='10011924075',
@@ -325,11 +336,17 @@ class OverviewIngestSourcesTests(TestCase):
         prerequisites,
     ):
         bound_entity = XeroTenant.objects.create(
-            tenant_id=next(iter(INVESTEC_BANK_ENTITY_BINDINGS)),
+            tenant_id=BOUND_BANK_TENANT,
             tenant_name='Klikk (Pty) Ltd',
             fiscal_year_start_month=7,
         )
         UserEntityMembership.objects.create(user=self.user, entity=bound_entity)
+        # The binding is a row now, not a dict. A tenant created inside a test
+        # was not present when the seed migration ran, so it binds its own.
+        InvestecEntityAccount.objects.create(
+            entity=bound_entity, account_number='10011924075',
+            kind=InvestecEntityAccount.Kind.BANK, active=True,
+        )
         InvestecBankAccount.objects.create(
             account_id='investec-klikk-empty',
             account_number='10011924075',
@@ -352,7 +369,7 @@ class OverviewIngestSourcesTests(TestCase):
         prerequisites,
     ):
         bound_entity = XeroTenant.objects.create(
-            tenant_id=next(iter(INVESTEC_BANK_ENTITY_BINDINGS)),
+            tenant_id=BOUND_BANK_TENANT,
             tenant_name='Klikk (Pty) Ltd',
             fiscal_year_start_month=7,
         )
@@ -362,6 +379,12 @@ class OverviewIngestSourcesTests(TestCase):
             fiscal_year_start_month=7,
         )
         UserEntityMembership.objects.create(user=self.user, entity=bound_entity)
+        # The binding is a row now, not a dict. A tenant created inside a test
+        # was not present when the seed migration ran, so it binds its own.
+        InvestecEntityAccount.objects.create(
+            entity=bound_entity, account_number='10011924075',
+            kind=InvestecEntityAccount.Kind.BANK, active=True,
+        )
         UserEntityMembership.objects.create(user=self.user, entity=lookalike)
 
         missing = self._data(
