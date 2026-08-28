@@ -3,17 +3,19 @@ import datetime
 
 from django.db.models import Count, Max, Q
 
-from apps.investec.models import InvestecBankAccount, InvestecBankTransaction
-from apps.investec.owner_map import INVESTEC_OWNER_MAP, KLIKK
+from apps.investec.models import (
+    InvestecBankAccount,
+    InvestecBankTransaction,
+    InvestecEntityAccount,
+)
 
 
-# This is an explicit cross-system identity binding, not a name match. The Xero
-# tenant id is the durable V2 entity identity and the owner-map label is the
-# existing durable attribution used for Investec bank accounts. New entities
-# remain unbound until an equally explicit mapping is reviewed.
-INVESTEC_BANK_ENTITY_BINDINGS = {
-    '41ebfa0e-012e-4ff1-82ba-a9a7585c536c': KLIKK,
-}
+# The binding lives in InvestecEntityAccount, not in this module. It used to be
+# a dict here, which meant attributing a bank account — an ownership fact —
+# needed a code change and a deploy. It is still an explicit reviewed binding,
+# never a name match; an entity with no rows sees nothing.
+def bank_account_numbers(entity_id):
+    return InvestecEntityAccount.numbers_for(entity_id, InvestecEntityAccount.Kind.BANK)
 
 
 def _month_window(period):
@@ -37,15 +39,10 @@ def read_investec_bank_status(entity_id, selected_periods):
     This reads only already-persisted rows. It performs no source-system call,
     sync, mutation, or fallback name matching.
     """
-    owner = INVESTEC_BANK_ENTITY_BINDINGS.get(str(entity_id))
-    if owner is None:
+    account_numbers = bank_account_numbers(entity_id)
+    if not account_numbers:
         return None
 
-    account_numbers = tuple(
-        account_number
-        for account_number, attribution in INVESTEC_OWNER_MAP.items()
-        if attribution['entity'] == owner
-    )
     account_ids = InvestecBankAccount.objects.filter(
         account_number__in=account_numbers,
     ).values_list('pk', flat=True)

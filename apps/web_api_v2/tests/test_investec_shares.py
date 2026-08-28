@@ -24,7 +24,6 @@ from apps.web_api_v2.services.investec_shares import read_share_account
 from apps.xero.xero_core.models import XeroTenant
 
 ACCOUNT = '10082386'
-BINDINGS = {'tenant-shares': ACCOUNT}
 
 QUERY = """
 query S($context: FinancialContextInput!) {
@@ -74,9 +73,19 @@ class InvestecShareAccountTests(TestCase):
         defaults.update(kwargs)
         return InvestecJseTransaction.objects.create(**defaults)
 
+    def _bind(self):
+        from apps.investec.models import InvestecEntityAccount
+        return InvestecEntityAccount.objects.create(
+            entity=self.tenant, account_number=ACCOUNT,
+            kind=InvestecEntityAccount.Kind.SHARE, active=True,
+        )
+
     def _execute(self):
-        with patch('apps.web_api_v2.services.investec_shares.INVESTEC_SHARE_ENTITY_BINDINGS', BINDINGS):
-            return schema.execute_sync(
+        self._bind()
+        return self._run()
+
+    def _run(self):
+        return schema.execute_sync(
                 QUERY,
                 variable_values={'context': {
                     'entityId': self.tenant.tenant_id, 'financialYear': 2026,
@@ -145,8 +154,8 @@ class InvestecShareAccountTests(TestCase):
         self.assertEqual(payload['transactionCount'], 1)
 
     def test_a_bound_account_with_nothing_loaded_says_which_problem_it_is(self):
-        with patch('apps.web_api_v2.services.investec_shares.INVESTEC_SHARE_ENTITY_BINDINGS', BINDINGS):
-            result = read_share_account(self.tenant.pk, ['2025-08'])
+        self._bind()
+        result = read_share_account(self.tenant.pk, ['2025-08'])
 
         self.assertFalse(result['available'])
         self.assertIn('no holdings or transactions have been loaded', result['userSafeReason'])

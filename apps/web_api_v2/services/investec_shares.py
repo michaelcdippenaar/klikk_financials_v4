@@ -9,10 +9,8 @@ valuation and portfolio-review screens are a different thing and do not belong
 to this read.
 
 Attribution follows the same discipline as the bank binding: an explicit,
-reviewed mapping from a Xero tenant id to an Investec share account number,
-never a name match. JSE accounts are not in INVESTEC_OWNER_MAP — that map
-covers the 14 bank accounts — so shares need their own, and an entity without
-one gets nothing rather than someone else's portfolio.
+reviewed InvestecEntityAccount row, never a name match. An entity without one
+gets nothing rather than someone else's portfolio.
 """
 import datetime
 from decimal import Decimal
@@ -20,16 +18,11 @@ from decimal import Decimal
 from django.db.models import Count, Max, Min, Sum
 
 from apps.investec.models import (
+    InvestecEntityAccount,
     InvestecJsePortfolio,
     InvestecJseShareNameMapping,
     InvestecJseTransaction,
 )
-
-# Deliberately empty. Binding an entity to a share account attributes a real
-# portfolio to a real company's books, so it is added only once someone has
-# confirmed which entity owns which account — the same rule the bank binding
-# states for new entities.
-INVESTEC_SHARE_ENTITY_BINDINGS = {}
 
 NOT_BOUND_REASON = (
     'No Investec share account is bound to this entity. Binding one attributes '
@@ -43,7 +36,14 @@ NO_DATA_REASON = (
 
 
 def bound_account(entity_id):
-    return INVESTEC_SHARE_ENTITY_BINDINGS.get(str(entity_id))
+    """The share account bound to this entity, or None.
+
+    Binding attributes a real portfolio to a real company's books, so it is a
+    reviewed row in InvestecEntityAccount rather than a constant in code — the
+    people who know the ownership should not need a deploy to record it.
+    """
+    numbers = InvestecEntityAccount.numbers_for(entity_id, InvestecEntityAccount.Kind.SHARE)
+    return numbers[0] if numbers else None
 
 
 def read_share_account(entity_id, selected_periods, *, limit=100):
