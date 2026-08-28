@@ -15,7 +15,7 @@ gets nothing rather than someone else's portfolio.
 import datetime
 from decimal import Decimal
 
-from django.db.models import Count, Max, Min, Sum
+from django.db.models import Count, Max, Min, Q, Sum
 
 from apps.investec.models import (
     InvestecEntityAccount,
@@ -114,7 +114,6 @@ def read_share_account(entity_id, selected_periods, *, limit=100):
 
 def _selected_period_filter_dates(selected_periods):
     """The bank filter targets transaction_date; JSE rows use `date`."""
-    from django.db.models import Q
     import calendar
 
     query = Q()
@@ -134,6 +133,12 @@ def _mask(account_number):
 def _unmapped_share_names(transactions):
     """Share names in these transactions that no mapping resolves to a code.
 
+    A mapping row carries up to three names for one share_code — share_name,
+    share_name2 and share_name3 — because the same instrument arrives under
+    different spellings on different statements ("A V I" and "AVI" are one
+    share). Checking only share_name reports names that are in fact mapped,
+    which turns a data-quality screen into a source of false work.
+
     Account-level rows (fees, interest) legitimately carry no share name and
     are not counted: they are not a mapping gap.
     """
@@ -144,11 +149,22 @@ def _unmapped_share_names(transactions):
     }
     if not names:
         return []
-    mapped = set(
+
+    resolved = (
         InvestecJseShareNameMapping.objects
-        .filter(share_name__in=names)
         .exclude(share_code__isnull=True)
         .exclude(share_code='')
-        .values_list('share_name', flat=True)
+        .filter(
+            Q(share_name__in=names)
+            | Q(share_name2__in=names)
+            | Q(share_name3__in=names)
+        )
+        .values_list('share_name', 'share_name2', 'share_name3')
     )
+    mapped = {
+        value
+        for row in resolved
+        for value in row
+        if value
+    }
     return sorted(names - mapped)

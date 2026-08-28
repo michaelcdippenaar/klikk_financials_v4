@@ -183,3 +183,38 @@ class InvestecShareAccountTests(TestCase):
         payload = self._execute().data['investecShareAccount']
 
         self.assertEqual(payload['unmappedShareNames'], [])
+
+    def test_a_name_variant_counts_as_mapped(self):
+        """One share arrives under several spellings on different statements.
+
+        A mapping row carries up to three names for one share_code — "A V I"
+        and "AVI" are the same instrument. Checking only the first name
+        reported mapped shares as gaps, turning this screen into a source of
+        false work.
+        """
+        from apps.investec.models import InvestecJseShareNameMapping
+
+        self._holding(date(2026, 6, 25))
+        self._txn(date(2025, 8, 10), share_name='AVI')
+        self._txn(date(2025, 8, 11), share_name='JSE.AVI')
+        InvestecJseShareNameMapping.objects.create(
+            share_name='A V I', share_name2='AVI', share_name3='JSE.AVI', share_code='AVI',
+        )
+
+        payload = self._execute().data['investecShareAccount']
+
+        self.assertEqual(payload['unmappedShareNames'], [])
+
+    def test_a_variant_row_without_a_code_is_still_a_gap(self):
+        # A name variant that resolves to no share_code resolves to nothing.
+        from apps.investec.models import InvestecJseShareNameMapping
+
+        self._holding(date(2026, 6, 25))
+        self._txn(date(2025, 8, 10), share_name='JSE.AVI')
+        InvestecJseShareNameMapping.objects.create(
+            share_name='A V I', share_name2='JSE.AVI', share_code=None,
+        )
+
+        payload = self._execute().data['investecShareAccount']
+
+        self.assertEqual(payload['unmappedShareNames'], ['JSE.AVI'])
