@@ -191,6 +191,82 @@ enum IngestValidationState {
   FAILED
 }
 
+type InvestecBankAccountRef {
+  id: String!
+  maskedNumber: String!
+  name: String!
+}
+
+type InvestecBankSummary {
+  transactionCount: Int!
+  netAmount: Decimal
+  earliestDate: Date
+  latestDate: Date
+  freshnessAt: DateTime
+}
+
+type InvestecBankTransactionRow {
+  id: String!
+  date: Date
+  accountMasked: String!
+  description: String!
+  transactionType: String!
+  status: String!
+  amount: Decimal!
+  runningBalance: Decimal
+}
+
+type InvestecBankTransactions {
+  context: ResolvedFinancialContext!
+  available: Boolean!
+  userSafeReason: String
+  accounts: [InvestecBankAccountRef!]!
+  summary: InvestecBankSummary
+  totalCount: Int!
+  rows: [InvestecBankTransactionRow!]!
+}
+
+type InvestecShareAccount {
+  context: ResolvedFinancialContext!
+  available: Boolean!
+  userSafeReason: String
+  accountMasked: String
+  holdingsAsAt: Date
+  holdingsValue: Decimal
+  holdings: [InvestecShareHolding!]!
+  summary: InvestecShareSummary
+  transactionCount: Int!
+  transactions: [InvestecShareTransactionRow!]!
+  unmappedShareNames: [String!]!
+}
+
+type InvestecShareHolding {
+  id: String!
+  shareCode: String!
+  company: String!
+  quantity: Decimal!
+  currency: String!
+  totalCost: Decimal!
+  totalValue: Decimal!
+}
+
+type InvestecShareSummary {
+  transactionCount: Int!
+  netValue: Decimal
+  earliestDate: Date
+  latestDate: Date
+}
+
+type InvestecShareTransactionRow {
+  id: String!
+  date: Date
+  type: String!
+  shareName: String!
+  description: String!
+  quantity: Decimal!
+  value: Decimal!
+}
+
 """
 The `JSON` scalar type represents JSON values as specified by [ECMA-404](https://ecma-international.org/wp-content/uploads/ECMA-404_2nd_edition_december_2017.pdf).
 """
@@ -306,6 +382,8 @@ type Query {
   xeroReconciliation(context: FinancialContextInput!): XeroReconciliation!
   xeroReconciliationAccount(context: FinancialContextInput!, accountId: String!): ReconciliationAccountDetail!
   planningAnalyticsTarget(context: FinancialContextInput!): PlanningAnalyticsTarget!
+  investecBankTransactions(context: FinancialContextInput!, limit: Int! = 100, offset: Int! = 0): InvestecBankTransactions!
+  investecShareAccount(context: FinancialContextInput!, limit: Int! = 100): InvestecShareAccount!
   sourceConnections(context: FinancialContextInput!): SourceConnections!
   xeroConnectionStatus(context: FinancialContextInput!): XeroConnectionStatus!
   xeroPipelineSummary(context: FinancialContextInput!): XeroPipelineSummary!
