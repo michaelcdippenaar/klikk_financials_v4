@@ -1,20 +1,22 @@
 """
 Management command: sync_aged_receivables
 
-Pulls Aged Receivables By Contact from Xero for one or all connected tenants
-and upserts the results into xero_data_agedreceivable.
+Builds Aged Receivables for one or all connected tenants from the invoices
+already held locally — no Xero API calls — and upserts the results into xero_data_agedreceivable.
 
 Usage:
     python manage.py sync_aged_receivables
     python manage.py sync_aged_receivables --tenant-id <UUID>
     python manage.py sync_aged_receivables --date 2025-04-30
+    python manage.py sync_aged_receivables --from-xero   # verification only; hundreds of API calls
 """
 from datetime import date
 
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.xero.xero_core.models import XeroTenant
-from apps.xero.xero_data.aged_reports_service import sync_aged_receivables
+from apps.xero.xero_data.aged_from_invoices import sync_aged_receivables_from_invoices
+from apps.xero.xero_data.aged_reports_service import sync_aged_receivables as sync_aged_receivables_from_xero
 
 
 class Command(BaseCommand):
@@ -26,6 +28,16 @@ class Command(BaseCommand):
             dest='tenant_id',
             default=None,
             help='Xero tenant UUID. Omit to run for all connected tenants.',
+        )
+        parser.add_argument(
+            '--from-xero',
+            action='store_true',
+            help=(
+                'Call Xero per contact instead of computing from local invoices. '
+                'Xero has no bulk aged endpoint, so this is one API call per '
+                'contact in the ledger — hundreds on a real tenant. Reserved for '
+                'verifying the local computation.'
+            ),
         )
         parser.add_argument(
             '--date',
@@ -61,7 +73,11 @@ class Command(BaseCommand):
         for tenant in tenants:
             self.stdout.write(f'Syncing aged receivables for tenant: {tenant.tenant_name} ({tenant.tenant_id})')
             try:
-                result = sync_aged_receivables(tenant, report_date=report_date)
+                result = (
+                    sync_aged_receivables_from_xero(tenant, report_date=report_date)
+                    if options.get('from_xero') else
+                    sync_aged_receivables_from_invoices(tenant, report_date=report_date)
+                )
             except Exception as exc:
                 self.stdout.write(
                     self.style.ERROR(f'  ERROR: {exc}')
