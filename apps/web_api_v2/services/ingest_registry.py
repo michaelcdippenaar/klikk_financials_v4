@@ -138,10 +138,17 @@ def prerequisite_status(entity, process_key):
 
     for prerequisite in PROCESS_DEFINITIONS[process_key]['prerequisites']:
         if prerequisite == 'durable-worker':
+            # A worker now exists (manage.py run_ingest_worker), so this is no
+            # longer unconditionally unsatisfied. It stays a real check: the
+            # prerequisite is satisfied only where the deployment actually runs
+            # one, which the setting declares.
+            available = getattr(settings, 'WEB_API_V2_INGEST_WORKER_ENABLED', False)
             checks.append({
                 'code': 'DURABLE_WORKER_REQUIRED',
-                'satisfied': False,
+                'satisfied': bool(available),
                 'message': (
+                    'A durable background worker executes this process.'
+                    if available else
                     'Standard sync is unavailable until a durable background worker '
                     'can execute beyond the HTTP request timeout.'
                 ),
@@ -216,16 +223,70 @@ def normalize_result(process_key, result):
     }
 
 
+# Dependency order, so a stage never runs before the data it needs. Documents
+# and the aged reports come last: they are the heaviest Xero consumers and the
+# least urgent, so a budget or rate limit stops them rather than the ledger.
+STANDARD_SYNC_SEQUENCE = (
+    'metadata',
+    'transaction-journal-sync',
+    'invoice-sync',
+    'process-journals',
+    'trail-balance',
+    'aged-payables',
+    'aged-receivables',
+    'documents',
+)
+
+
+def run_standard_sync(entity):
+    """Run every stage in dependency order, stopping at the first failure.
+
+    Stopping matters: continuing past a failed transaction sync would build a
+    trial balance on incomplete journals and report success. A partial result
+    is returned either way, so the caller can see how far it got.
+    """
+    aggregate = {}
+    periods = []
+    for index, process_key in enumerate(STANDARD_SYNC_SEQUENCE):
+        try:
+            outcome = execute_process(process_key, entity)
+        except ProcessCommandError as exc:
+            raise ProcessCommandError(
+                exc.code,
+                f'{PROCESS_DEFINITIONS[process_key]["display_name"]}: {exc.safe_message}',
+                retryable=exc.retryable,
+                blocked=exc.blocked,
+            ) from None
+        for key, value in (outcome.get('records') or {}).items():
+            aggregate[key] = aggregate.get(key, 0) + value
+        for period in outcome.get('periods') or []:
+            if period not in periods:
+                periods.append(period)
+        logger.info(
+            'v2_standard_sync_stage entity=%s stage=%s (%s/%s) complete',
+            entity.pk, process_key, index + 1, len(STANDARD_SYNC_SEQUENCE),
+        )
+    return {
+        'records': aggregate,
+        'output': {'stagesCompleted': len(STANDARD_SYNC_SEQUENCE)},
+        'periods': periods,
+    }
+
+
 def execute_process(process_key, entity):
     """Execute one allowlisted synchronous process using reviewed Python services."""
     try:
         if process_key == 'standard-sync':
-            raise ProcessCommandError(
-                'TEMPORARILY_UNAVAILABLE',
-                'Standard sync requires a durable background worker.',
-                retryable=True,
-                blocked=True,
-            )
+            # Reached only from the worker, and only once the deployment has
+            # declared a worker. The prerequisite check above is the gate.
+            if not getattr(settings, 'WEB_API_V2_INGEST_WORKER_ENABLED', False):
+                raise ProcessCommandError(
+                    'TEMPORARILY_UNAVAILABLE',
+                    'Standard sync requires a durable background worker.',
+                    retryable=True,
+                    blocked=True,
+                )
+            return run_standard_sync(entity)
         if process_key == 'metadata':
             from apps.xero.xero_metadata.services import update_metadata
             result = update_metadata(entity.pk, user=_credentials_user(entity.pk))

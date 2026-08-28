@@ -192,6 +192,13 @@ WEB_API_V2_INGEST_MAX_REQUEST_BYTES = int(
 WEB_API_V2_INGEST_MAX_XERO_CALLS = int(
     os.environ.get('WEB_API_V2_INGEST_MAX_XERO_CALLS', '50')
 )
+# Declares that this deployment actually runs `manage.py run_ingest_worker`.
+# Off by default: enabling it lets Standard sync consume real Xero API budget,
+# and two production blowouts in August 2026 came from unbounded Xero calls.
+WEB_API_V2_INGEST_WORKER_ENABLED = os.environ.get(
+    'WEB_API_V2_INGEST_WORKER_ENABLED', 'false',
+).lower() in {'1', 'true', 'yes'}
+
 WEB_API_V2_INGEST_RUN_LEASE_SECONDS = int(
     os.environ.get('WEB_API_V2_INGEST_RUN_LEASE_SECONDS', '1800')
 )

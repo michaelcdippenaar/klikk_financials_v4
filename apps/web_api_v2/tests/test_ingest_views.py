@@ -55,6 +55,17 @@ class IngestProcessApiTests(TestCase):
             kwargs={'entity_id': (entity or self.entity).pk},
         )
 
+    def _drain(self):
+        """Run the queue exactly as the deployed worker does."""
+        from apps.web_api_v2.services.ingest_execution import (
+            claim_next_run, execute_claimed_run,
+        )
+        drained = 0
+        while (run := claim_next_run()) is not None:
+            execute_claimed_run(run)
+            drained += 1
+        return drained
+
     def _post(self, payload, *, token=None, entity=None):
         headers = {'HTTP_AUTHORIZATION': f'Bearer {token or self.token}'} if token is not False else {}
         return self.client.post(
@@ -94,21 +105,30 @@ class IngestProcessApiTests(TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json()['error']['code'], 'FORBIDDEN_ENTITY')
 
-    @patch('apps.web_api_v2.ingest_views.execute_process')
-    def test_allowed_run_is_durable_audited_and_synchronous(self, execute):
+    @patch('apps.web_api_v2.services.ingest_execution.execute_process')
+    def test_a_run_is_queued_by_the_request_and_executed_by_the_worker(self, execute):
+        """The request must not execute. It used to run the whole Xero sync
+        inline, holding a connection past the proxy timeout and spending API
+        budget with no queue and no recovery."""
         execute.return_value = self._result()
         response = self._post({
             'processKey': 'metadata',
             'idempotencyKey': 'request-0004',
             'periods': ['2026-07'],
         })
-        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.status_code, 202)
         body = response.json()
-        self.assertEqual(body['state'], 'succeeded')
-        self.assertIsNotNone(body['startedAt'])
-        self.assertIsNotNone(body['finishedAt'])
+        self.assertEqual(body['state'], 'queued')
+        self.assertIsNone(body['startedAt'])
+        self.assertIsNone(body['finishedAt'])
         self.assertFalse(body['idempotentReplay'])
+        execute.assert_not_called()
+
+        self.assertEqual(self._drain(), 1)
         run = IngestProcessRun.objects.get(pk=body['id'])
+        self.assertEqual(run.state, IngestProcessRun.State.SUCCEEDED)
+        self.assertIsNotNone(run.started_at)
+        self.assertIsNotNone(run.finished_at)
         self.assertEqual(run.actor, self.user)
         self.assertEqual(run.records_summary, {'created': 4})
         self.assertEqual(
@@ -121,13 +141,13 @@ class IngestProcessApiTests(TestCase):
         )
         execute.assert_called_once_with('metadata', self.entity)
 
-    @patch('apps.web_api_v2.ingest_views.execute_process')
+    @patch('apps.web_api_v2.services.ingest_execution.execute_process')
     def test_idempotent_replay_and_changed_fingerprint_conflict(self, execute):
         execute.return_value = self._result()
         payload = {'processKey': 'metadata', 'idempotencyKey': 'request-0005'}
         first = self._post(payload)
         replay = self._post(payload)
-        self.assertEqual(first.status_code, 201)
+        self.assertEqual(first.status_code, 202)
         self.assertEqual(replay.status_code, 200)
         self.assertTrue(replay.json()['idempotentReplay'])
         self.assertEqual(first.json()['id'], replay.json()['id'])
@@ -198,7 +218,7 @@ class IngestProcessApiTests(TestCase):
         self.assertEqual(response.json()['blockedReason']['code'], 'DURABLE_WORKER_REQUIRED')
         self.assertEqual(response.json()['permittedActions'], [])
 
-    @patch('apps.web_api_v2.ingest_views.execute_process')
+    @patch('apps.web_api_v2.services.ingest_execution.execute_process')
     def test_server_prerequisite_blocks_before_command_execution(self, execute):
         XeroClientCredentials.objects.all().delete()
         response = self._post({'processKey': 'metadata', 'idempotencyKey': 'request-prereq'})
@@ -209,7 +229,7 @@ class IngestProcessApiTests(TestCase):
         )
         execute.assert_not_called()
 
-    @patch('apps.web_api_v2.ingest_views.execute_process')
+    @patch('apps.web_api_v2.services.ingest_execution.execute_process')
     def test_retry_creates_new_linked_audited_run(self, execute):
         failed = IngestProcessRun.objects.create(
             entity=self.entity,
@@ -228,11 +248,11 @@ class IngestProcessApiTests(TestCase):
             'idempotencyKey': 'request-retry-1',
             'retryOfRunId': str(failed.pk),
         })
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()['state'], 'succeeded')
+        self.assertEqual(response.status_code, 202)
+        self._drain()
         self.assertEqual(response.json()['retryOfRunId'], str(failed.pk))
 
-    @patch('apps.web_api_v2.ingest_views.execute_process')
+    @patch('apps.web_api_v2.services.ingest_execution.execute_process')
     def test_expired_active_run_is_failed_audited_and_replaced(self, execute):
         stale = IngestProcessRun.objects.create(
             entity=self.entity,
@@ -250,8 +270,8 @@ class IngestProcessApiTests(TestCase):
             'idempotencyKey': 'request-after-stale',
         })
 
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()['state'], 'succeeded')
+        self.assertEqual(response.status_code, 202)
+        self._drain()
         stale.refresh_from_db()
         self.assertEqual(stale.state, IngestProcessRun.State.FAILED)
         self.assertEqual(stale.error_code, 'RUN_LEASE_EXPIRED')
@@ -262,23 +282,30 @@ class IngestProcessApiTests(TestCase):
             ).exists(),
         )
 
-    @patch('apps.web_api_v2.ingest_views.execute_process')
+    @patch('apps.web_api_v2.services.ingest_execution.execute_process')
     def test_safe_failure_redacts_exception_and_is_retryable(self, execute):
         marker = 'secret-token-and-financial-value-388.00'
         execute.side_effect = RuntimeError(marker)
-        with self.assertLogs('apps.web_api_v2.ingest_views', level='ERROR') as captured:
-            response = self._post({'processKey': 'metadata', 'idempotencyKey': 'request-0009'})
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()['state'], 'failed')
-        self.assertEqual(response.json()['error']['code'], 'PROCESS_FAILED')
-        self.assertTrue(response.json()['retryable'])
+        response = self._post({'processKey': 'metadata', 'idempotencyKey': 'request-0009'})
+        self.assertEqual(response.status_code, 202)
+        with self.assertLogs('apps.web_api_v2.services.ingest_execution', level='ERROR') as captured:
+            self._drain()
+
+        run = IngestProcessRun.objects.get(pk=response.json()['id'])
+        self.assertEqual(run.state, IngestProcessRun.State.FAILED)
+        self.assertEqual(run.error_code, 'PROCESS_FAILED')
+        self.assertTrue(run.retryable)
+        # The provider message may carry a token or a financial value; neither
+        # the stored run nor the log may repeat it.
+        self.assertNotIn(marker, run.error_message)
         self.assertNotIn(marker, response.content.decode())
         self.assertNotIn(marker, '\n'.join(captured.output))
 
-    @patch('apps.web_api_v2.ingest_views.execute_process')
+    @patch('apps.web_api_v2.services.ingest_execution.execute_process')
     def test_precondition_and_cursor_bounded_entity_history(self, execute):
         execute.return_value = self._result()
         first = self._post({'processKey': 'metadata', 'idempotencyKey': 'request-0010'})
+        self._drain()
         stale = self._post({
             'processKey': 'metadata',
             'idempotencyKey': 'request-0011',
@@ -287,8 +314,12 @@ class IngestProcessApiTests(TestCase):
         self.assertEqual(stale.status_code, 409)
         self.assertEqual(stale.json()['error']['code'], 'PRECONDITION_FAILED')
 
+        # One active run per entity is a hard constraint, so each must reach a
+        # terminal state before the next is accepted.
         self._post({'processKey': 'metadata', 'idempotencyKey': 'request-0012'})
+        self._drain()
         self._post({'processKey': 'metadata', 'idempotencyKey': 'request-0013'})
+        self._drain()
         page_one = self.client.get(
             self._url(), {'limit': 2}, HTTP_AUTHORIZATION=f'Bearer {self.token}',
         )
