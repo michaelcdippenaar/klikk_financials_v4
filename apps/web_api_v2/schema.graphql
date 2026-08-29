@@ -33,6 +33,7 @@ scalar Decimal
 enum EntityCapability {
   VIEW_FINANCIALS
   RUN_INGESTION_PROCESS
+  MANAGE_SHARE_MAPPINGS
 }
 
 type EntityOption {
