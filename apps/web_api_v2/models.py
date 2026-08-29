@@ -77,6 +77,10 @@ class ViewerPreference(models.Model):
 class UserEntityCapability(models.Model):
     class Code(models.TextChoices):
         RUN_INGESTION_PROCESS = 'RUN_INGESTION_PROCESS', 'Run ingestion process'
+        # Mapping a share name changes how a transaction is attributed to a
+        # holding, so it is its own grant rather than riding on the one that
+        # runs syncs. They are different powers over the same books.
+        MANAGE_SHARE_MAPPINGS = 'MANAGE_SHARE_MAPPINGS', 'Manage share-name mappings'
 
     membership = models.ForeignKey(
         UserEntityMembership,
