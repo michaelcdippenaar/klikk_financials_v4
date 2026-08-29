@@ -296,3 +296,70 @@ class ViewerContextTests(TestCase):
 
     def test_committed_schema_snapshot_is_current(self):
         call_command('export_graphql_schema', '--check')
+
+
+class ViewerContextCapabilityEnumTests(TestCase):
+    """A capability grant must never be able to hide the entity list.
+
+    This is the regression test for a live outage. MANAGE_SHARE_MAPPINGS was
+    granted in production before the schema had the word for it, so building the
+    viewer context raised ValueError, the whole query returned INTERNAL_ERROR,
+    and a signed-in user with three active memberships saw no entities and no
+    stated reason. The grant was real, the memberships were real, and every
+    unauthenticated smoke check still passed.
+    """
+
+    def setUp(self):
+        self.url = reverse('web_api_v2:graphql')
+        self.user = get_user_model().objects.create_user(
+            username='mapper', password='safe-test-pass-9274',
+        )
+        self.entity = XeroTenant.objects.create(
+            tenant_id='tenant-mapper', tenant_name='Mapper Entity',
+        )
+        self.membership = UserEntityMembership.objects.create(
+            user=self.user, entity=self.entity,
+        )
+
+    def _entities(self):
+        response = self.client.post(
+            self.url,
+            data=json.dumps({'query': VIEWER_QUERY, 'operationName': 'ViewerContext'}),
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {AccessToken.for_user(self.user)}',
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIsNone(body.get('errors'), body.get('errors'))
+        return body['data']['viewerContext']['entities']
+
+    def test_share_mapping_capability_is_expressible(self):
+        UserEntityCapability.objects.create(
+            membership=self.membership, code='MANAGE_SHARE_MAPPINGS',
+        )
+        entities = self._entities()
+        self.assertEqual(len(entities), 1)
+        self.assertIn('MANAGE_SHARE_MAPPINGS', entities[0]['capabilities'])
+
+    def test_unknown_capability_does_not_hide_the_entity(self):
+        # The schema will always be able to lag a grant applied by hand or by an
+        # earlier deploy. When it does, the entity must still be listed — the
+        # user simply does not get that one power.
+        UserEntityCapability.objects.create(
+            membership=self.membership, code='NOT_A_REAL_CAPABILITY',
+        )
+        entities = self._entities()
+        self.assertEqual(len(entities), 1)
+        self.assertEqual(entities[0]['name'], 'Mapper Entity')
+        self.assertNotIn('NOT_A_REAL_CAPABILITY', entities[0]['capabilities'])
+
+    def test_unknown_capability_alongside_known_ones_keeps_the_known(self):
+        UserEntityCapability.objects.create(
+            membership=self.membership, code='MANAGE_SHARE_MAPPINGS',
+        )
+        UserEntityCapability.objects.create(
+            membership=self.membership, code='NOT_A_REAL_CAPABILITY',
+        )
+        capabilities = self._entities()[0]['capabilities']
+        self.assertIn('MANAGE_SHARE_MAPPINGS', capabilities)
+        self.assertNotIn('NOT_A_REAL_CAPABILITY', capabilities)

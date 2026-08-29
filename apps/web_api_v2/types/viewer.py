@@ -28,6 +28,7 @@ class EntityStatus(Enum):
 class EntityCapability(Enum):
     VIEW_FINANCIALS = 'VIEW_FINANCIALS'
     RUN_INGESTION_PROCESS = 'RUN_INGESTION_PROCESS'
+    MANAGE_SHARE_MAPPINGS = 'MANAGE_SHARE_MAPPINGS'
 
 
 @strawberry.type

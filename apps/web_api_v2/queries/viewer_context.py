@@ -1,3 +1,5 @@
+import logging
+
 import strawberry
 from django.db.models import Prefetch
 
@@ -17,6 +19,36 @@ from apps.web_api_v2.types.viewer import (
     ViewerContext,
     ViewerPreferences,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _capabilities(membership):
+    """The membership's granted capabilities, minus any this schema cannot name.
+
+    A capability can exist in the database before the schema knows the word for
+    it — a grant applied ahead of the deploy that adds it, or one added by hand.
+    Passing an unknown code straight to the enum raises ValueError, and because
+    this builds the whole viewer context, that one unknown grant took down the
+    entity list entirely: a signed-in user with three live memberships saw no
+    entities at all and no reason why.
+
+    A capability the schema cannot express is one the client could not act on
+    anyway, so dropping it costs nothing and keeps every other entity visible.
+    It is logged, because a permission silently not taking effect is worth
+    knowing about.
+    """
+    known = []
+    for code in capability_codes_for_membership(membership):
+        try:
+            known.append(EntityCapability(code))
+        except ValueError:
+            logger.warning(
+                'viewer_context_unknown_capability entity=%s code=%s',
+                membership.entity_id,
+                code,
+            )
+    return known
 
 
 def build_viewer_context(info) -> ViewerContext:
@@ -63,10 +95,7 @@ def build_viewer_context(info) -> ViewerContext:
                     if membership.entity.reauth_required
                     else EntityStatus.AVAILABLE
                 ),
-                capabilities=[
-                    EntityCapability(code)
-                    for code in capability_codes_for_membership(membership)
-                ],
+                capabilities=_capabilities(membership),
             )
             for membership in memberships
         ],
