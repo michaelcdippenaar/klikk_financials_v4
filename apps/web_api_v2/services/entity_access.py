@@ -5,6 +5,7 @@ from apps.web_api_v2.models import UserEntityCapability, UserEntityMembership
 
 VIEW_FINANCIALS_CAPABILITY = 'VIEW_FINANCIALS'
 RUN_INGESTION_PROCESS_CAPABILITY = 'RUN_INGESTION_PROCESS'
+MANAGE_SHARE_MAPPINGS_CAPABILITY = 'MANAGE_SHARE_MAPPINGS'
 
 
 class EntityAccessDenied(Exception):

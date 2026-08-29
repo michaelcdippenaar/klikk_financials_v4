@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 
 
@@ -33,6 +34,14 @@ class InvestecJseShareNameMapping(models.Model):
             ),
         ]
     
+    # Who last attached a name here, and why. Mapping decides which holding a
+    # transaction belongs to, so a change to it is a change to financial
+    # attribution and should not be anonymous.
+    mapped_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+    )
+    mapped_note = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     
