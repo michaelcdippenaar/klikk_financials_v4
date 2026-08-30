@@ -332,3 +332,91 @@ class SourceConnectionsTests(TestCase):
             source_connection_service.read_xero_connection_evidence,
             xero_status_service.read_xero_connection_evidence,
         )
+
+
+class ShareTradingConnectionReadsTheBindingTests(TestCase):
+    """The catalogue must report the share account's real state.
+
+    It used to be hardcoded UNAVAILABLE with "until entity, account, and
+    portfolio ownership is established" — a sentence that stayed on screen long
+    after the ownership WAS established. The workbench read the bound account
+    and listed its transactions while this catalogue said the source did not
+    exist. Two reads of one fact must not disagree.
+    """
+
+    def setUp(self):
+        self.url = reverse('web_api_v2:graphql')
+        self.user = get_user_model().objects.create_user(username='catalogue-viewer')
+        self.entity = XeroTenant.objects.create(
+            tenant_id='catalogue-entity',
+            tenant_name='Catalogue Entity',
+            fiscal_year_start_month=7,
+        )
+        UserEntityMembership.objects.create(user=self.user, entity=self.entity)
+
+    def _bind_with_a_transaction(self):
+        from decimal import Decimal
+
+        from apps.investec.models import InvestecEntityAccount, InvestecJseTransaction
+        InvestecEntityAccount.objects.create(
+            entity=self.entity, account_number='10082386',
+            kind=InvestecEntityAccount.Kind.SHARE, active=True,
+        )
+        InvestecJseTransaction.objects.create(
+            date=datetime.date(2025, 7, 2), account_number='10082386',
+            description='Dividend', share_name='Santam', type='Dividend',
+            quantity=Decimal('0'), value=Decimal('19.20'),
+        )
+
+    def _share(self):
+        response = self.client.post(
+            self.url,
+            data=json.dumps({
+                'query': SOURCE_CONNECTIONS_QUERY,
+                'variables': {'context': {
+                    'entityId': self.entity.pk,
+                    'financialYear': 2026,
+                    'periodSelection': {'mode': 'MONTHS', 'months': ['2025-07']},
+                }},
+                'operationName': 'SourceConnections',
+            }),
+            content_type='application/json',
+            HTTP_AUTHORIZATION=f'Bearer {AccessToken.for_user(self.user)}',
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIsNone(body.get('errors'), body.get('errors'))
+        return next(
+            row for row in body['data']['sourceConnections']['connections']
+            if row['key'] == 'INVESTEC_SHARE_TRADING'
+        )
+
+    def test_an_unbound_account_still_says_so(self):
+        row = self._share()
+
+        self.assertEqual(row['configurationState'], 'UNAVAILABLE')
+        self.assertIn('bound', row['userSafeReason'])
+        # The old sentence described a condition the screen could never clear.
+        self.assertNotIn('portfolio ownership is established', row['userSafeReason'])
+
+    def test_a_bound_account_is_reported_as_configured(self):
+        self._bind_with_a_transaction()
+
+        row = self._share()
+
+        self.assertEqual(row['configurationState'], 'CONFIGURED')
+        self.assertEqual(row['availabilityCode'], 'AVAILABLE')
+        self.assertEqual(row['readinessState'], 'READY')
+        self.assertIsNone(row['userSafeReason'])
+        self.assertEqual(row['sourceEvidenceCount'], 1)
+        self.assertIn('2386', row['safeIdentity'])
+
+    def test_opening_the_workbench_is_permitted_but_sync_says_why_not(self):
+        self._bind_with_a_transaction()
+
+        actions = {a['kind']: a for a in self._share()['actions']}
+
+        self.assertTrue(actions['OPEN_WORKBENCH']['permitted'])
+        self.assertFalse(actions['SYNC']['permitted'])
+        # The honest reason is not "ownership unknown" but "there is no sync".
+        self.assertIn('manual statement upload', actions['SYNC']['reason'])

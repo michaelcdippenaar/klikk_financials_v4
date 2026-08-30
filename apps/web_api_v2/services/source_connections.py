@@ -3,6 +3,7 @@ from django.utils import timezone
 from apps.web_api_v2.services.xero_connection_status import (
     read_xero_connection_evidence,
 )
+from apps.web_api_v2.services.investec_shares import read_share_account
 from apps.web_api_v2.types.ingest import IngestValidationState
 from apps.web_api_v2.types.source_connections import (
     SourceConnection,
@@ -26,6 +27,16 @@ from apps.web_api_v2.services.planning_target import (
     STATE_READY,
     describe_target,
 )
+
+
+def _permitted_action(kind):
+    return SourceConnectionAction(
+        kind=kind,
+        permitted=True,
+        reason='',
+        required_capability=None,
+        expected_state=None,
+    )
 
 
 def _disabled_action(kind, reason):
@@ -189,25 +200,75 @@ def _planning_analytics_connection(entity):
     )
 
 
+SHARE_SYNC_REASON = (
+    'Share data arrives by manual statement upload. V2 has no approved sync '
+    'command for this source.'
+)
+
+
+def _share_trading_connection(entity, resolved_context):
+    """The share account's real state, not a constant.
+
+    This used to be hardcoded UNAVAILABLE with "until entity, account, and
+    portfolio ownership is established" — a sentence that stayed on the screen
+    after the ownership WAS established. The workbench read the bound account
+    and showed its transactions while this catalogue said the source did not
+    exist. Two reads of one fact must not disagree.
+
+    Syncing stays unavailable either way, but for the honest reason: there is
+    no sync to run, because the data is uploaded by hand.
+    """
+    periods = [str(period) for period in resolved_context.selected_periods]
+    account = read_share_account(entity.pk, periods, limit=1)
+
+    if not account['available']:
+        return _unavailable_connection(
+            SourceConnectionKey.INVESTEC_SHARE_TRADING,
+            'Investec Share Trading',
+            SourceConnectionCategory.INVESTMENTS,
+            account['userSafeReason'],
+            (
+                SourceConnectionActionKind.OPEN_WORKBENCH,
+                SourceConnectionActionKind.SYNC,
+            ),
+        )
+
+    transactions = account['transactionCount']
+    return SourceConnection(
+        key=SourceConnectionKey.INVESTEC_SHARE_TRADING,
+        display_name='Investec Share Trading',
+        category=SourceConnectionCategory.INVESTMENTS,
+        configuration_state=SourceConnectionConfigurationState.CONFIGURED,
+        # Configured but empty is a different fact from configured with rows,
+        # and the reader acts differently on each.
+        readiness_state=(
+            SourceConnectionReadinessState.READY if transactions
+            else SourceConnectionReadinessState.EMPTY
+        ),
+        availability_code=SourceConnectionAvailabilityCode.AVAILABLE,
+        user_safe_reason=None,
+        source_evidence_count=transactions,
+        source_evidence_at=account['holdingsAsAt'],
+        last_successful_run_at=None,
+        # No V2 validation runs against an uploaded statement, so NOT_RUN is
+        # the honest state — not PASSED, which would claim a check happened.
+        validation_state=IngestValidationState.NOT_RUN,
+        latest_v2_run_state=None,
+        safe_identity=account['accountMasked'],
+        actions=[
+            _permitted_action(SourceConnectionActionKind.OPEN_WORKBENCH),
+            _disabled_action(SourceConnectionActionKind.SYNC, SHARE_SYNC_REASON),
+        ],
+    )
+
+
 def read_source_connections(entity, resolved_context):
     xero = _xero_connection(
         read_xero_connection_evidence(entity, resolved_context.selected_periods),
     )
     connections = [
         xero,
-        _unavailable_connection(
-            SourceConnectionKey.INVESTEC_SHARE_TRADING,
-            'Investec Share Trading',
-            SourceConnectionCategory.INVESTMENTS,
-            (
-                'Share Trading status is unavailable until entity, account, and '
-                'portfolio ownership is established.'
-            ),
-            (
-                SourceConnectionActionKind.OPEN_WORKBENCH,
-                SourceConnectionActionKind.SYNC,
-            ),
-        ),
+        _share_trading_connection(entity, resolved_context),
         _unavailable_connection(
             SourceConnectionKey.WHATSAPP_RECEIPTS,
             'WhatsApp Receipts',
