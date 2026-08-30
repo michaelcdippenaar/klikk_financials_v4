@@ -1,0 +1,83 @@
+name: klikk-v2-local
+
+services:
+  postgres:
+    profiles: ["local-v2"]
+    image: pgvector/pgvector:0.8.1-pg16
+    container_name: klikk-v2-local-postgres
+    restart: "no"
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - local_v2_postgres_data:/var/lib/postgresql/data
+      - ./docker/local-v2/init-vector.sql:/docker-entrypoint-initdb.d/010-vector.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [local_v2_isolated]
+
+  backend:
+    profiles: ["local-v2"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: klikk-v2-local-backend
+    restart: "no"
+    entrypoint: ["/app/scripts/local-v2-entrypoint.sh"]
+    environment:
+      DJANGO_SETTINGS_MODULE: klikk_business_intelligence.settings.local_v2
+      DB_HOST: klikk-v2-local-postgres
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      LOCAL_V2_DJANGO_SECRET_KEY: ${LOCAL_V2_DJANGO_SECRET_KEY}
+      LOCAL_V2_SYNTHETIC_PASSWORD: ${LOCAL_V2_SYNTHETIC_PASSWORD}
+      LOCAL_V2_MEDIA_ROOT: /tmp/klikk-v2-local-media
+      LOCAL_V2_STATIC_ROOT: /tmp/klikk-v2-local-static
+    ports:
+      - "127.0.0.1:18001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    networks: [local_v2_isolated]
+
+  proxy:
+    profiles: ["local-v2"]
+    image: nginx:1.27.5-alpine
+    container_name: klikk-v2-local-proxy
+    restart: "no"
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - ./docker/local-v2/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - backend
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:size=16m
+      - /var/run:size=1m
+      - /tmp:size=16m
+    security_opt:
+      - no-new-privileges:true
+    networks: [local_v2_isolated]
+
+volumes:
+  local_v2_postgres_data:
+    name: klikk-v2-local-postgres-data
+
+networks:
+  local_v2_isolated:
+    name: klikk-v2-local-isolated
+    internal: true

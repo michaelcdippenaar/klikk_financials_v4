@@ -1,0 +1,70 @@
+{
+  "version": "0.2",
+  "state": "BLOCKED_PENDING_ENTITY_SCOPE_AND_REVIEW",
+  "currentV2FinancialFactTables": [],
+  "scopeAnchor": {
+    "table": "xero_core_xerotenant",
+    "sourceColumns": ["tenant_id", "tenant_name", "fiscal_year_start_month"],
+    "localTransform": {
+      "tenant_id": "replace with local-v2-entity-0001",
+      "tenant_name": "replace with Local Synthetic Entity",
+      "fiscal_year_start_month": "preserve"
+    }
+  },
+  "denyTables": [
+    "users",
+    "users_groups",
+    "users_user_permissions",
+    "auth_group",
+    "auth_group_permissions",
+    "auth_permission",
+    "authtoken_token",
+    "django_admin_log",
+    "django_session",
+    "token_blacklist_blacklistedtoken",
+    "token_blacklist_outstandingtoken",
+    "xero_auth_xeroclientcredentials",
+    "xero_auth_xerotenanttoken",
+    "xero_auth_xeroauthsettings",
+    "web_api_v2_userentitymembership",
+    "web_api_v2_userentitycapability",
+    "web_api_v2_viewerpreference",
+    "web_api_v2_ingestprocessrun",
+    "web_api_v2_ingestprocessrunperiod",
+    "web_api_v2_ingestprocessauditevent",
+    "xero_sync_xeroapicalllog",
+    "xero_sync_xerotaskexecutionlog",
+    "xero_sync_xerotenantschedule",
+    "deployment_deploymentlog"
+  ],
+  "denyColumnsEverywhere": [
+    "password",
+    "token",
+    "refresh_token",
+    "tenant_tokens",
+    "client_id",
+    "client_secret",
+    "api_key",
+    "secret",
+    "raw_data",
+    "raw_cell_data",
+    "collection"
+  ],
+  "artifactRules": {
+    "insideGitOrWorktree": false,
+    "encryptionRequired": true,
+    "mode": "0600",
+    "manifest": [
+      "policyVersion",
+      "pseudonymousEntityId",
+      "periodBounds",
+      "tableOrder",
+      "rowCountByTable",
+      "sha256ByFile",
+      "foreignKeyChecks",
+      "createdAt",
+      "expiresAt"
+    ]
+  }
+}
+

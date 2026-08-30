@@ -1,0 +1,20 @@
+{
+  "backendOrigin": "http://127.0.0.1:18080",
+  "routes": [
+    {"method": "POST", "path": "/api/v2/graphql/"},
+    {"method": "POST", "path": "/api/v2/auth/login/"},
+    {"method": "POST", "path": "/api/v2/auth/refresh/"},
+    {"method": "POST", "path": "/api/v2/auth/verify/"},
+    {"method": "POST", "path": "/api/v2/auth/logout/"}
+  ],
+  "forbiddenPrefixes": [
+    "/api/v2/entities/",
+    "/api/auth/",
+    "/xero/",
+    "/api/investec/",
+    "/api/planning-analytics/",
+    "/api/ai-agent/",
+    "/deployment/"
+  ]
+}
+
