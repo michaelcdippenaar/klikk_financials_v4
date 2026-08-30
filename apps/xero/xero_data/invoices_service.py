@@ -319,7 +319,16 @@ def sync_xero_invoices(tenant: XeroTenant,
         'created': 0, 'updated': 0, 'line_items_total': 0,
         'errors': 0, 'invoice_count': 0, 'api_calls': 0,
         'budget_exhausted': False,
+        # Measured coverage: the months of the invoices this run actually
+        # wrote, by XeroInvoice.date — the same field the stage's source
+        # evidence is scoped by (xero_source_evidence._SOURCES), so run
+        # evidence and source evidence can never disagree about which clock
+        # this stage runs on. The V2 run record replaces its requested
+        # periods with this on success; a run request itself must never
+        # carry a coverage claim (30 Aug 2026).
+        'affected_periods': [],
     }
+    affected_months = set()
 
     if full:
         modified_since = None
@@ -346,6 +355,10 @@ def sync_xero_invoices(tenant: XeroTenant,
                 else:
                     stats['updated'] += 1
                 stats['line_items_total'] += len(inv.get('LineItems') or [])
+                # Only rows actually written count as coverage; a dateless
+                # invoice has no month to claim and claims none.
+                if invoice.date:
+                    affected_months.add(f'{invoice.date.year:04d}-{invoice.date.month:02d}')
             except Exception:
                 logger.exception('Invoice upsert failed for %s', inv.get('InvoiceID'))
                 stats['errors'] += 1
@@ -367,6 +380,7 @@ def sync_xero_invoices(tenant: XeroTenant,
         from apps.xero.xero_sync.models import XeroLastUpdate
         XeroLastUpdate.objects.update_or_create_timestamp('invoice_store', tenant)
 
+    stats['affected_periods'] = sorted(affected_months)
     stats['completed_at'] = datetime.now(dt_timezone.utc).isoformat()
     logger.info('Invoices sync for tenant %s: %s', tenant.tenant_id, stats)
     return stats
