@@ -22,7 +22,7 @@ import logging
 from django.db import transaction
 
 from apps.investec.models import InvestecJseShareNameMapping, InvestecJseTransaction
-from apps.web_api_v2.services.investec_shares import bound_account
+from apps.web_api_v2.services.investec_shares import bound_accounts
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +37,11 @@ class ShareMappingError(Exception):
 
 
 def _entity_share_names(entity_id):
-    account = bound_account(entity_id)
-    if account is None:
+    # Plural: mapping authority covers every account bound to the entity, not
+    # just the first. A renumbered account leaves its history under the old
+    # number, and those names are just as much this entity's to map.
+    accounts = bound_accounts(entity_id)
+    if accounts is None:
         raise ShareMappingError(
             'NOT_BOUND',
             'No Investec share account is bound to this entity, so there are no '
@@ -47,7 +50,7 @@ def _entity_share_names(entity_id):
     return {
         name.strip()
         for name in InvestecJseTransaction.objects
-        .filter(account_number=account)
+        .filter(account_number__in=accounts)
         .values_list('share_name', flat=True)
         if name and name.strip()
     }

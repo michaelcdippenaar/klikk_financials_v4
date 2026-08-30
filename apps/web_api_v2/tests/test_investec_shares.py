@@ -218,3 +218,149 @@ class InvestecShareAccountTests(TestCase):
         payload = self._execute().data['investecShareAccount']
 
         self.assertEqual(payload['unmappedShareNames'], ['JSE.AVI'])
+
+
+class ShareTransactionPagingAndFilterTests(TestCase):
+    """Paging, search and type filtering over an account's transactions.
+
+    Two facts this holds apart. The period count is everything in the selected
+    period; the filtered count is everything matching the current filter. They
+    are different numbers, and reporting one as the other makes a search look
+    like the account has shrunk.
+
+    It also reads EVERY bound account. Investec renumbers a stockbroking
+    account and leaves the history under the old number, so reading only the
+    first bound account silently hid years of a portfolio behind a screen that
+    looked like it was working.
+    """
+
+    OLD_ACCOUNT = '1812775'
+
+    PAGED_QUERY = """
+    query S($context: FinancialContextInput!, $limit: Int!, $offset: Int!,
+            $search: String, $types: [String!]) {
+      investecShareAccount(context: $context, limit: $limit, offset: $offset,
+                           search: $search, types: $types) {
+        available accountMasked transactionCount filteredCount transactionTypes
+        transactions { date type shareName description value }
+      }
+    }
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username='pager', password='irrelevant',
+        )
+        self.tenant = XeroTenant.objects.create(
+            tenant_id='tenant-pager', tenant_name='Pager Co', fiscal_year_start_month=7,
+        )
+        UserEntityMembership.objects.create(
+            user=self.user, entity=self.tenant, role='VIEWER', active=True,
+        )
+
+    def _bind(self, account_number=ACCOUNT):
+        from apps.investec.models import InvestecEntityAccount
+        return InvestecEntityAccount.objects.create(
+            entity=self.tenant, account_number=account_number,
+            kind=InvestecEntityAccount.Kind.SHARE, active=True,
+        )
+
+    def _txn(self, day, account=ACCOUNT, **kwargs):
+        defaults = {
+            'date': date(2026, 3, day), 'account_number': account,
+            'description': 'Dividend received', 'share_name': 'Santam',
+            'type': 'Dividend', 'quantity': Decimal('0'), 'value': Decimal('19.20'),
+        }
+        defaults.update(kwargs)
+        return InvestecJseTransaction.objects.create(**defaults)
+
+    def _run(self, **overrides):
+        variables = {
+            'context': {
+                'entityId': self.tenant.tenant_id, 'financialYear': 2026,
+                'periodSelection': {'mode': 'ALL', 'months': []},
+            },
+            'limit': 100, 'offset': 0, 'search': None, 'types': None,
+        }
+        variables.update(overrides)
+        result = schema.execute_sync(
+            self.PAGED_QUERY, variable_values=variables,
+            context_value=type('C', (), {'request': _Request(self.user)})(),
+        )
+        self.assertIsNone(result.errors, result.errors)
+        return result.data['investecShareAccount']
+
+    def test_a_page_is_a_window_over_the_full_period_count(self):
+        self._bind()
+        for day in range(1, 8):
+            self._txn(day)
+
+        first = self._run(limit=3, offset=0)
+        second = self._run(limit=3, offset=3)
+
+        self.assertEqual(first['transactionCount'], 7)
+        self.assertEqual(first['filteredCount'], 7)
+        self.assertEqual(len(first['transactions']), 3)
+        self.assertEqual(len(second['transactions']), 3)
+        # Pages must not overlap, or a reader counts the same money twice.
+        self.assertEqual(
+            set(row['date'] for row in first['transactions'])
+            & set(row['date'] for row in second['transactions']),
+            set(),
+        )
+
+    def test_a_search_narrows_the_filtered_count_and_leaves_the_period_count_alone(self):
+        self._bind()
+        self._txn(1, share_name='Santam')
+        self._txn(2, share_name='Kumba Iron Ore Ltd')
+        self._txn(3, share_name='Kumba Iron Ore Ltd')
+
+        result = self._run(search='kumba')
+
+        self.assertEqual(result['filteredCount'], 2)
+        # The account did not shrink because someone typed in a box.
+        self.assertEqual(result['transactionCount'], 3)
+        self.assertTrue(all('Kumba' in row['shareName'] for row in result['transactions']))
+
+    def test_search_covers_the_fields_the_row_actually_shows(self):
+        self._bind()
+        self._txn(1, description='GROSS INTEREST 26/01/03', share_name='', type='Interest')
+        self._txn(2, description='Dividend received', share_name='Santam', type='Dividend')
+
+        self.assertEqual(self._run(search='gross interest')['filteredCount'], 1)
+        self.assertEqual(self._run(search='santam')['filteredCount'], 1)
+        self.assertEqual(self._run(search='dividend')['filteredCount'], 1)
+
+    def test_type_filter_offers_only_types_that_are_present(self):
+        self._bind()
+        self._txn(1, type='Dividend')
+        self._txn(2, type='TAX')
+        self._txn(3, type='')
+
+        result = self._run()
+
+        # An option that returns nothing is a promise the screen cannot keep.
+        self.assertEqual(result['transactionTypes'], ['Dividend', 'TAX'])
+        self.assertEqual(self._run(types=['TAX'])['filteredCount'], 1)
+        self.assertEqual(self._run(types=['TAX', 'Dividend'])['filteredCount'], 2)
+
+    def test_every_bound_account_is_read_not_just_the_first(self):
+        self._bind(ACCOUNT)
+        self._bind(self.OLD_ACCOUNT)
+        self._txn(1, account=ACCOUNT)
+        self._txn(2, account=self.OLD_ACCOUNT)
+        self._txn(3, account=self.OLD_ACCOUNT)
+
+        result = self._run()
+
+        self.assertEqual(result['transactionCount'], 3)
+        # And the reader is told both accounts are in view, not just one.
+        self.assertIn('2386', result['accountMasked'])
+        self.assertIn('2775', result['accountMasked'])
+
+    def test_an_unbound_account_contributes_nothing(self):
+        self._bind(ACCOUNT)
+        self._txn(1, account=ACCOUNT)
+        self._txn(2, account='9999999')
+
+        self.assertEqual(self._run()['transactionCount'], 1)

@@ -1,4 +1,5 @@
 import logging
+from typing import List, Optional
 
 import strawberry
 from django.conf import settings
@@ -195,11 +196,14 @@ class Query:
         info: strawberry.Info,
         context: FinancialContextInput,
         limit: int = 100,
+        offset: int = 0,
+        search: Optional[str] = None,
+        types: Optional[List[str]] = None,
     ) -> InvestecShareAccount:
         return _resolve_safely(
             info,
             'investecShareAccount',
-            lambda: build_investec_share_account(info, context, limit),
+            lambda: build_investec_share_account(info, context, limit, offset, search, types),
         )
 
     @strawberry.field
