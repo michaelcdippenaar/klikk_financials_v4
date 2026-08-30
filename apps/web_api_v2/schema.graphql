@@ -237,6 +237,8 @@ type InvestecShareAccount {
   holdings: [InvestecShareHolding!]!
   summary: InvestecShareSummary
   transactionCount: Int!
+  filteredCount: Int!
+  transactionTypes: [String!]!
   transactions: [InvestecShareTransactionRow!]!
   unmappedShareNames: [String!]!
 }
@@ -384,7 +386,7 @@ type Query {
   xeroReconciliationAccount(context: FinancialContextInput!, accountId: String!): ReconciliationAccountDetail!
   planningAnalyticsTarget(context: FinancialContextInput!): PlanningAnalyticsTarget!
   investecBankTransactions(context: FinancialContextInput!, limit: Int! = 100, offset: Int! = 0): InvestecBankTransactions!
-  investecShareAccount(context: FinancialContextInput!, limit: Int! = 100): InvestecShareAccount!
+  investecShareAccount(context: FinancialContextInput!, limit: Int! = 100, offset: Int! = 0, search: String = null, types: [String!] = null): InvestecShareAccount!
   sourceConnections(context: FinancialContextInput!): SourceConnections!
   xeroConnectionStatus(context: FinancialContextInput!): XeroConnectionStatus!
   xeroPipelineSummary(context: FinancialContextInput!): XeroPipelineSummary!

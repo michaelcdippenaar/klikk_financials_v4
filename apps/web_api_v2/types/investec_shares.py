@@ -50,7 +50,15 @@ class InvestecShareAccount:
     holdings_value: Optional[Decimal]
     holdings: List[InvestecShareHolding]
     summary: Optional[InvestecShareSummary]
+    # Everything in the selected period, whatever the filter says.
     transaction_count: int
+    # Everything matching the current filter — what the pager counts through.
+    # Kept separate from transaction_count so a search can never read as the
+    # account having shrunk.
+    filtered_count: int
+    # The types present in this period, so a filter control can only ever offer
+    # a choice that returns something.
+    transaction_types: List[str]
     transactions: List[InvestecShareTransactionRow]
     # Share names in this period that no mapping resolves to a share code.
     # This account is loaded by upload and mapping, so an unmapped name is a

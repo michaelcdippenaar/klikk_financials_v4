@@ -13,13 +13,16 @@ from apps.web_api_v2.types.investec_shares import (
 )
 
 
-def build_investec_share_account(info, context_input, limit):
+def build_investec_share_account(info, context_input, limit, offset=0, search='', types=None):
     membership, context = resolve_financial_context(info, context_input)
     if VIEW_FINANCIALS_CAPABILITY not in capability_codes_for_membership(membership):
         _graphql_error(info, 'CAPABILITY_REQUIRED', 'VIEW_FINANCIALS capability is required.')
 
     periods = [str(period) for period in context.selected_periods]
-    result = read_share_account(membership.entity.pk, periods, limit=limit)
+    result = read_share_account(
+        membership.entity.pk, periods,
+        limit=limit, offset=offset, search=search, types=types,
+    )
     summary = result['summary']
     return InvestecShareAccount(
         context=context,
@@ -40,6 +43,8 @@ def build_investec_share_account(info, context_input, limit):
             latest_date=summary['latestDate'],
         ) if summary else None,
         transaction_count=result['transactionCount'],
+        filtered_count=result['filteredCount'],
+        transaction_types=result['transactionTypes'],
         unmapped_share_names=result.get('unmappedShareNames') or [],
         transactions=[InvestecShareTransactionRow(
             id=row['id'], date=row['date'], type=row['type'],

@@ -35,29 +35,44 @@ NO_DATA_REASON = (
 )
 
 
-def bound_account(entity_id):
-    """The share account bound to this entity, or None.
+DEFAULT_LIMIT = 100
+MAX_LIMIT = 500
+
+
+def bound_accounts(entity_id):
+    """Every share account bound to this entity, or None if none are.
+
+    Plural, like the bank side. An entity can hold more than one stockbroking
+    account — Investec renumbers them, and a renumbering leaves the history
+    under the old number. Reading only the first bound account silently hid
+    everything before the change, which is exactly how six years of a portfolio
+    can vanish from a screen that looks like it is working.
 
     Binding attributes a real portfolio to a real company's books, so it is a
     reviewed row in InvestecEntityAccount rather than a constant in code — the
     people who know the ownership should not need a deploy to record it.
     """
     numbers = InvestecEntityAccount.numbers_for(entity_id, InvestecEntityAccount.Kind.SHARE)
-    return numbers[0] if numbers else None
+    return list(numbers) if numbers else None
 
 
-def read_share_account(entity_id, selected_periods, *, limit=100):
-    account_number = bound_account(entity_id)
-    if account_number is None:
-        return {'available': False, 'userSafeReason': NOT_BOUND_REASON,
-                'accountMasked': None, 'holdings': [], 'transactions': [],
-                'holdingsAsAt': None, 'summary': None, 'transactionCount': 0}
 
-    transactions = InvestecJseTransaction.objects.filter(account_number=account_number)
+def read_share_account(
+    entity_id,
+    selected_periods,
+    *,
+    limit=DEFAULT_LIMIT,
+    offset=0,
+    search='',
+    types=None,
+):
+    account_numbers = bound_accounts(entity_id)
+    if account_numbers is None:
+        return _empty(NOT_BOUND_REASON, None)
+
+    transactions = InvestecJseTransaction.objects.filter(account_number__in=account_numbers)
     if not transactions.exists() and not InvestecJsePortfolio.objects.exists():
-        return {'available': False, 'userSafeReason': NO_DATA_REASON,
-                'accountMasked': _mask(account_number), 'holdings': [], 'transactions': [],
-                'holdingsAsAt': None, 'summary': None, 'transactionCount': 0}
+        return _empty(NO_DATA_REASON, _mask_all(account_numbers))
 
     # Holdings are a position at a date, not a period aggregate: the latest
     # loaded snapshot is the only truthful "what is held" answer, and summing
@@ -73,10 +88,18 @@ def read_share_account(entity_id, selected_periods, *, limit=100):
         earliest=Min('date'), latest=Max('date'),
     )
 
+    # The filtered set is a different fact from the period set, so it is a
+    # different number. Reporting one as the other would make a search look
+    # like the account had shrunk.
+    matching = _apply_filters(period_transactions, search, types)
+    limit = max(1, min(int(limit or DEFAULT_LIMIT), MAX_LIMIT))
+    offset = max(0, int(offset or 0))
+    page = matching.order_by('-date', '-pk')[offset:offset + limit]
+
     return {
         'available': True,
         'userSafeReason': None,
-        'accountMasked': _mask(account_number),
+        'accountMasked': _mask_all(account_numbers),
         # This account is loaded by uploading statements and mapping each share
         # name to a share code. A name with no mapping leaves its transactions
         # unattributable to a holding, so the gap is reported rather than left
@@ -93,7 +116,17 @@ def read_share_account(entity_id, selected_periods, *, limit=100):
             'totalValue': row.total_value,
         } for row in holdings],
         'holdingsValue': sum((row.total_value for row in holdings), Decimal('0')),
+        # Everything in the period, whatever the filter says.
         'transactionCount': totals['count'] or 0,
+        # Everything matching the filter — what the pager counts through.
+        'filteredCount': matching.count(),
+        # Offered as filter options: the types actually present in the period,
+        # so the control can never offer a choice that returns nothing.
+        'transactionTypes': sorted(
+            value for value in period_transactions
+            .exclude(type='').exclude(type__isnull=True)
+            .values_list('type', flat=True).distinct()
+        ),
         'summary': {
             'transactionCount': totals['count'] or 0,
             'netValue': totals['net_value'],
@@ -108,8 +141,42 @@ def read_share_account(entity_id, selected_periods, *, limit=100):
             'description': row.description or '',
             'quantity': row.quantity,
             'value': row.value,
-        } for row in period_transactions.order_by('-date', '-pk')[:limit]],
+        } for row in page],
     }
+
+
+def _apply_filters(queryset, search, types):
+    """Narrow a period's transactions by free text and by type.
+
+    Search covers the three fields a reader can actually see on the row — the
+    share name, the description and the type — so a search that matches nothing
+    visible is not silently matching something hidden.
+    """
+    selected = [value for value in (types or []) if value]
+    if selected:
+        queryset = queryset.filter(type__in=selected)
+    term = (search or '').strip()
+    if term:
+        queryset = queryset.filter(
+            Q(share_name__icontains=term)
+            | Q(description__icontains=term)
+            | Q(type__icontains=term)
+        )
+    return queryset
+
+
+def _empty(reason, account_masked):
+    return {
+        'available': False, 'userSafeReason': reason, 'accountMasked': account_masked,
+        'holdings': [], 'transactions': [], 'holdingsAsAt': None, 'summary': None,
+        'transactionCount': 0, 'filteredCount': 0, 'transactionTypes': [],
+        'unmappedShareNames': [], 'holdingsValue': None,
+    }
+
+
+def _mask_all(account_numbers):
+    """Every bound account, masked. Plural because an entity may hold several."""
+    return ', '.join(_mask(number) for number in account_numbers) or None
 
 
 def _selected_period_filter_dates(selected_periods):
