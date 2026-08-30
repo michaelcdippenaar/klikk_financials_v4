@@ -273,9 +273,14 @@ query OverviewSources($context: FinancialContextInput!) {
 ```
 
 The source order is Xero, Investec bank, Investment holdings, Share transactions, WhatsApp
-receipts, Email documents, Manual document uploads, and Planning Analytics targets. Phase 1 has a
-live Xero projection. The remaining seven sources are persistently returned by the server with
-`ENTITY_BINDING_REQUIRED`, `DURABLE_STATUS_REQUIRED`, or `NOT_IMPLEMENTED`.
+receipts, Email documents, Manual document uploads, and Planning Analytics targets. Xero has a
+live pipeline projection. Investec bank has a read-only local-data projection only for an
+explicitly bound V2 entity: it counts persisted transactions for the exact selected periods and
+never calls Investec. It does not claim a sync attempt or successful sync timestamp. An explicitly
+bound entity with stored accounts and zero selected-period rows returns measured zero; an unbound
+entity or an entity without stored accounts remains unavailable with truthful typed copy. The
+remaining six sources are persistently returned by the server with `ENTITY_BINDING_REQUIRED`,
+`DURABLE_STATUS_REQUIRED`, or `NOT_IMPLEMENTED`.
 
 For every non-`AVAILABLE` source, `records` and timestamps are null, `outputs` is empty, and
 validation is `UNAVAILABLE`. Zero is returned only when a successful available source actually

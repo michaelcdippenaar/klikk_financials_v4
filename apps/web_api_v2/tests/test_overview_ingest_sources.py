@@ -1,4 +1,5 @@
 import json
+import datetime
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -12,6 +13,10 @@ from apps.web_api_v2.models import (
     IngestProcessRunPeriod,
     UserEntityCapability,
     UserEntityMembership,
+)
+from apps.investec.models import InvestecBankAccount, InvestecBankTransaction
+from apps.web_api_v2.services.investec_bank_status import (
+    INVESTEC_BANK_ENTITY_BINDINGS,
 )
 from apps.xero.xero_core.models import XeroTenant
 
@@ -106,6 +111,21 @@ class OverviewIngestSourcesTests(TestCase):
         )
         IngestProcessRunPeriod.objects.create(run=run, period='2025-07')
         return run
+
+    def _create_investec_transaction(
+        self,
+        account,
+        *,
+        transaction_date,
+        amount='1.00',
+    ):
+        return InvestecBankTransaction.objects.create(
+            account=account,
+            type=InvestecBankTransaction.TYPE_DEBIT,
+            status=InvestecBankTransaction.STATUS_POSTED,
+            transaction_date=transaction_date,
+            amount=amount,
+        )
 
     @patch('apps.web_api_v2.queries.xero_pipeline.prerequisite_status', return_value=[])
     @patch('apps.web_api_v2.queries.xero_pipeline.has_tenant_credentials', return_value=True)
@@ -234,6 +254,127 @@ class OverviewIngestSourcesTests(TestCase):
                 '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06',
             ],
         )
+
+    @patch('apps.web_api_v2.queries.xero_pipeline.prerequisite_status', return_value=[])
+    @patch('apps.web_api_v2.queries.xero_pipeline.has_tenant_credentials', return_value=True)
+    def test_bound_investec_bank_status_is_period_scoped_and_entity_safe(
+        self,
+        credentials,
+        prerequisites,
+    ):
+        bound_entity = XeroTenant.objects.create(
+            tenant_id=next(iter(INVESTEC_BANK_ENTITY_BINDINGS)),
+            tenant_name='Klikk (Pty) Ltd',
+            fiscal_year_start_month=7,
+        )
+        UserEntityMembership.objects.create(user=self.user, entity=bound_entity)
+        klikk_account = InvestecBankAccount.objects.create(
+            account_id='investec-klikk-account',
+            account_number='10011924075',
+            owner='Klikk',
+        )
+        other_account = InvestecBankAccount.objects.create(
+            account_id='investec-other-account',
+            account_number='10013017883',
+            owner='MLD Trust',
+        )
+        selected = self._create_investec_transaction(
+            klikk_account,
+            transaction_date=datetime.date(2025, 7, 15),
+        )
+        self._create_investec_transaction(
+            klikk_account,
+            transaction_date=datetime.date(2025, 8, 15),
+        )
+        self._create_investec_transaction(
+            other_account,
+            transaction_date=datetime.date(2025, 7, 15),
+        )
+        freshness = timezone.now() - datetime.timedelta(hours=2)
+        InvestecBankTransaction.objects.filter(pk=selected.pk).update(
+            updated_at=freshness,
+        )
+        before = InvestecBankTransaction.objects.count()
+
+        data = self._data(self._query(self._context(entity=bound_entity)))
+        investec = data['sources'][1]
+
+        self.assertEqual(investec['key'], 'INVESTEC_BANK')
+        self.assertEqual(investec['availabilityCode'], 'AVAILABLE')
+        self.assertEqual(investec['state'], 'READY')
+        self.assertEqual(
+            investec['records'],
+            {'read': 1, 'created': None, 'updated': None, 'skipped': None, 'failed': None},
+        )
+        self.assertEqual(
+            datetime.datetime.fromisoformat(investec['freshnessAt']),
+            freshness,
+        )
+        self.assertIsNone(investec['latestAttemptAt'])
+        self.assertIsNone(investec['latestSuccessAt'])
+        self.assertEqual(investec['validation']['state'], 'NOT_RUN')
+        self.assertTrue(all(not action['permitted'] for action in investec['actions']))
+        self.assertEqual(data['liveSourceCount'], 2)
+        self.assertEqual(InvestecBankTransaction.objects.count(), before)
+
+    @patch('apps.web_api_v2.queries.xero_pipeline.prerequisite_status', return_value=[])
+    @patch('apps.web_api_v2.queries.xero_pipeline.has_tenant_credentials', return_value=True)
+    def test_bound_investec_bank_preserves_measured_zero_without_claiming_freshness(
+        self,
+        credentials,
+        prerequisites,
+    ):
+        bound_entity = XeroTenant.objects.create(
+            tenant_id=next(iter(INVESTEC_BANK_ENTITY_BINDINGS)),
+            tenant_name='Klikk (Pty) Ltd',
+            fiscal_year_start_month=7,
+        )
+        UserEntityMembership.objects.create(user=self.user, entity=bound_entity)
+        InvestecBankAccount.objects.create(
+            account_id='investec-klikk-empty',
+            account_number='10011924075',
+            owner='Klikk',
+        )
+
+        investec = self._data(
+            self._query(self._context(entity=bound_entity))
+        )['sources'][1]
+
+        self.assertEqual(investec['availabilityCode'], 'AVAILABLE')
+        self.assertEqual(investec['records']['read'], 0)
+        self.assertIsNone(investec['freshnessAt'])
+
+    @patch('apps.web_api_v2.queries.xero_pipeline.prerequisite_status', return_value=[])
+    @patch('apps.web_api_v2.queries.xero_pipeline.has_tenant_credentials', return_value=True)
+    def test_investec_binding_is_exact_and_missing_accounts_are_not_configured(
+        self,
+        credentials,
+        prerequisites,
+    ):
+        bound_entity = XeroTenant.objects.create(
+            tenant_id=next(iter(INVESTEC_BANK_ENTITY_BINDINGS)),
+            tenant_name='Klikk (Pty) Ltd',
+            fiscal_year_start_month=7,
+        )
+        lookalike = XeroTenant.objects.create(
+            tenant_id='lookalike-klikk',
+            tenant_name='Klikk (Pty) Ltd',
+            fiscal_year_start_month=7,
+        )
+        UserEntityMembership.objects.create(user=self.user, entity=bound_entity)
+        UserEntityMembership.objects.create(user=self.user, entity=lookalike)
+
+        missing = self._data(
+            self._query(self._context(entity=bound_entity))
+        )['sources'][1]
+        unbound = self._data(
+            self._query(self._context(entity=lookalike))
+        )['sources'][1]
+
+        self.assertEqual(missing['availabilityCode'], 'NOT_CONFIGURED')
+        self.assertIsNone(missing['records'])
+        self.assertEqual(unbound['availabilityCode'], 'ENTITY_BINDING_REQUIRED')
+        self.assertIsNone(unbound['records'])
     @patch("apps.web_api_v2.queries.xero_pipeline.prerequisite_status", return_value=[])
     @patch("apps.web_api_v2.queries.xero_pipeline.has_tenant_credentials", return_value=True)
     def test_xero_card_does_not_attribute_partial_multi_period_counts(

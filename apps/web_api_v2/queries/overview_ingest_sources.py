@@ -3,9 +3,11 @@ from apps.web_api_v2.services.entity_access import (
     capability_codes_for_membership,
 )
 from apps.web_api_v2.services.fiscal_context import resolve_financial_context
+from apps.web_api_v2.services.investec_bank_status import read_investec_bank_status
 from apps.web_api_v2.types.ingest import (
     IngestNextAction,
     IngestPeriodRunState,
+    IngestRecordsSummary,
     IngestStageState,
     IngestValidation,
     IngestValidationState,
@@ -27,16 +29,6 @@ from apps.web_api_v2.queries.xero_pipeline import (
 
 
 UNAVAILABLE_SOURCES = (
-    (
-        OverviewIngestSourceKey.INVESTEC_BANK,
-        'Investec bank transactions',
-        'Investec Bank',
-        OverviewSourceMode.AUTOMATIC,
-        OverviewSourceAvailabilityCode.ENTITY_BINDING_REQUIRED,
-        'Investec bank data is not yet linked to this entity.',
-        (OverviewSourceActionKind.OPEN_WORKBENCH, OverviewSourceActionKind.REFRESH_STATUS,
-         OverviewSourceActionKind.VIEW_LAST_RUN),
-    ),
     (
         OverviewIngestSourceKey.INVESTMENT_HOLDINGS,
         'Investment holdings',
@@ -106,6 +98,81 @@ def _disabled_actions(kinds, code, reason):
         )
         for kind in kinds
     ]
+
+
+def _investec_bank_source(resolved):
+    status = read_investec_bank_status(
+        resolved.entity_id,
+        resolved.selected_periods,
+    )
+    if status is None:
+        availability = OverviewSourceAvailabilityCode.ENTITY_BINDING_REQUIRED
+        reason = 'Investec bank data is not yet linked to this entity.'
+        state = OverviewSourceState.UNAVAILABLE
+        records = None
+        freshness_at = None
+        validation = IngestValidation(
+            state=IngestValidationState.UNAVAILABLE,
+            code=None,
+            message=None,
+        )
+    elif not status['configured']:
+        availability = OverviewSourceAvailabilityCode.NOT_CONFIGURED
+        reason = 'No Investec bank accounts are stored for this entity.'
+        state = OverviewSourceState.UNAVAILABLE
+        records = None
+        freshness_at = None
+        validation = IngestValidation(
+            state=IngestValidationState.UNAVAILABLE,
+            code=None,
+            message=None,
+        )
+    else:
+        availability = OverviewSourceAvailabilityCode.AVAILABLE
+        reason = None
+        state = OverviewSourceState.READY
+        records = IngestRecordsSummary(read=status['records_read'])
+        freshness_at = status['freshness_at']
+        validation = IngestValidation(
+            state=IngestValidationState.NOT_RUN,
+            code=None,
+            message=None,
+        )
+
+    action_reason = (
+        reason
+        or 'Investec bank status is read-only; live controls are not available.'
+    )
+    return OverviewIngestSourceSummary(
+        key=OverviewIngestSourceKey.INVESTEC_BANK,
+        label='Investec bank transactions',
+        provider='Investec Bank',
+        mode=OverviewSourceMode.AUTOMATIC,
+        availability_code=availability,
+        state=state,
+        user_safe_reason=reason,
+        remediation=None,
+        latest_attempt_at=None,
+        latest_success_at=None,
+        freshness_at=freshness_at,
+        records=records,
+        outputs=[],
+        validation=validation,
+        actions=_disabled_actions(
+            (
+                OverviewSourceActionKind.OPEN_WORKBENCH,
+                OverviewSourceActionKind.REFRESH_STATUS,
+                OverviewSourceActionKind.VIEW_LAST_RUN,
+            ),
+            (
+                'READ_ONLY_STATUS'
+                if availability == OverviewSourceAvailabilityCode.AVAILABLE
+                else availability.value
+            ),
+            action_reason,
+        ),
+        xero_pipeline_available=False,
+    )
 
 
 def _xero_availability(pipeline):
@@ -252,6 +319,7 @@ def build_overview_ingest_sources(info, context_input):
         actions=_xero_actions(pipeline, can_run),
         xero_pipeline_available=True,
     )
+    investec_bank = _investec_bank_source(resolved)
     unavailable = [
         OverviewIngestSourceSummary(
             key=key,
@@ -289,7 +357,7 @@ def build_overview_ingest_sources(info, context_input):
             action_kinds,
         ) in UNAVAILABLE_SOURCES
     ]
-    sources = [xero, *unavailable]
+    sources = [xero, investec_bank, *unavailable]
     actionable_attention_count = sum(
         source.state == OverviewSourceState.NEEDS_ATTENTION
         and any(action.permitted for action in source.actions)
@@ -299,7 +367,10 @@ def build_overview_ingest_sources(info, context_input):
         context=resolved,
         sources=sources,
         actionable_attention_count=actionable_attention_count,
-        live_source_count=1,
+        live_source_count=sum(
+            source.availability_code == OverviewSourceAvailabilityCode.AVAILABLE
+            for source in sources
+        ),
         unavailable_source_count=sum(
             source.availability_code != OverviewSourceAvailabilityCode.AVAILABLE
             for source in sources
