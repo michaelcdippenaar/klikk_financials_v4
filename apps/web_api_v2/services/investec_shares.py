@@ -122,10 +122,15 @@ def read_share_account(
         'filteredCount': matching.count(),
         # Offered as filter options: the types actually present in the period,
         # so the control can never offer a choice that returns nothing.
+        # order_by() clears the model's Meta ordering before DISTINCT. Without
+        # it Django adds the ordering columns to the SELECT, so the distinct
+        # runs over (type, date, created_at) and returns one entry per ROW —
+        # 104 "distinct" types for 13 real ones, and a filter control listing
+        # Dividend forty times.
         'transactionTypes': sorted(
             value for value in period_transactions
             .exclude(type='').exclude(type__isnull=True)
-            .values_list('type', flat=True).distinct()
+            .order_by().values_list('type', flat=True).distinct()
         ),
         'summary': {
             'transactionCount': totals['count'] or 0,
