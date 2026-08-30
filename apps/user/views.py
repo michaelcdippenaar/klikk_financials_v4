@@ -153,6 +153,13 @@ class LoginView(TokenObtainPairView):
     Note: You can use either username or email to login.
     """
     permission_classes = [AllowAny]  # Credential bootstrap: must stay public or nobody can log in.
+
+    @staticmethod
+    def _invalid_credentials_response():
+        return Response(
+            {"error": "Invalid credentials"},
+            status=status.HTTP_401_UNAUTHORIZED,
+        )
     
     def post(self, request, *args, **kwargs):
         username_or_email = request.data.get('username') or request.data.get('email')
@@ -170,17 +177,33 @@ class LoginView(TokenObtainPairView):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Try to find user by username or email
+        # Usernames are the unambiguous identifier and may contain an '@'.
+        # Prefer an exact username before falling back to email matching.
         try:
-            if '@' in username_or_email:
-                user = User.objects.get(email=username_or_email)
+            user = User.objects.filter(username=username_or_email).first()
+            if user is not None:
+                if not user.check_password(password):
+                    return self._invalid_credentials_response()
             else:
-                user = User.objects.get(username=username_or_email)
-        except User.DoesNotExist:
-            return Response(
-                {"error": "Invalid credentials"},
-                status=status.HTTP_401_UNAUTHORIZED
-            )
+                # Email is not unique in the historical schema. Check every
+                # matching account so duplicate addresses do not raise
+                # MultipleObjectsReturned and turn a login attempt into a 500.
+                candidates = User.objects.filter(
+                    email__iexact=username_or_email,
+                ).order_by('id')
+                matching_users = [
+                    candidate
+                    for candidate in candidates
+                    if candidate.check_password(password)
+                ]
+
+                if len(matching_users) > 1:
+                    return Response(
+                        {"error": "Multiple accounts use this email. Sign in with your username."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+
+                user = matching_users[0] if matching_users else None
         except DatabaseError:
             logger.exception("Login failed because the user database is unavailable")
             return Response(
@@ -188,12 +211,8 @@ class LoginView(TokenObtainPairView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE
             )
         
-        # Check password
-        if not user.check_password(password):
-            return Response(
-                {"error": "Invalid credentials"},
-                status=status.HTTP_401_UNAUTHORIZED
-            )
+        if user is None:
+            return self._invalid_credentials_response()
         
         # Check if user is active
         if not user.is_active:
