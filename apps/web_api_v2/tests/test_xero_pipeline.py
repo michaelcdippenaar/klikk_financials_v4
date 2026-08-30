@@ -28,7 +28,7 @@ query Pipeline($context: FinancialContextInput!) {
       records { read }
       outputs { count }
       periodRunSummaries {
-        period state latestRunId latestAttemptAt
+        period state latestRunId latestAttemptAt latestSuccessAt
         records { read }
         outputs { count }
         validation { state }
@@ -157,7 +157,9 @@ class XeroPipelineQueryTests(TestCase):
         credentials,
         prerequisites,
     ):
-        self._run('metadata', link=False)
+        # A period-SCOPED stage: metadata reports its runs unscoped, so it can
+        # never demonstrate a per-period lookup finding nothing.
+        self._run('trail-balance', link=False)
         summary = self._summary()
         self.assertEqual(
             [stage['key'] for stage in summary['stages']],
@@ -172,12 +174,12 @@ class XeroPipelineQueryTests(TestCase):
                 'AGED_RECEIVABLES',
             ],
         )
-        metadata = summary['stages'][0]['periodRunSummaries'][0]
         self.assertEqual(summary["stages"][4]["processKey"], "trail-balance")
-        self.assertEqual(metadata['state'], 'NO_PERIOD_DATA')
-        self.assertIsNone(metadata['latestAttemptAt'])
-        self.assertIsNone(metadata['records'])
-        self.assertEqual(metadata['outputs'], [])
+        scoped = summary['stages'][4]['periodRunSummaries'][0]
+        self.assertEqual(scoped['state'], 'NO_PERIOD_DATA')
+        self.assertIsNone(scoped['latestAttemptAt'])
+        self.assertIsNone(scoped['records'])
+        self.assertEqual(scoped['outputs'], [])
         self.assertLess(summary['completionPercent'], 100)
 
     def test_newer_other_period_does_not_hide_selected_period_success(
@@ -185,9 +187,11 @@ class XeroPipelineQueryTests(TestCase):
         credentials,
         prerequisites,
     ):
-        selected = self._run('metadata', idempotency_suffix='a')
+        # trail-balance, not metadata: this asserts PER-PERIOD isolation, which
+        # only a period-scoped stage has.
+        selected = self._run('trail-balance', idempotency_suffix='a')
         other = self._run(
-            'metadata',
+            'trail-balance',
             period='2025-08',
             idempotency_suffix='b',
             state=IngestProcessRun.State.FAILED,
@@ -195,10 +199,10 @@ class XeroPipelineQueryTests(TestCase):
         IngestProcessRun.objects.filter(pk=other.pk).update(
             requested_at=timezone.now() + timedelta(minutes=1),
         )
-        metadata = self._summary()['stages'][0]['periodRunSummaries'][0]
-        self.assertEqual(metadata['state'], 'SUCCEEDED')
-        self.assertEqual(metadata["latestRunId"], str(selected.pk))
-        self.assertEqual(metadata['latestAttemptAt'], selected.requested_at.isoformat())
+        scoped = self._summary()['stages'][4]['periodRunSummaries'][0]
+        self.assertEqual(scoped['state'], 'SUCCEEDED')
+        self.assertEqual(scoped["latestRunId"], str(selected.pk))
+        self.assertEqual(scoped['latestAttemptAt'], selected.requested_at.isoformat())
 
     def test_completion_requires_all_five_required_stages(
         self,
@@ -359,13 +363,73 @@ class XeroPipelineQueryTests(TestCase):
         all_stage = response.json()["data"]["xeroPipelineSummary"]["stages"][0]
         self.assertEqual(all_stage["records"]["read"], 123)
 
+    def test_a_period_agnostic_stage_reports_its_run_without_a_period(
+        self, credentials, prerequisites,
+    ):
+        """Reported by MC: metadata ran, succeeded, and the row said "Not run".
+
+        Metadata describes the organisation — accounts, contacts, tracking
+        categories — not a month, so its runs carry no period rows and a
+        per-month lookup could never see them. The stage read NO_PERIOD_DATA
+        with null timestamps while two successful runs sat in the table.
+        """
+        run = self._run('metadata', link=False)
+
+        metadata = self._summary()['stages'][0]
+        summary = metadata['periodRunSummaries'][0]
+
+        self.assertEqual(metadata['processKey'], 'metadata')
+        self.assertEqual(summary['state'], 'SUCCEEDED')
+        self.assertEqual(summary['latestRunId'], str(run.pk))
+        self.assertEqual(summary['latestAttemptAt'], run.requested_at.isoformat())
+
+    def test_a_period_agnostic_stage_reads_the_same_run_for_every_period(
+        self, credentials, prerequisites,
+    ):
+        # One organisation-wide run, several months selected. Each month must
+        # report that same run rather than one month claiming it and the rest
+        # reading "not run" — the evidence is not divisible by month.
+        run = self._run('metadata', link=False)
+
+        response = self._post(SUMMARY_QUERY, {'context': {
+            **self.context,
+            'periodSelection': {'mode': 'MONTHS', 'months': ['2025-07', '2025-08']},
+        }}, 'Pipeline')
+        summaries = response.json()['data']['xeroPipelineSummary']['stages'][0]['periodRunSummaries']
+
+        self.assertEqual(len(summaries), 2)
+        for item in summaries:
+            self.assertEqual(item['state'], 'SUCCEEDED')
+            self.assertEqual(item['latestRunId'], str(run.pk))
+
+    def test_a_failed_period_agnostic_run_is_not_dressed_up_as_success(
+        self, credentials, prerequisites,
+    ):
+        # Reading unscoped must not mean reading optimistically: the newest run
+        # is the answer, whatever it says.
+        self._run('metadata', link=False, idempotency_suffix='ok')
+        failed = self._run(
+            'metadata', link=False, idempotency_suffix='bad',
+            state=IngestProcessRun.State.FAILED,
+        )
+        IngestProcessRun.objects.filter(pk=failed.pk).update(
+            requested_at=timezone.now() + timedelta(minutes=1),
+        )
+
+        summary = self._summary()['stages'][0]['periodRunSummaries'][0]
+
+        self.assertEqual(summary['state'], 'FAILED')
+        self.assertEqual(summary['latestRunId'], str(failed.pk))
+        # The earlier success is still the last time it worked.
+        self.assertIsNotNone(summary['latestSuccessAt'])
+
     def test_overlapping_multi_period_runs_do_not_double_count(
         self, credentials, prerequisites,
     ):
-        first = self._run("metadata", link=False, idempotency_suffix="overlap-a", records={"read": 40})
+        first = self._run("trail-balance", link=False, idempotency_suffix="overlap-a", records={"read": 40})
         first.periods = ["2025-07", "2025-08"]
         first.save(update_fields=("periods",))
-        second = self._run("metadata", link=False, idempotency_suffix="overlap-b", records={"read": 60})
+        second = self._run("trail-balance", link=False, idempotency_suffix="overlap-b", records={"read": 60})
         second.periods = ["2025-08", "2025-09"]
         second.save(update_fields=("periods",))
         IngestProcessRunPeriod.objects.bulk_create([
@@ -382,6 +446,6 @@ class XeroPipelineQueryTests(TestCase):
             },
         }
         response = self._post(SUMMARY_QUERY, {"context": context}, "Pipeline")
-        stage = response.json()["data"]["xeroPipelineSummary"]["stages"][0]
+        stage = response.json()["data"]["xeroPipelineSummary"]["stages"][4]
         self.assertIsNone(stage["records"])
         self.assertEqual(stage["outputs"], [])

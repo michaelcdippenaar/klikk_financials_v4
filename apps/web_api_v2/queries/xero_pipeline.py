@@ -29,7 +29,7 @@ from apps.web_api_v2.types.ingest import (
     IngestValidationState,
     YearMonthValue,
 )
-from apps.web_api_v2.services.xero_source_evidence import measure_stage_source
+from apps.web_api_v2.services.xero_source_evidence import is_period_scoped, measure_stage_source
 from apps.web_api_v2.types.xero_pipeline import (
     XeroPipelineBlocker,
     XeroPipelineOutput,
@@ -276,6 +276,22 @@ def _latest_period_maps(entity, periods):
     ).filter(row_number=1).select_related('run')
     latest = {(row.run.process_key, row.period): row.run for row in latest_rows}
     successes = {(row.run.process_key, row.period): row.run for row in success_rows}
+
+    # A period-agnostic stage's runs carry no period rows at all, so the joins
+    # above can never see them. Metadata succeeded twice on 30 Aug and the
+    # workbench still read "Not run", because a run filed under no month is
+    # invisible to a per-month lookup. These are the same runs, read without
+    # the period scope, for the stages whose evidence was never about a month.
+    unscoped_runs = IngestProcessRun.objects.filter(
+        entity=entity,
+        process_key__in=process_keys,
+    ).order_by('-requested_at', '-pk')
+    unscoped_latest = {}
+    unscoped_successes = {}
+    for run in unscoped_runs:
+        unscoped_latest.setdefault(run.process_key, run)
+        if run.state == IngestProcessRun.State.SUCCEEDED:
+            unscoped_successes.setdefault(run.process_key, run)
     all_processes = set(IngestProcessRun.objects.filter(
         entity=entity,
         process_key__in=process_keys,
@@ -286,7 +302,7 @@ def _latest_period_maps(entity, periods):
         run_id__in=matched_ids,
     ).values_list('run_id', 'period'):
         run_periods.setdefault(run_id, set()).add(period)
-    return latest, successes, all_processes, run_periods
+    return latest, successes, all_processes, run_periods, unscoped_latest, unscoped_successes
 
 
 def _period_summary(
@@ -441,7 +457,10 @@ def build_xero_pipeline_summary(info, context_input):
     membership, context = resolve_financial_context(info, context_input)
     _require_view(membership, info)
     periods = [str(period) for period in context.selected_periods]
-    latest, successes, process_has_runs, run_periods = _latest_period_maps(
+    (
+        latest, successes, process_has_runs, run_periods,
+        unscoped_latest, unscoped_successes,
+    ) = _latest_period_maps(
         membership.entity,
         periods,
     )
@@ -467,13 +486,18 @@ def build_xero_pipeline_summary(info, context_input):
         connection_state = _connection_state(membership.entity, definitions.get(process_key))
         summaries = []
         evidence_runs = []
+        # A period-agnostic stage reports the same run for every selected
+        # period, because its evidence was never about a month.
+        period_scoped = is_period_scoped(stage_key.value)
         for period in periods:
             summary, run = _period_summary(
                 period,
                 process_key,
                 connection_state,
-                latest.get((process_key, period)),
-                successes.get((process_key, period)),
+                (latest.get((process_key, period)) if period_scoped
+                 else unscoped_latest.get(process_key)),
+                (successes.get((process_key, period)) if period_scoped
+                 else unscoped_successes.get(process_key)),
                 process_key in process_has_runs,
                 run_periods,
                 prerequisites,

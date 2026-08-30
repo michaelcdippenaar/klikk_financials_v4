@@ -82,6 +82,19 @@ _SOURCES = {
 }
 
 
+def is_period_scoped(stage_key):
+    """Whether this stage's evidence belongs to a period at all.
+
+    A stage is period-scoped exactly when its source rows carry a date to scope
+    BY. Metadata (accounts, contacts, tracking categories) and processed journal
+    sources do not: they describe the organisation, not a month. This is the one
+    classification — run evidence reads it too, so the pipeline cannot decide a
+    stage is period-scoped for one kind of evidence and not the other.
+    """
+    source = _SOURCES.get(str(stage_key))
+    return bool(source and source[3])
+
+
 def measure_stage_source(stage_key, *, entity, starts_on: date, ends_on: date):
     """Source evidence for one stage, scoped to the entity and resolved window."""
     source = _SOURCES.get(str(stage_key))
