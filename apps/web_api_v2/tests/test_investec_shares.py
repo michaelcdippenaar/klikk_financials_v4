@@ -331,18 +331,24 @@ class ShareTransactionPagingAndFilterTests(TestCase):
         self.assertEqual(self._run(search='santam')['filteredCount'], 1)
         self.assertEqual(self._run(search='dividend')['filteredCount'], 1)
 
-    def test_type_filter_offers_only_types_that_are_present(self):
+    def test_type_filter_offers_each_present_type_exactly_once(self):
         self._bind()
+        # Repeats on different dates: the model orders by date, and a DISTINCT
+        # that inherits that ordering silently returns one entry per row.
         self._txn(1, type='Dividend')
-        self._txn(2, type='TAX')
-        self._txn(3, type='')
+        self._txn(2, type='Dividend')
+        self._txn(3, type='Dividend')
+        self._txn(4, type='TAX')
+        self._txn(5, type='TAX')
+        self._txn(6, type='')
 
         result = self._run()
 
-        # An option that returns nothing is a promise the screen cannot keep.
+        # An option that returns nothing is a promise the screen cannot keep,
+        # and the same option listed forty times is not a control at all.
         self.assertEqual(result['transactionTypes'], ['Dividend', 'TAX'])
-        self.assertEqual(self._run(types=['TAX'])['filteredCount'], 1)
-        self.assertEqual(self._run(types=['TAX', 'Dividend'])['filteredCount'], 2)
+        self.assertEqual(self._run(types=['TAX'])['filteredCount'], 2)
+        self.assertEqual(self._run(types=['TAX', 'Dividend'])['filteredCount'], 5)
 
     def test_every_bound_account_is_read_not_just_the_first(self):
         self._bind(ACCOUNT)
