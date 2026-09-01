@@ -40,6 +40,8 @@ urlpatterns = [
     path('quotes/<str:quote_id>/', views.XeroQuoteDetailView.as_view(), name='quote_detail'),
     # Invoices — sync + list + detail (parallel to XeroTransactionSource)
     path('invoices/sync/', views.XeroSyncInvoicesView.as_view(), name='sync_invoices'),
+    # create-draft/ must precede the '<str:invoice_id>/' catch-all
+    path('invoices/create-draft/', views.XeroCreateDraftInvoiceView.as_view(), name='create_draft_invoice'),
     path('invoices/', views.XeroInvoiceListView.as_view(), name='invoices_list'),
     path('invoices/<str:invoice_id>/', views.XeroInvoiceDetailView.as_view(), name='invoice_detail'),
 ]

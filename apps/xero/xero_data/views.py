@@ -1031,3 +1031,33 @@ class XeroJournalFilterOptionsView(APIView):
             'date_from': date_range['first'].date().isoformat() if date_range['first'] else None,
             'date_to': date_range['last'].date().isoformat() if date_range['last'] else None,
         })
+
+
+class XeroCreateDraftInvoiceView(APIView):
+    """POST /xero/data/invoices/create-draft/ — the ONE Xero write path.
+
+    Creates a single DRAFT invoice (ACCREC or ACCPAY), pre-logged to
+    audit.xero_writes with MC's authorising instruction quoted verbatim.
+    DRAFT only: nothing touches a ledger until a human approves it in Xero.
+    See invoice_write_service for the rules this enforces.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from apps.xero.xero_core.exceptions import DailyLimitReached, TenantReauthRequired
+        from apps.xero.xero_data.invoice_write_service import (
+            InvoiceValidationError, create_draft_invoice,
+        )
+        try:
+            result = create_draft_invoice(request.data if isinstance(request.data, dict) else {})
+        except InvoiceValidationError as exc:
+            return Response({'error': 'validation', 'problems': exc.problems, **exc.extra},
+                            status=status.HTTP_400_BAD_REQUEST)
+        except TenantReauthRequired as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_409_CONFLICT)
+        except DailyLimitReached as exc:
+            return Response({'error': str(exc)}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        except Exception as exc:  # SDK ApiException etc. — already audit-logged by the service
+            return Response({'error': f'Xero write failed: {exc}'},
+                            status=status.HTTP_502_BAD_GATEWAY)
+        return Response(result, status=status.HTTP_201_CREATED)
