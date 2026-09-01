@@ -5,20 +5,32 @@ from django.db import models
 class User(AbstractUser):
     """
     Custom User model extending Django's AbstractUser.
-    
+
     This model will be extended later to support:
     - Login with Xero
     - Login with Google
     - User to XeroTenant relationships
     """
-    
-    # Additional fields can be added here as needed
-    # For example:
-    # phone_number = models.CharField(max_length=20, blank=True)
-    # avatar = models.ImageField(upload_to='avatars/', blank=True)
-    
+
+    class Role(models.TextChoices):
+        STANDARD = 'standard', 'Standard'
+        AUDITOR = 'auditor', 'Auditor'
+
+    # Access role. 'standard' keeps today's behaviour (full console).
+    # 'auditor' is hard-gated by AuditorGateMiddleware to read-only access
+    # on the /audit/ surface — external auditors get accounts with this role.
+    role = models.CharField(
+        max_length=16,
+        choices=Role.choices,
+        default=Role.STANDARD,
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    @property
+    def is_auditor(self):
+        return self.role == self.Role.AUDITOR
     
     class Meta:
         db_table = 'users'

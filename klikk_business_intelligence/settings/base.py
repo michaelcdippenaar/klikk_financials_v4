@@ -89,6 +89,10 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    # Hard read-only gate for role=auditor accounts (see apps/user/middleware.py).
+    # After AuthenticationMiddleware so session users are resolved; only ever
+    # SUBTRACTS access from auditor accounts, grants nothing to anyone.
+    'apps.user.middleware.AuditorGateMiddleware',
 ]
 
 ROOT_URLCONF = 'klikk_business_intelligence.urls'
