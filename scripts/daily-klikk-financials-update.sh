@@ -4,9 +4,11 @@
 #
 # Canonical copy lives in the backend repo at
 #   klikk_financials_v4/scripts/daily-klikk-financials-update.sh
-# and /srv/klikk-financials/scripts/daily-klikk-financials-update.sh is a
-# symlink to it, so this file is version-controlled rather than surviving as a
-# pile of .bak-YYYYMMDD copies next to cron.
+# and is installed to /srv/klikk-financials/scripts/ on the VM as a COPY, not
+# a symlink: the only clone on that box is a scratch checkout that is not kept
+# at origin/main, so a symlink into it would run an arbitrary old commit. See
+# the install command in docs/vm_scheduled_jobs.md -- repo and VM must be kept
+# byte-identical, so re-run it after changing this file.
 #
 set -euo pipefail
 
@@ -38,6 +40,11 @@ TENANT_ID="${TENANT_ID:-}"
 # the tenant cap.
 NIGHTLY_XERO_BUDGET="${NIGHTLY_XERO_BUDGET:-300}"
 DOC_SYNC_MIN_BUDGET=50
+# Floor under Xero's own X-DayLimit-Remaining: the doc sync stops cleanly (exit
+# 3) rather than draining a tenant's window. Stated explicitly because the doc
+# sync now runs for every tenant, so it must not depend on the command's
+# default staying at 300.
+DOC_SYNC_HEADROOM="${DOC_SYNC_HEADROOM:-300}"
 
 mkdir -p "$LOG_DIR"
 cd "$COMPOSE_DIR"
@@ -245,17 +252,49 @@ PY
     doc_budget="$DOC_SYNC_MIN_BUDGET"
   fi
 
-  # Incremental Xero attachment sync for the Klikk tenant. Runs AFTER the
-  # pipeline (and after the invoice/quote steps) so UpdatedDateUTC in the local
-  # mirror is fresh. 3-day lookback gives overlap safety. Failure here is logged
-  # but does not fail the nightly run (attachment errors are non-critical).
-  DOC_SYNC_TENANT="41ebfa0e-012e-4ff1-82ba-a9a7585c536c"
-  printf '[%s] Starting incremental Xero document sync for tenant %s (budget=%s, extras spent=%s of %s)\n' \
-    "$(date -Is)" "$DOC_SYNC_TENANT" "$doc_budget" "$extra_calls" "$NIGHTLY_XERO_BUDGET"
+  # Incremental Xero attachment sync, EVERY tenant. Runs AFTER the pipeline (and
+  # after the invoice/quote steps) so UpdatedDateUTC in the local mirror is
+  # fresh. 3-day lookback gives overlap safety. A failure for one tenant is
+  # logged and the loop moves on, and none of it fails the nightly run
+  # (attachment errors are non-critical).
+  #
+  # The tenant list is read from the DB at run time, skipping rows a human has
+  # to re-authorize (hitting those only burns budget) -- the same shape as
+  # scripts/xero-doc-backfill.sh. It used to be the Klikk GUID, hardcoded, so
+  # Tremly and Dippenaar Family had no incremental attachment pickup at all;
+  # see the edit log in docs/vm_scheduled_jobs.md.
+  #
+  # doc_budget and DOC_SYNC_HEADROOM are PER TENANT and are NOT divided by the
+  # loop: each tenant has its own ~1,000-call/day Xero window (docs/xero_api_budget.md).
+  # extra_calls, subtracted from the budget above, is the invoice/quote spend
+  # across all tenants combined -- conservative on purpose.
+  #
+  # Set DOC_SYNC_TENANT_IDS="guid guid" (or TENANT_ID=<guid>) for a one-off.
+  DOC_SYNC_TENANT_IDS="${DOC_SYNC_TENANT_IDS:-$TENANT_ID}"
+  if [ -z "$DOC_SYNC_TENANT_IDS" ]; then
+    DOC_SYNC_TENANT_IDS="$(sudo docker compose exec -T postgres \
+      psql -U klikk_user -d klikk_financials_v4 -tAc \
+      'SELECT tenant_id FROM xero_core_xerotenant WHERE NOT reauth_required ORDER BY tenant_name' \
+      2>/dev/null || true)"
+  fi
+
   doc_status=0
-  sudo docker compose exec -T klikk-financials \
-    python manage.py sync_xero_documents "$DOC_SYNC_TENANT" --since 3 --max-api-calls "$doc_budget" || doc_status=$?
-  printf '[%s] Finished incremental Xero document sync (exit=%d)\n' "$(date -Is)" "$doc_status"
+  if [ -z "$DOC_SYNC_TENANT_IDS" ]; then
+    printf '[%s] Incremental Xero document sync SKIPPED: no tenants resolved\n' "$(date -Is)"
+  fi
+  for doc_tenant in $DOC_SYNC_TENANT_IDS; do
+    printf '[%s] Starting incremental Xero document sync for tenant %s (budget=%s/tenant, headroom=%s, extras spent=%s of %s)\n' \
+      "$(date -Is)" "$doc_tenant" "$doc_budget" "$DOC_SYNC_HEADROOM" "$extra_calls" "$NIGHTLY_XERO_BUDGET"
+    tenant_doc_status=0
+    sudo docker compose exec -T klikk-financials \
+      python manage.py sync_xero_documents "$doc_tenant" --since 3 \
+      --max-api-calls "$doc_budget" --headroom "$DOC_SYNC_HEADROOM" || tenant_doc_status=$?
+    printf '[%s] Finished incremental Xero document sync for tenant %s (exit=%d)\n' \
+      "$(date -Is)" "$doc_tenant" "$tenant_doc_status"
+    if [ "$tenant_doc_status" -ne 0 ]; then
+      doc_status="$tenant_doc_status"
+    fi
+  done
 
   printf '[%s] Finished daily Klikk Financials update (exit=%d)\n' "$(date -Is)" "$status"
   exit "$status"

@@ -6,7 +6,7 @@ record every edit here with its reasoning.
 
 | When (VM local, SAST) | Script | What |
 |---|---|---|
-| 02:45 daily (user cron `mc`) | `/srv/klikk-financials/scripts/daily-klikk-financials-update.sh` | Nightly pipeline per tenant, then budgeted invoice + quote store syncs (explicit 7-day `modified_since`, `INVOICE_BUDGET=40` calls), then document discovery. Logs to `/srv/klikk-financials/logs/daily-update.log`. |
+| 02:45 daily (user cron `mc`) | `/srv/klikk-financials/scripts/daily-klikk-financials-update.sh` | Nightly pipeline per tenant, then budgeted invoice + quote store syncs (explicit 7-day `modified_since`, `INVOICE_BUDGET=40` calls), then a 3-day incremental document sync **per tenant** (each tenant's own 1,000/day window; `--headroom 300`). Logs to `/srv/klikk-financials/logs/daily-update.log`. |
 | 03:30 daily | `/srv/klikk-financials/scripts/daily-tm1-full-refresh.sh` | TM1 / Planning Analytics refresh from the trail balance. |
 | 20:00 daily | `/srv/klikk-financials/scripts/xero-doc-backfill.sh` (copy of `scripts/xero-doc-backfill.sh` in this repo) | Attachment backfill, **every tenant** (each has its own 1,000/day Xero window). Per-tenant `.xero-doc-backfill.<tenant>.done` marker; a finished tenant is skipped. Logs to `/srv/klikk-financials/logs/xero-doc-backfill.log`. |
 | 06:00 Mondays (`/etc/cron.d/klikk-sync`, root) | `/usr/local/sbin/klikk-sync.sh weekly` | Invoices, quotes, aged AR/AP for the three tenants, Investec bank. Logs to `/var/log/klikk-sync/`. |
@@ -63,12 +63,89 @@ Tremly and Dippenaar have no incremental attachment pickup. It does not bite
 yet — the backfill visits them nightly until their flagged queue is empty — but
 the moment a tenant earns its `.done` marker, new attachments on that tenant
 stop being collected. Klikk is unaffected because the incremental sync is the
-tenant it points at.
+tenant it points at. **Closed the same day — see the next entry.**
 
 Note the daily cap is **1,000, not the 5,000 in Xero's public docs** — measured
 2026-08-19 after the ids-queue run died at 1,036 calls, re-confirmed on both
 Tremly and Dippenaar on 2026-09-03. Keep the ~300-call floor: the 02:45 job
 runs every tenant.
+
+### 2026-09-03 — the 02:45 incremental document sync covers every tenant
+
+`scripts/daily-klikk-financials-update.sh` in this repo. Same bug class as the
+backfill entry above, in the second of the two scripts that carried it.
+
+Why: line 252 read `DOC_SYNC_TENANT="41ebfa0e-..."` — the Klikk GUID, hardcoded
+— so the incremental attachment sync had only ever run for Klikk. Tremly and
+Dippenaar Family were never visited by it.
+
+Why it had not bitten, and why it was about to. Coverage of a tenant comes from
+exactly two jobs: the 20:00 backfill, which stops visiting a tenant the moment
+that tenant earns its `.xero-doc-backfill.<tenant>.done` marker, and this
+incremental sync, which pointed at one GUID. A tenant is covered while at least
+one of them visits it. On 2026-09-03 the markers read:
+
+| Tenant | `.done` marker | Backfill | Incremental | Covered? |
+|---|---|---|---|---|
+| Klikk | 2026-08-30 | skips | yes | yes — but only because line 252 named this exact GUID |
+| Dippenaar Family | 2026-09-03 13:09 | skips | no | **no — nothing collected its attachments from tonight** |
+| Tremly | none yet | still visiting | no | yes, for ~3 more nights until its queue drains |
+
+So Klikk's safety was a coincidence between a marker and a hardcoded GUID, and
+Dippenaar had already fallen through the gap when this was fixed.
+
+The fix follows `scripts/xero-doc-backfill.sh` rather than inventing a second
+pattern: the tenant list is read from `xero_core_xerotenant` at run time,
+skipping `reauth_required` rows, and the sync loops over it. A failure for one
+tenant is logged and the loop moves on; the aggregate exit code is still
+reported, and document errors still do not fail the nightly.
+
+Budget: `doc_budget` and the new explicit `DOC_SYNC_HEADROOM=300` are **per
+tenant** and are NOT divided by the loop, because each tenant has its own
+~1,000-call/day Xero window (`docs/xero_api_budget.md`). `--headroom` is now
+passed explicitly rather than relying on the command's `DEFAULT_HEADROOM`
+staying at 300, since this loop now runs three times a night instead of once.
+`extra_calls`, still subtracted from `NIGHTLY_XERO_BUDGET`, is the invoice/quote
+spend across all tenants combined — conservative on purpose.
+
+`TENANT_ID=<guid>` (the existing single-tenant override) now also scopes the
+document sync, and `DOC_SYNC_TENANT_IDS="guid guid"` scopes just that step.
+
+Verified 2026-09-03 15:51 UTC by running the changed block verbatim against the
+VM with a deliberately small `doc_budget=40`. All three tenants were visited:
+
+| Tenant | discovery | fetch | total calls | exit | `X-DayLimit-Remaining` after |
+|---|---|---|---|---|---|
+| Dippenaar Family | 3 | 0 | 3 | 0 | 964 |
+| Klikk | 3 | 40 | 43 | 0 | 955 |
+| Tremly | 1 | 0 | 1 | 3 | 295 |
+
+Tremly stood down on the headroom floor (`X-DayLimit-Remaining=295 < 300`) after
+one call — the 20:00 backfill had already drained its window that afternoon.
+That is the guard working, and it also demonstrated the loop does not abort on
+a per-tenant exit 3: Klikk ran after Dippenaar and Tremly's stand-down was the
+last step. Klikk's "stopped early: max-api-calls" is the artificial 40-call test
+budget, not a production condition.
+
+No back-window catch-up is needed **provided this is installed and running by
+the 02:45 run of 2026-09-06.** The `--since 3` window cannot reach across a gap
+wider than three days, and Dippenaar's coverage stopped at 13:09 on 2026-09-03.
+Tremly needs nothing by construction: the backfill's completion test is "no
+flagged rows left without documents", so the handover to the incremental sync is
+seamless whenever its marker appears. If the install does slip past 2026-09-06,
+do NOT widen `--since` (it would cost a full re-discovery inside the nightly's
+300-call slice) — instead delete that tenant's marker and let the 20:00 backfill
+re-run one night:
+
+```bash
+ssh klikk-financials 'rm /srv/klikk-financials/scripts/.xero-doc-backfill.<tenant-guid>.done'
+```
+
+Header comment (lines 5-11) rewritten in the same commit: it described the VM
+install as a symlink "to the backend repo", which was already wrong — it pointed
+into the scratch checkout — and argued for the pattern being removed. Written
+by the session doing the installation change; carried here to keep one file to
+one editor.
 
 ### 2026-09-03 — `klikk-sync.sh` weekly mode now passes `--full` to `sync_xero_invoices`
 
