@@ -1533,9 +1533,26 @@
     } catch (e) { /* saved views are optional; the cube still builds */ }
   }
 
+  function savedViewNames() {
+    return Array.prototype.map.call(el.viewPick.options, function (o) { return o.value; })
+      .filter(function (v) { return v; });
+  }
+
   async function saveCurrentView() {
-    var name = (el.viewName.value || '').trim();
-    if (!name) throw new Error('Name the view first.');
+    /* Overwriting is the common case, not the exception: you open a view,
+       adjust a subset, and want the same view to keep the change. Requiring
+       the exact name to be retyped to do that is what produced "Default2"
+       sitting next to "Default".
+
+       Leave the name box empty and Save replaces the view currently selected.
+       Type a name that already exists and it replaces that one -- the server
+       has always upserted by name, so a "new" save under an existing name was
+       a silent replace anyway. The message says which of the two happened
+       rather than leaving it to be discovered later. */
+    var typed = (el.viewName.value || '').trim();
+    var name = typed || (el.viewPick.value || '').trim();
+    if (!name) throw new Error('Name the view, or pick one to overwrite.');
+    var replacing = savedViewNames().indexOf(name) >= 0;
     var spec = readCubeSpec();
     var bad = validateCube(spec);
     if (bad) throw new Error(bad);
@@ -1548,7 +1565,8 @@
     el.viewName.value = '';
     await loadViewList();
     el.viewPick.value = name;
-    el.cubeMsg.textContent = 'Saved view "' + name + '" — layout, subsets and filters.';
+    el.cubeMsg.textContent = (replacing ? 'Replaced view "' : 'Saved view "')
+      + name + '" — layout, subsets and filters.';
     el.cubeMsg.className = 'msg msg--ok';
   }
 
