@@ -1,31 +1,44 @@
+/* Klikk design language (KDL) — mirrors the console at console.8-bit.space.
+   Source of truth: klikk_portal/src/css/klikk.css + tailwind.config.js.
+   Primary action is brand navy with a pink accent glow, exactly as .btn-primary
+   is defined there; the pink is an accent, never a large text-bearing surface. */
 :root {
-  --ink:        #171e2a;
-  --ink-mute:   #5c6879;
-  --ink-faint:  #8a94a3;
-  --ground:     #ffffff;
-  --raise:      #f5f7fa;
-  --line:       #dfe4ec;
-  --accent:     #b8811c;
+  --ink:        #111111;  /* kdl-text-primary   */
+  --ink-mute:   #4b5563;  /* kdl-text-secondary */
+  --ink-faint:  #6b7280;  /* kdl-text-muted     */
+  --ground:     #ffffff;  /* kdl-card-bg        */
+  --raise:      #f5f5f8;  /* kdl-page-bg        */
+  --line:       #e5e7eb;  /* kdl-border         */
+  --line-soft:  #efeff5;  /* kdl-border-subtle  */
+  --accent:     #2b2d6e;  /* brand navy         */
+  --accent-hov: #23255a;  /* navy-dark          */
   --accent-ink: #ffffff;
-  --danger:     #a3271f;
-  --ok:         #1f6b45;
-  --warn-bg:    #fdf5e4;
-  --warn-line:  #e6c884;
+  --highlight:  #ff3d7f;  /* kdl-accent (pink)  */
+  --glow:       0 0 0 2px rgba(255, 61, 127, 0.35);
+  --danger:     #dc2626;
+  --ok:         #0d9488;
+  --warn-bg:    #fffbeb;
+  --warn-line:  #fcd34d;
   --radius:     6px;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --ink:        #e9eef5;
-    --ink-mute:   #a3aebd;
-    --ink-faint:  #78828f;
-    --ground:     #171e2a;
-    --raise:      #1f2836;
-    --line:       #2e3948;
-    --accent:     #f5b041;
-    --accent-ink: #171e2a;
-    --danger:     #f0857c;
-    --ok:         #6ed19d;
+    --ink:        #e8e9f2;
+    --ink-mute:   #a4a6bb;
+    --ink-faint:  #8a8c9f;
+    --ground:     #161827;
+    --raise:      #1d1f30;
+    --line:       #34365a;
+    --line-soft:  #262842;
+    --accent:     #2b2d6e;  /* navy is a Tailwind literal on the console —
+                               it does not change with the theme there */
+    --accent-hov: #3b3e8f;
+    --accent-ink: #ffffff;
+    --highlight:  #ff4f8a;
+    --glow:       0 0 0 1px rgba(255, 79, 138, 0.45), 0 0 24px rgba(255, 79, 138, 0.18);
+    --danger:     #f87171;
+    --ok:         #2dd4bf;
     --warn-bg:    #2b2418;
     --warn-line:  #5c4b26;
   }
@@ -36,7 +49,7 @@
 body {
   margin: 0;
   padding: 0 12px 20px;
-  font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  font: 13px/1.45 "Geist", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   color: var(--ink);
   background: var(--ground);
   -webkit-font-smoothing: antialiased;
@@ -175,6 +188,14 @@ input:focus, select:focus {
   background: var(--accent);
   border-color: var(--accent);
 }
+/* The console gives a primary button a pink accent glow on hover, not a
+   colour change alone — .btn-primary:hover { box-shadow: var(--glow-accent) }. */
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent-hov);
+  border-color: var(--accent-hov);
+  box-shadow: var(--glow);
+}
+:focus-visible { outline: 2px solid var(--highlight); outline-offset: 2px; }
 .btn--danger { color: var(--danger); }
 
 /* ── Progress ───────────────────────────────────────────── */
