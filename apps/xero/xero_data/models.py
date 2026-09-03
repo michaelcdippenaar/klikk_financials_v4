@@ -72,6 +72,9 @@ class XeroTransactionSourceModelManager(models.Manager):
                 existing.contact = contact
                 existing.transaction_source = transaction_source_type
                 existing.collection = r
+                # Xero returned the row, so it changed (If-Modified-Since) or
+                # this is a full load; either way the journals must be rebuilt.
+                existing.synced_at = now
                 if has_attachments is not None:
                     existing.has_attachments = has_attachments
                     existing.attachments_checked_at = now
@@ -86,6 +89,7 @@ class XeroTransactionSourceModelManager(models.Manager):
                     collection=r,
                     has_attachments=has_attachments,
                     attachments_checked_at=now if has_attachments is not None else None,
+                    synced_at=now,
                 ))
 
         # Bulk create and update
@@ -93,7 +97,7 @@ class XeroTransactionSourceModelManager(models.Manager):
             self.bulk_create(to_create, ignore_conflicts=True)
         if to_update:
             self.bulk_update(to_update, ['contact', 'transaction_source', 'collection',
-                                         'has_attachments', 'attachments_checked_at'])
+                                         'has_attachments', 'attachments_checked_at', 'synced_at'])
         
         return self
     
@@ -158,6 +162,12 @@ class XeroTransactionSource(models.Model):
         null=True, blank=True,
         help_text='When HasAttachments was last read from a Xero list response (or the Attachments list).',
     )
+    synced_at = models.DateTimeField(
+        null=True, blank=True,
+        help_text='When this row was last written from a Xero list response. The trail balance '
+                  'build compares it with its own last-run stamp to reprocess only the '
+                  'transactions that changed since, instead of all of them.',
+    )
 
     objects = XeroTransactionSourceModelManager()
 
@@ -166,6 +176,8 @@ class XeroTransactionSource(models.Model):
         indexes = [
             models.Index(fields=['organisation', 'has_attachments'],
                          name='xero_txsrc_org_hasatt_idx'),
+            models.Index(fields=['organisation', 'synced_at'],
+                         name='xero_txsrc_org_synced_idx'),
         ]
 
     def __str__(self):
@@ -774,7 +786,9 @@ class XeroJournals(models.Model):
         indexes = [
             models.Index(fields=['organisation', 'date'], name='journals_org_date_idx'),
             models.Index(fields=['organisation', 'account'], name='journals_org_acc_idx'),
-            models.Index(fields=['organisation', 'date', 'account'], name='journals_org_dt_acc_idx'),
+            # journals_org_dt_acc_idx dropped 2026-09-03: zero scans over the
+            # database's whole statistics window, 10 MB maintained on every
+            # transaction reprocess (delete+insert of ~45k rows).
             models.Index(fields=['date'], name='journals_date_idx'),
             models.Index(fields=['organisation', 'transaction_source'], name='journals_org_txn_idx'),
             models.Index(fields=['organisation', 'journal_type'], name='journals_org_type_idx'),

@@ -16,6 +16,24 @@ logger = logging.getLogger(__name__)
 _io_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='bigquery_io')
 
 
+def has_google_credentials():
+    """True when a Google service-account file can be located, without raising.
+
+    Callers that build an export payload (the trail balance loads its whole
+    table into a dataframe) should check this first: on the VM there are no
+    Google credentials, so the export is known to fail and the dataframe was
+    pure waste (0.6 s and ~120k rows per build).
+    """
+    try:
+        get_google_credentials()
+    except (ValueError, FileNotFoundError):
+        return False
+    except Exception:  # noqa: BLE001 - a malformed file is still "not usable"
+        logger.debug('Google credentials present but unusable', exc_info=True)
+        return False
+    return True
+
+
 def get_google_credentials():
     """
     Get Google Cloud credentials from environment variable or settings.

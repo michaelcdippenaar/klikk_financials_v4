@@ -8,6 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
+# Unbuffered stdout: the pipeline logs with print(), and block buffering made
+# twenty log lines share one docker timestamp, hiding where the time went.
+ENV PYTHONUNBUFFERED=1
+
 # Install Python dependencies first (layer cache)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

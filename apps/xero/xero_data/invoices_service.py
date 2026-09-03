@@ -20,7 +20,7 @@ another page once the cap is reached; rows already fetched are still upserted.
 """
 import logging
 import time
-from datetime import date as date_type, datetime, timezone as dt_timezone
+from datetime import date as date_type, datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal, InvalidOperation
 import re
 
@@ -286,6 +286,35 @@ def _replace_line_items(invoice: XeroInvoice, detail: dict, tenant: XeroTenant):
         XeroInvoiceLineItem.objects.bulk_create(objs)
 
 
+# Overlap subtracted from the last successful run's stamp when the caller gives
+# no cursor. Wide enough to absorb clock skew and a run that stamped before
+# Xero finished indexing an edit; cheap because a day of changes is one page.
+DEFAULT_CURSOR_OVERLAP = timedelta(days=3)
+
+
+def default_modified_since(tenant: XeroTenant) -> datetime | None:
+    """Cursor for a run that gave none: last successful run minus an overlap.
+
+    Before 2026-09-03 every caller that omitted `modified_since` (the console
+    button, the V2 pipeline stage, the MCP tool) silently re-pulled the whole
+    invoice list — 38 Xero calls and ~45 s to rewrite 3,700 unchanged Klikk
+    rows for a handful of changes. The nightly script already passed a
+    lookback; this makes that the default everywhere.
+
+    Returns None (= full sync) when the store has never been stamped, so a
+    fresh tenant still loads everything. The value is a naive UTC datetime:
+    it goes to Xero's If-Modified-Since header, not the ORM, and the SDK
+    reformats an aware value.
+    """
+    from apps.xero.xero_sync.models import XeroLastUpdate
+    stamp = XeroLastUpdate.objects.filter(
+        end_point='invoice_store', organisation=tenant,
+    ).values_list('date', flat=True).first()
+    if not stamp:
+        return None
+    return stamp.astimezone(dt_timezone.utc).replace(tzinfo=None) - DEFAULT_CURSOR_OVERLAP
+
+
 def sync_xero_invoices(tenant: XeroTenant,
                        modified_since: datetime | None = None,
                        statuses: list | None = None,
@@ -296,10 +325,14 @@ def sync_xero_invoices(tenant: XeroTenant,
     Sync invoices for one tenant.
 
     Args:
-        modified_since: only sync invoices updated since (Xero If-Modified-Since)
+        modified_since: only sync invoices updated since (Xero If-Modified-Since).
+            None = derive from the last successful run (see default_modified_since);
+            a tenant never synced before falls back to a full pull.
         statuses: optional list of XeroInvoiceStatus values to filter
         invoice_type: optional 'ACCREC' or 'ACCPAY'
-        full: ignore modified_since
+        full: ignore modified_since and pull everything (deleted/voided
+            invoices do not surface through If-Modified-Since, so keep an
+            occasional full run — the weekly cron already does one)
         max_api_calls: hard cap on Xero list-page calls for this run.
             None (default) = unlimited, i.e. the pre-existing behaviour for
             the console view and the management command. When set, no page
@@ -332,6 +365,11 @@ def sync_xero_invoices(tenant: XeroTenant,
 
     if full:
         modified_since = None
+    elif modified_since is None:
+        modified_since = default_modified_since(tenant)
+        if modified_since is not None:
+            print(f'[INVOICES] No cursor given; syncing invoices modified since '
+                  f'{modified_since:%Y-%m-%d %H:%M} UTC (last run minus overlap)')
     api = _get_api(tenant)
 
     list_call_failed = False

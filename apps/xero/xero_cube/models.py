@@ -26,13 +26,30 @@ class XeroTrailBalanceManager(DataFrameManager):
         tenant_id = organisation.tenant_id
         fiscal_start = organisation.get_fiscal_year_start_month()
 
+        # Deduplicate defensively: the caller's period list once carried every
+        # (year, month) thousands of times over (a DISTINCT that leaked the
+        # model's default ordering), which turned the delete into thousands of
+        # statements and the INSERT's WHERE into a 2,800-clause OR chain that
+        # ran for 86 s. The set is the contract; order it for stable SQL.
+        if affected_periods:
+            affected_periods = sorted({(int(y), int(m)) for y, m in affected_periods})
+
         # --- Delete phase ---
         if affected_periods:
             print(f'[CONSOLIDATE] Incremental: rebuilding {len(affected_periods)} periods')
-            for year, month in affected_periods:
-                deleted = self.filter(organisation=organisation, year=year, month=month).delete()[0]
-                if deleted:
-                    logger.info(f"Deleted {deleted} trail balance records for {year}-{month:02d}")
+            # One DELETE keyed on the same (org, year, month) index the INSERT
+            # reads, instead of one round trip per period.
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    DELETE FROM xero_cube_xerotrailbalance
+                    WHERE organisation_id = %s
+                      AND (year * 100 + month) = ANY(%s)
+                    """,
+                    [tenant_id, [y * 100 + m for y, m in affected_periods]],
+                )
+                deleted = cursor.rowcount
+            logger.info(f"Deleted {deleted} trail balance records across {len(affected_periods)} periods")
         else:
             deleted = self.filter(organisation=organisation).delete()[0]
             print(f'[CONSOLIDATE] Full rebuild: deleted {deleted} existing records')
@@ -75,13 +92,21 @@ class XeroTrailBalanceManager(DataFrameManager):
             where_extra += " AND j.journal_type != 'manual_journal'"
 
         if affected_periods:
-            period_clauses = []
-            for year, month in affected_periods:
-                period_clauses.append(
-                    "(EXTRACT(YEAR FROM j.date)::int = %s AND EXTRACT(MONTH FROM j.date)::int = %s)"
-                )
-                params.extend([year, month])
-            where_extra += " AND (" + " OR ".join(period_clauses) + ")"
+            # A sargable date range lets the planner use journals_org_date_idx
+            # (measured 35 ms vs 86 s for the per-period OR chain it replaces);
+            # the ANY() guard keeps the exact period set when it is not
+            # contiguous. j.date is a timestamptz, so bound with the first day
+            # of the month after the last period rather than an inclusive date.
+            first_y, first_m = affected_periods[0]
+            last_y, last_m = affected_periods[-1]
+            next_y, next_m = (last_y + 1, 1) if last_m == 12 else (last_y, last_m + 1)
+            where_extra += """
+            AND j.date >= make_date(%s, %s, 1)
+            AND j.date < make_date(%s, %s, 1)
+            AND (EXTRACT(YEAR FROM j.date)::int * 100 + EXTRACT(MONTH FROM j.date)::int) = ANY(%s)
+            """
+            params.extend([first_y, first_m, next_y, next_m,
+                           [y * 100 + m for y, m in affected_periods]])
 
         sql = f"""
             INSERT INTO xero_cube_xerotrailbalance
@@ -170,8 +195,10 @@ class XeroTrailBalance(models.Model):
         indexes = [
             models.Index(fields=['organisation', 'year', 'month'], name='tb_org_ym_idx'),
             models.Index(fields=['organisation', 'account', 'year', 'month'], name='tb_org_acc_ym_idx'),
-            models.Index(fields=['account', 'contact'], name='tb_acc_contact_idx'),
-            models.Index(fields=['organisation', 'account', 'contact'], name='tb_org_acc_ct_idx'),
+            # tb_acc_contact_idx and tb_org_acc_ct_idx were dropped on
+            # 2026-09-03: zero scans in pg_stat_user_indexes over the database's
+            # whole statistics window, yet ~15 MB maintained on every rebuild's
+            # delete+insert of ~25k rows.
             models.Index(fields=['year', 'month'], name='tb_ym_idx'),
         ]
 

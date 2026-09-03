@@ -72,8 +72,13 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
             return {'skipped': True, 'records': tb_count, 'affected_periods': []}
         print(f"[TRAIL BALANCE] Using {len(selected_periods)} affected periods from sync: {selected_periods}")
     elif incremental:
+        # Fallback only: process_xero_data() derives the affected periods from
+        # what actually changed and passes them in. This branch is reached by
+        # direct callers, and keys on the last trail-balance build (not the
+        # legacy Journals-API cursor, frozen at 2025-11-25, which made every
+        # "incremental" run rebuild ten months).
         try:
-            last_update = XeroLastUpdate.objects.get(end_point='journals', organisation=organisation)
+            last_update = XeroLastUpdate.objects.get(end_point='trail_balance', organisation=organisation)
             if last_update.date:
                 last_update_date = last_update.date
                 print(f"[TRAIL BALANCE] Incremental from {last_update_date}")
@@ -84,11 +89,15 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
                 if exclude_manual_journals:
                     new_journals_filter = new_journals_filter.exclude(journal_type='manual_journal')
 
+                # .order_by() is load-bearing: without it the model's default
+                # ordering (organisation, date, journal_number) leaks into the
+                # DISTINCT, which then yields one row per journal instead of
+                # one per month — 2,822 "periods" for 12 months on 2026-09-03.
                 periods_qs = new_journals_filter.annotate(
                     _month=Month('date'), _year=Year('date')
-                ).values('_year', '_month').distinct()
+                ).values('_year', '_month').order_by().distinct()
 
-                selected_periods = [(p['_year'], p['_month']) for p in periods_qs]
+                selected_periods = sorted({(int(p['_year']), int(p['_month'])) for p in periods_qs})
                 print(f"[TRAIL BALANCE] {len(selected_periods)} affected periods: {selected_periods}")
 
                 if not selected_periods:
@@ -122,7 +131,14 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
         print(f'[TRAIL BALANCE] ERROR: {e}')
         raise
 
-    # BigQuery export
+    # BigQuery export. Check for credentials BEFORE loading the whole table
+    # into a dataframe: without them the export is known to fail (not a
+    # regression — see CLAUDE.md) and the ~120k-row dataframe was pure waste.
+    from apps.xero.xero_integration.services import has_google_credentials
+    if not has_google_credentials():
+        print('BigQuery export skipped: no Google credentials configured')
+        return {'skipped': False, 'records': tb_count, 'affected_periods': selected_periods}
+
     print('Start Trail Balance - Google Export')
     df = tb.to_dataframe([
         'organisation__tenant_id', 'organisation__tenant_name',
@@ -170,7 +186,7 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
     return {'skipped': False, 'records': tb_count, 'affected_periods': selected_periods}
 
 
-def fill_balance_sheet_gaps(tenant_id):
+def fill_balance_sheet_gaps(tenant_id, affected_periods=None):
     """
     Insert zero-amount gap-fill rows into XeroTrailBalance for balance sheet
     accounts so that every partition (account, contact, tracking1, tracking2)
@@ -180,6 +196,14 @@ def fill_balance_sheet_gaps(tenant_id):
 
     Args:
         tenant_id: Xero tenant ID
+        affected_periods: optional list of (year, month) just rebuilt. When
+            given, only ACCOUNTS with a row in those months are examined —
+            accounts, not partitions, because a new month on one partition
+            extends the account's latest month and every sibling partition
+            then needs a zero row for it; and the whole series of each such
+            account, not just the affected months, because a backdated
+            movement earlier than a partition's old first month needs the
+            months in between filled too.
 
     Returns:
         int: number of gap-fill rows inserted
@@ -192,6 +216,23 @@ def fill_balance_sheet_gaps(tenant_id):
     logger.info(f'Starting balance sheet gap-fill for tenant {tenant_id}')
     print(f"[BS GAP-FILL] Starting gap-fill for tenant {tenant_id}")
 
+    account_filter = ""
+    account_params = []
+    if affected_periods:
+        account_filter = """
+              AND tb.account_id IN (
+                  SELECT DISTINCT account_id FROM xero_cube_xerotrailbalance
+                  WHERE organisation_id = %s
+                    AND (year * 100 + month) = ANY(%s)
+              )"""
+        account_params = [tenant_id, [int(y) * 100 + int(m) for y, m in affected_periods]]
+
+    # The NOT EXISTS below compares nullable keys with COALESCE instead of
+    # IS NOT DISTINCT FROM: the latter is not hash- or merge-joinable, so the
+    # planner rescanned the existing-rows side 15.1M times (1.9 s per run);
+    # equality on COALESCE'd keys lets it hash anti-join. Sentinels cannot
+    # collide: contact ids are Xero UUIDs (never ''), tracking ids are
+    # positive bigints (never -1).
     sql = """
         INSERT INTO xero_cube_xerotrailbalance
             (organisation_id, account_id, date, year, month,
@@ -241,6 +282,7 @@ def fill_balance_sheet_gaps(tenant_id):
             ) acct_max ON acct_max.account_id = tb.account_id
             WHERE tb.organisation_id = %s
               AND acc.grouping IN ('ASSET', 'LIABILITY', 'EQUITY')
+              {account_filter}
             GROUP BY tb.organisation_id, tb.account_id,
                      tb.contact_id, tb.tracking1_id, tb.tracking2_id
         ) p
@@ -255,17 +297,17 @@ def fill_balance_sheet_gaps(tenant_id):
             SELECT 1 FROM xero_cube_xerotrailbalance ex
             WHERE ex.organisation_id = p.organisation_id
               AND ex.account_id      = p.account_id
-              AND ex.contact_id      IS NOT DISTINCT FROM p.contact_id
-              AND ex.tracking1_id    IS NOT DISTINCT FROM p.tracking1_id
-              AND ex.tracking2_id    IS NOT DISTINCT FROM p.tracking2_id
+              AND COALESCE(ex.contact_id, '')    = COALESCE(p.contact_id, '')
+              AND COALESCE(ex.tracking1_id, -1)  = COALESCE(p.tracking1_id, -1)
+              AND COALESCE(ex.tracking2_id, -1)  = COALESCE(p.tracking2_id, -1)
               AND ex.year  = gs.yr
               AND ex.month = gs.mo
         )
-    """
+    """.replace('{account_filter}', account_filter)
 
     params = [
         fiscal_start, fiscal_start, fiscal_start, fiscal_start,
-        tenant_id, tenant_id,
+        tenant_id, tenant_id, *account_params,
     ]
 
     with connection.cursor() as cursor:
@@ -277,7 +319,7 @@ def fill_balance_sheet_gaps(tenant_id):
     return total_inserted
 
 
-def calculate_balance_sheet_balance_to_date(tenant_id):
+def calculate_balance_sheet_balance_to_date(tenant_id, affected_periods=None):
     """
     Calculate balance_to_date (YTD) for balance sheet accounts (ASSET, LIABILITY, EQUITY).
 
@@ -286,6 +328,11 @@ def calculate_balance_sheet_balance_to_date(tenant_id):
 
     Args:
         tenant_id: Xero tenant ID
+        affected_periods: optional (year, month) list just rebuilt; narrows the
+            gap-fill to the accounts touched (see fill_balance_sheet_gaps).
+            The running-total UPDATE stays whole-tenant: it only writes rows
+            whose value actually changes, and a rebuilt month shifts every
+            later month's balance in its partition anyway.
     """
     from django.db import connection
 
@@ -297,7 +344,7 @@ def calculate_balance_sheet_balance_to_date(tenant_id):
     except XeroTenant.DoesNotExist:
         raise ValueError(f"Tenant {tenant_id} not found")
 
-    fill_balance_sheet_gaps(tenant_id)
+    fill_balance_sheet_gaps(tenant_id, affected_periods=affected_periods)
 
     sql = """
         UPDATE xero_cube_xerotrailbalance tb
@@ -362,6 +409,107 @@ def create_balance_sheet(tenant_id):
             logger.warning(f"BigQuery export skipped for balance sheet: {e2}")
 
 
+def _months_of(journals_qs):
+    """Distinct (year, month) of a XeroJournals queryset, as a set of int tuples.
+
+    `.order_by()` is required: the model's default ordering would otherwise
+    join the DISTINCT and return one row per journal (see create_trail_balance).
+    """
+    rows = journals_qs.annotate(
+        _month=Month('date'), _year=Year('date')
+    ).values('_year', '_month').order_by().distinct()
+    return {(int(r['_year']), int(r['_month'])) for r in rows}
+
+
+# Above this share of transactions touched, a full reprocess + full rebuild is
+# both cheaper (one set-based statement each) and simpler than the incremental
+# bookkeeping. Also what the first run after the synced_at backfill hits.
+_FULL_REBUILD_TOUCHED_RATIO = 0.5
+
+
+def derive_incremental_scope(tenant):
+    """Work out what changed since the last build, from the database alone.
+
+    Returns None when a full rebuild is the right answer, else a dict:
+        touched_transaction_ids: set of XeroTransactionSource.transactions_id
+            written by a Xero sync after the last transaction reprocess
+            (XeroLastUpdate['process_journals'] vs XeroTransactionSource.synced_at)
+        pending_journal_source_ids: XeroJournalsSource rows awaiting processing
+            (manual journals fetched or re-fetched since)
+        affected_periods: (year, month) set the trail balance must rebuild —
+            the months those rows' CURRENT journals sit in (the "before" side:
+            a re-dated transaction must also clear its old month) plus the
+            months of any exclusion rule changed since the last build. The
+            caller adds the "after" months once the journals are regenerated.
+
+    Why derive rather than thread: the console button and each V2 stage are
+    separate requests, so the touched set the sync computed in-process is gone
+    by the time the build runs. Before 2026-09-03 both entry points therefore
+    reprocessed all ~45k transaction journals and rebuilt ten months on every
+    run, and a backdated edit whose journals fell outside those months was
+    never rebuilt at all until someone forced rebuild=True.
+    """
+    import re as _re
+    from django.db.models import Q
+    from apps.xero.xero_data.models import (
+        XeroTransactionSource, XeroJournalsSource, XeroJournalExclusion,
+    )
+    from apps.xero.xero_sync.models import XeroLastUpdate
+
+    stamps = dict(XeroLastUpdate.objects.filter(
+        organisation=tenant, end_point__in=('process_journals', 'trail_balance'),
+    ).values_list('end_point', 'date'))
+    last_reprocess = stamps.get('process_journals')
+    last_build = stamps.get('trail_balance')
+    if not last_reprocess or not last_build:
+        print("[SCOPE] No previous incremental build stamp; full rebuild")
+        return None
+
+    sources = XeroTransactionSource.objects.filter(organisation=tenant)
+    total = sources.count()
+    touched = set(sources.filter(synced_at__gt=last_reprocess)
+                  .values_list('transactions_id', flat=True))
+    if total and len(touched) >= total * _FULL_REBUILD_TOUCHED_RATIO:
+        print(f"[SCOPE] {len(touched)}/{total} transactions touched since "
+              f"{last_reprocess:%Y-%m-%d %H:%M}; full rebuild is cheaper")
+        return None
+
+    periods = set()
+    if touched:
+        periods |= _months_of(XeroJournals.objects.filter(
+            organisation=tenant, transaction_source__transactions_id__in=touched))
+
+    pending = list(XeroJournalsSource.objects.filter(
+        organisation=tenant, processed=False).values_list('id', flat=True))
+    if pending:
+        periods |= _months_of(XeroJournals.objects.filter(journal_source_id__in=pending))
+
+    # An exclusion rule changed since the last build re-shapes the months it
+    # matches, even though no journal row moved.
+    for ex in XeroJournalExclusion.objects.filter(organisation=tenant, updated_at__gt=last_build):
+        if ex.date:
+            periods.add((ex.date.year, ex.date.month))
+        elif ex.journal_number is not None:
+            periods |= _months_of(XeroJournals.objects.filter(
+                organisation=tenant, journal_number=ex.journal_number))
+        elif ex.journal_id:
+            base = _re.sub(r'_[0-9]+$', '', ex.journal_id)
+            periods |= _months_of(XeroJournals.objects.filter(organisation=tenant).filter(
+                Q(journal_id=base) | Q(journal_id__startswith=base + '_')))
+        else:
+            # Description/reference-only rule: could match any month.
+            print(f"[SCOPE] Exclusion {ex.pk} changed and has no date/journal key; full rebuild")
+            return None
+
+    print(f"[SCOPE] Incremental: {len(touched)} transactions, {len(pending)} pending "
+          f"manual journals, {len(periods)} month(s) so far since {last_reprocess:%Y-%m-%d %H:%M}")
+    return {
+        'touched_transaction_ids': touched,
+        'pending_journal_source_ids': pending,
+        'affected_periods': periods,
+    }
+
+
 def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_journals=False,
                       calculate_pnl_ytd=True, touched_transaction_ids=None,
                       affected_periods=None):
@@ -405,24 +553,58 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
         'accounts_exported': False,
     }
     
+    step_seconds = {}
+    stats['step_seconds'] = step_seconds
+
+    def _timed(name, started):
+        step_seconds[name] = round(time.time() - started, 2)
+        print(f"[PROCESS] {name}: {step_seconds[name]}s")
+
     try:
+        # Step 0: decide the scope. Explicit arguments win (a caller that ran
+        # the sync in-process knows exactly what it touched); otherwise derive
+        # it from the database; rebuild=True forces everything.
+        scope = None
+        if not rebuild_trail_balance:
+            if touched_transaction_ids is not None or affected_periods is not None:
+                scope = {
+                    'touched_transaction_ids': set(touched_transaction_ids or ()),
+                    'pending_journal_source_ids': [],
+                    'affected_periods': {tuple(int(x) for x in p) for p in (affected_periods or ())},
+                }
+            else:
+                scope = derive_incremental_scope(tenant)
+        stats['scope'] = 'full' if scope is None else 'incremental'
+
         # Step 1: Process journals from XeroJournalsSource to XeroJournals
         # When rebuilding trail balance, force reprocess to fix tracking assignment
+        t0 = time.time()
         logger.info(f'Start Processing Journals for tenant {tenant_id}')
         print(f"[PROCESS] Starting journal processing for tenant {tenant_id}")
         process_journals(tenant_id, force_reprocess=rebuild_trail_balance)
         stats['journals_processed'] = True
         print(f"[PROCESS] ✓ Journals processed")
+        if scope is not None and scope['pending_journal_source_ids']:
+            # "After" months of the manual journals just (re)processed.
+            scope['affected_periods'] |= _months_of(XeroJournals.objects.filter(
+                journal_source_id__in=scope['pending_journal_source_ids']))
+        _timed('process_journals', t0)
 
         # Step 1b: Reprocess transaction-based journals (invoices, bank transactions, etc.)
         # Full rebuild when explicitly requested; incremental when touched IDs are available.
+        t0 = time.time()
         from apps.xero.xero_data.transaction_processor import process_transactions_to_journals
-        txn_ids = None if rebuild_trail_balance else touched_transaction_ids
+        txn_ids = None if scope is None else scope['touched_transaction_ids']
         mode = "FULL" if txn_ids is None else f"INCREMENTAL ({len(txn_ids)} transactions)"
         print(f"[PROCESS] Reprocessing transaction-based journals — {mode}")
         txn_stats = process_transactions_to_journals(tenant, touched_transaction_ids=txn_ids)
         print(f"[PROCESS] ✓ Transaction journals reprocessed: {txn_stats.get('journal_entries_created', 0)} created")
         stats['transaction_journals_reprocessed'] = True
+        if txn_ids:
+            # "After" months: a re-dated transaction lands in a new month.
+            scope['affected_periods'] |= _months_of(XeroJournals.objects.filter(
+                organisation=tenant, transaction_source__transactions_id__in=txn_ids))
+        _timed('reprocess_transactions', t0)
         logger.info(f'Journals processed for tenant {tenant_id}')
 
         # Honest "last run" stamp for the console's Process Journals card.
@@ -441,12 +623,17 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
             print(f"[PROCESS] REBUILD mode: forcing full rebuild of trail balance")
         if exclude_manual_journals:
             print(f"[PROCESS] Excluding manual journals - only using regular journals for trail balance")
+        t0 = time.time()
+        periods = None if scope is None else sorted(scope['affected_periods'])
+        if periods is not None:
+            print(f"[PROCESS] Trail balance scope: {len(periods)} month(s) {periods}")
+            stats['affected_periods'] = [f'{y:04d}-{m:02d}' for y, m in periods]
         tb_result = create_trail_balance(
             tenant_id,
             incremental=not rebuild_trail_balance,
             rebuild=rebuild_trail_balance,
             exclude_manual_journals=exclude_manual_journals,
-            affected_periods=None if rebuild_trail_balance else affected_periods,
+            affected_periods=periods,
         )
         stats['trail_balance_created'] = True
         trail_balance_skipped = bool(tb_result.get('skipped')) if isinstance(tb_result, dict) else False
@@ -455,14 +642,17 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
             print(f"[PROCESS] Trail balance unchanged; rebuild skipped")
         else:
             print(f"[PROCESS] ✓ Trail balance created")
-        
+        _timed('trail_balance', t0)
+
         # Step 3: Calculate balance_to_date for balance sheet accounts (optional)
         if calculate_pnl_ytd and not stats.get('trail_balance_skipped'):
+            t0 = time.time()
             logger.info(f'Start calculating balance sheet balance_to_date for tenant {tenant_id}')
             print(f"[PROCESS] Starting balance sheet balance_to_date calculation for tenant {tenant_id}")
-            calculate_balance_sheet_balance_to_date(tenant_id)
+            calculate_balance_sheet_balance_to_date(tenant_id, affected_periods=periods)
             stats['pnl_balance_to_date_calculated'] = True
             print(f"[PROCESS] ✓ Balance sheet balance_to_date calculated")
+            _timed('balance_to_date', t0)
         elif stats.get('trail_balance_skipped'):
             stats['pnl_balance_to_date_calculated'] = False
             print(f"[PROCESS] Skipped balance sheet balance_to_date calculation (no trail-balance changes)")
@@ -480,8 +670,12 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
         # stats['accounts_exported'] = True
         
         duration = time.time() - start_time
-        stats['duration_seconds'] = duration
-        
+        stats['duration_seconds'] = round(duration, 2)
+        # The one line to grep for when the build gets slow again.
+        logger.info('process_xero_data tenant=%s scope=%s duration=%.1fs steps=%s',
+                    tenant_id, stats['scope'], duration, step_seconds)
+        print(f"[PROCESS] Done in {duration:.1f}s ({stats['scope']}): {step_seconds}")
+
         return {
             'success': True,
             'message': f"Data processed for tenant {tenant_id}",
