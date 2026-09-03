@@ -56,6 +56,10 @@ from .findings_services import (
     BULK_MAX, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, allocate_ref, attachment_to_dict, build_queryset,
     clean_payload, comment_to_dict, current_fy, finding_to_dict, fy_options, summary_for, totals_for,
 )
+from apps.activity import models as A
+from apps.activity.services import bulk_changes, diff, record_activity, record_auditor_read
+
+from .comment_events import finding_ref
 from .comment_webhook import notify_comment_created, notify_comments_created
 from .models import (
     AuditFinding, AuditFindingAttachment, AuditFindingComment, sanitise_attachment_filename,
@@ -219,6 +223,11 @@ def _create_finding(request):
         except IntegrityError:
             if attempt == 2:
                 raise
+    record_activity(
+        request, A.FINDING_CREATED, target_kind='finding', target_id=finding.pk,
+        target_ref=finding_ref(finding),
+        changes={k: {'from': None, 'to': None if v is None else str(v)} for k, v in fields.items()},
+    )
     return Response(finding_to_dict(finding), status=status.HTTP_201_CREATED)
 
 
@@ -229,6 +238,11 @@ def finding_detail_view(request, pk: int):
     if finding is None:
         return Response({'detail': 'finding not found'}, status=status.HTTP_404_NOT_FOUND)
     if request.method == 'GET':
+        # Auditor reads of finding detail are on the record; standard users' are not.
+        record_auditor_read(
+            request, A.FINDING_VIEWED, target_kind='finding', target_id=finding.pk,
+            target_ref=finding_ref(finding),
+        )
         # Links are CAPPED here. The resolved form costs one query per link KIND, but
         # the payload itself is O(links) and a finding can legitimately accumulate
         # thousands (load testing put 6,000 on a single row). Serialising all of them
@@ -259,11 +273,52 @@ def finding_detail_view(request, pk: int):
     fields.pop('fy', None)
     fields.pop('ref', None)
     fields['updated_by'] = actor(request)
+    before = {k: getattr(finding, k, None) for k in fields}
     with transaction.atomic():
         for key, value in fields.items():
             setattr(finding, key, value)
         finding.save()
+    _record_finding_patch(request, finding, before, fields)
     return Response(finding_to_dict(finding))
+
+
+# The fields worth their own verb in the trail. "status: OPEN -> RESOLVED" is
+# the sentence someone reading the trail is looking for; a generic
+# `finding.updated` for everything would make them open every row to find it.
+_FIELD_ACTIONS = {
+    'status': A.FINDING_STATUS_CHANGED,
+    'owner': A.FINDING_OWNER_CHANGED,
+    'due_date': A.FINDING_DUE_CHANGED,
+    'amount': A.FINDING_AMOUNT_CHANGED,
+    'severity': A.FINDING_SEVERITY_CHANGED,
+    'category': A.FINDING_CATEGORY_CHANGED,
+    'title': A.FINDING_TITLE_CHANGED,
+}
+
+
+def _record_finding_patch(request, finding, before, fields):
+    """One event per named field that changed, plus one for the rest.
+
+    `updated_by` is excluded: it is bookkeeping the trail already carries in
+    `actor`, and an event saying it changed is pure noise.
+    """
+    watched = [f for f in fields if f != 'updated_by']
+    after = {k: getattr(finding, k, None) for k in watched}
+    changed = diff(before, after, watched)
+    if not changed:
+        return
+    ref = finding_ref(finding)
+    leftovers = {}
+    for field, delta in changed.items():
+        action = _FIELD_ACTIONS.get(field)
+        if action is None:
+            leftovers[field] = delta
+            continue
+        record_activity(request, action, target_kind='finding', target_id=finding.pk,
+                        target_ref=ref, changes={field: delta})
+    if leftovers:
+        record_activity(request, A.FINDING_UPDATED, target_kind='finding',
+                        target_id=finding.pk, target_ref=ref, changes=leftovers)
 
 
 _BAD_PARENT = 'parent_id must be the id of an existing comment on this finding'
@@ -319,6 +374,12 @@ def finding_comments_view(request, pk: int):
             finding=finding, parent=parent, text=text, author=actor(request),
         )
         notify_comment_created('finding', comment)
+    record_activity(
+        request, A.COMMENT_POSTED, target_kind='comment', target_id=comment.id,
+        target_ref=finding_ref(finding),
+        changes={'kind': 'finding', 'finding_id': finding.pk,
+                 'is_reply': comment.parent_id is not None, 'parent_id': comment.parent_id},
+    )
     return Response(comment_to_dict(comment), status=status.HTTP_201_CREATED)
 
 
@@ -432,6 +493,12 @@ def finding_attachments_view(request, pk: int):
             uploaded_by=actor(request),
             **extra,
         )
+    record_activity(
+        request, A.ATTACHMENT_UPLOADED, target_kind='attachment', target_id=attachment.pk,
+        target_ref=finding_ref(finding),
+        changes={'finding_id': finding.pk, 'name': original, 'size': upload.size,
+                 'content_type': attachment.content_type},
+    )
     return Response(attachment_to_dict(attachment), status=status.HTTP_201_CREATED)
 
 
@@ -443,8 +510,14 @@ def finding_attachment_delete_view(request, pk: int):
         return Response({'detail': 'attachment not found'}, status=status.HTTP_404_NOT_FOUND)
     stored_name = attachment.file.name if attachment.file else ''
     storage = attachment.file.storage if attachment.file else default_storage
+    # Captured BEFORE the delete — afterwards there is nothing left to describe.
+    deleted_desc = {'finding_id': attachment.finding_id, 'name': attachment.original_name,
+                    'size': attachment.size}
+    deleted_ref = finding_ref(attachment.finding)
     with transaction.atomic():
         attachment.delete()
+    record_activity(request, A.ATTACHMENT_DELETED, target_kind='attachment', target_id=pk,
+                    target_ref=deleted_ref, changes=deleted_desc)
     # Bytes go AFTER the row commit: a dangling file is recoverable garbage, but a live row
     # pointing at deleted bytes would 404 the console viewer. A storage failure is logged,
     # not raised — the row is authoritative and it is already gone.
@@ -531,6 +604,18 @@ def findings_bulk_view(request):
             )
             notify_comments_created('finding', created)
             commented = len(targets)
+    # ONE event per bulk ACTION, never one per finding — a 500-row bulk would
+    # otherwise bury every other event in the trail.
+    if fields and updated:
+        for field, action in (('status', A.FINDING_BULK_STATUS),
+                              ('owner', A.FINDING_BULK_OWNER),
+                              ('due_date', A.FINDING_BULK_DUE)):
+            if field in fields:
+                record_activity(request, action, target_kind='finding', source='bulk',
+                                changes=bulk_changes(targets, **{field: fields[field]}))
+    if comment is not None and commented:
+        record_activity(request, A.FINDING_BULK_COMMENT, target_kind='finding', source='bulk',
+                        changes=bulk_changes(targets, comment=comment))
     return Response({'updated': updated, 'commented': commented, 'unknown': unknown})
 
 

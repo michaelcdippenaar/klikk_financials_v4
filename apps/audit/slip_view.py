@@ -18,6 +18,9 @@ from django.db import connection
 from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotFound
 from django.views.decorators.http import require_GET
 
+from apps.activity import models as A
+from apps.activity.services import record_auditor_read
+
 
 def slip_signature(sha256: str) -> str:
     return hmac.new(settings.SECRET_KEY.encode(), sha256.encode(), hashlib.sha256).hexdigest()[:32]
@@ -46,4 +49,9 @@ def slip_file_view(request, sha256: str):
     resp = HttpResponse(bytes(data), content_type=ctype)
     resp["Content-Disposition"] = f'inline; filename="{filename or sha256}.{mime_ext or "bin"}"'
     resp["Cache-Control"] = "private, max-age=3600"
+    # This view is signed-URL, not JWT — most hits carry no credential at all and
+    # resolve to no user, which record_auditor_read skips. When the console DOES
+    # send the Bearer token, an auditor's look at a slip goes on the record.
+    record_auditor_read(request, A.SLIP_VIEWED, target_kind='receipt', target_id=sha256,
+                        target_ref=filename or sha256[:12])
     return resp

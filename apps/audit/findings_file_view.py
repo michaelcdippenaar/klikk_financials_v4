@@ -26,6 +26,9 @@ import os
 from django.http import HttpResponse, HttpResponseForbidden, HttpResponseNotFound
 from django.views.decorators.http import require_GET
 
+from apps.activity import models as A
+from apps.activity.services import record_auditor_read
+
 from .findings_services import attachment_signature
 from .findings_views import ATTACHMENT_ALLOWED_TYPES
 from .models import AuditFindingAttachment
@@ -83,4 +86,9 @@ def finding_attachment_file_view(request, pk: int):
         resp['Content-Disposition'] = f'inline; filename="{filename}"'
     resp['X-Content-Type-Options'] = 'nosniff'
     resp['Cache-Control'] = 'private, max-age=3600'
+    # Signed-URL view: most hits carry no credential and resolve to no user, which
+    # record_auditor_read skips. When the console sends the Bearer token, an
+    # auditor's look at an attachment goes on the record.
+    record_auditor_read(request, A.ATTACHMENT_VIEWED, target_kind='attachment', target_id=pk,
+                        target_ref=filename)
     return resp

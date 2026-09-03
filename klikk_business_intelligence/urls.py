@@ -76,6 +76,10 @@ urlpatterns = [
     # Year-end audit check registry (read-only; raw SQL over audit.checks)
     path('audit/', include('apps.audit.urls')),
 
+    # Activity trail — OUTSIDE /audit/ so auditor accounts cannot read it
+    # (AuditorGateMiddleware 403s every non-/audit/ path for them).
+    path('api/activity/', include('apps.activity.urls')),
+
     # Deployment webhook
     path('deployment/', include('apps.deployment.urls')),
 

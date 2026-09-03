@@ -75,6 +75,7 @@ INSTALLED_APPS = [
     'apps.personal_expenses',  # Personal-expenses classification + reporting
     'apps.audit',  # Year-end audit registry (audit.checks / check_runs / check_results)
     'apps.receipts',  # Audit -> Receipts review workflow over whatsapp.klikk_slips
+    'apps.activity',  # Append-only "who did what" trail over the audit surface
     'apps.pricelist',  # Equipment rate card + effective-dated prices + quote builder
     'apps.kb',  # Books knowledge base — read-only allocation doctrine (kb schema)
 ]
