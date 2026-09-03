@@ -95,6 +95,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS cube_comments_subject_author_uq
     ON app.cube_comments (subject_type, subject_key, author_key);
 CREATE INDEX IF NOT EXISTS cube_comments_tags_gin ON app.cube_comments USING gin (tags);
 
+-- WHO SHOULD ACT -- which is not who wrote it, and not whether it is done.
+--
+-- The register gained a second kind of reader the moment a bookkeeper joined
+-- the loop: MC raises a point against a figure, someone else answers it, and
+-- MC closes it. That needs a fourth axis. `author_key` is who WROTE the note,
+-- `status` is whether it has been WORKED, `decision` is the VERDICT -- and
+-- none of the three can say who the point is waiting on. Overloading any of
+-- them would make "my queue" unanswerable without guessing, which for a work
+-- queue is the whole feature.
+--
+-- Stored RESOLVED (a username), never as the prose that produced it. An
+-- '@anzelle' typed into a note is input; a queue rebuilt by re-reading prose
+-- breaks the first time someone writes '@anzelle?' or an account is renamed,
+-- and it breaks silently -- the point then sits in nobody's list while looking
+-- assigned, which is worse than never having been assigned at all.
+--
+-- Partial index: nearly every row is assigned to nobody, and the only query
+-- that matters is "the ones that are".
+ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS assignee_key text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS cube_comments_assignee_idx ON app.cube_comments (assignee_key)
+    WHERE assignee_key <> '';
+
 -- A comment is a CONVERSATION, not a note.
 --
 -- The register upserts one row per (subject, author): re-posting edits your own
@@ -276,7 +298,7 @@ def _author_identity(request, declared):
 
 
 COLS = ('id, cell_key, subject_type, subject_key, subject_label, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
-        'filters, cell_value, comment, author, author_key, status, decision, created_at, updated_at, '
+        'filters, cell_value, comment, author, author_key, assignee_key, status, decision, created_at, updated_at, '
         'tags')
 
 
@@ -342,6 +364,37 @@ def _norm_decision(raw):
                      % (raw, ', '.join(sorted(DECISIONS))))
 
 
+def _resolve_assignee(raw, *, requester=''):
+    """Turn what a writer TYPED into a username the queue can be built from.
+
+    Resolution happens here, at WRITE time, and the answer is what gets stored.
+    The alternative -- keeping '@anzelle' as prose and re-reading it whenever a
+    queue is built -- fails the first time someone writes '@anzelle?' or an
+    account is renamed, and it fails SILENTLY: the point then sits in nobody's
+    list while still looking assigned on the page that raised it.
+
+    So an unknown name is a 400, never a quiet drop. Assigning work to a
+    misspelling and being told nothing is the one outcome a review loop cannot
+    survive -- the raiser believes it was passed on and the preparer never sees
+    it.
+
+    'me' resolves to the caller, so the console, the add-in and an agent on the
+    MCP path can all say the same thing and mean themselves.
+    """
+    name = str(raw or '').strip().lstrip('@')
+    if not name:
+        return ''
+    if name.lower() == 'me':
+        if not requester:
+            raise ValueError("'me' needs a signed-in caller to resolve to")
+        return requester
+    from django.contrib.auth import get_user_model
+    match = get_user_model().objects.filter(username__iexact=name).first()
+    if match is None:
+        raise ValueError('no account named %r \u2014 assign to a user that exists' % name)
+    return match.get_username()
+
+
 SUBJECT_KINDS = {
     'cube_cell': 'A figure in a cube or PivotTable',
     'bank_txn': 'A transaction on a bank account, as the bank sent it',
@@ -390,6 +443,7 @@ def _shape(d):
         'comment': d['comment'],
         'author': d['author'],
         'author_key': d['author_key'],
+        'assignee_key': d['assignee_key'],
         'status': d['status'],
         'decision': d['decision'],
         'tags': list(d['tags'] or []),
@@ -436,7 +490,8 @@ def list_comments(params, *, with_reply_counts=False, with_replies=False):
     run the same SQL: two copies drift the first time a filter is added to one.
 
     Filters: status (default 'open', 'all' for every status), subject_type,
-    subject_key, author (author_key), tenant (tenant_id), measure, decision,
+    subject_key, author (author_key), assignee (assignee_key), tenant (tenant_id),
+    measure, decision,
     tag / tags (containment -- ALL of them, so a tag filter NARROWS), q (free
     text over the note, the subject label and the author), limit, offset.
 
@@ -454,7 +509,8 @@ def list_comments(params, *, with_reply_counts=False, with_replies=False):
 
     for param, col in (('subject_type', 'subject_type'), ('subject_key', 'subject_key'),
                        ('author', 'author_key'), ('tenant', 'tenant_id'),
-                       ('measure', 'measure'), ('decision', 'decision')):
+                       ('measure', 'measure'), ('decision', 'decision'),
+                       ('assignee', 'assignee_key')):
         val = (params.get(param) or '').strip()
         if val:
             where.append('%s = %%s' % col)
@@ -583,6 +639,17 @@ class XeroCubeCommentsView(APIView):
         if tags is None:
             tags = []
 
+        try:
+            assignee = _resolve_assignee(d.get('assignee'), requester=author_key)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=http.HTTP_400_BAD_REQUEST)
+        # An OMITTED assignee must leave the stored one alone; present-and-empty
+        # is the explicit unassign. Same data-loss guard receipts already carries
+        # (tests_archive.py: "a decision-less PATCH blanked the decision") -- an
+        # add-in re-sync that does not know about assignment must not silently
+        # empty somebody's queue.
+        assign_set = '  assignee_key = EXCLUDED.assignee_key, ' if 'assignee' in d else ''
+
         with connection.cursor() as c:
             c.execute(
                 # subject_type/subject_key are the register's identity since the
@@ -593,16 +660,17 @@ class XeroCubeCommentsView(APIView):
                 # (cell_key, author_key) raised ProgrammingError on every POST.
                 'INSERT INTO app.cube_comments '
                 '(cell_key, subject_type, subject_key, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
-                ' filters, cell_value, comment, author, author_key, status, tags) '
-                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                ' filters, cell_value, comment, author, author_key, assignee_key, status, tags) '
+                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
                 'ON CONFLICT (subject_type, subject_key, author_key) DO UPDATE SET '
                 '  comment = EXCLUDED.comment, cell_value = EXCLUDED.cell_value, '
-                '  author = EXCLUDED.author, status = EXCLUDED.status, '
+                '  author = EXCLUDED.author, status = EXCLUDED.status, ' +
+                assign_set +
                 '  tags = EXCLUDED.tags, updated_at = now() '
                 'RETURNING ' + COLS,
                 [key, 'cube_cell', key, tenant, measure, list(row_dims), list(row_path), list(col_dims),
                  col_path, json.dumps(filters), val, comment,
-                 author_name, author_key, (d.get('status') or 'open').strip(), tags],
+                 author_name, author_key, assignee, (d.get('status') or 'open').strip(), tags],
             )
             row = c.fetchone()
         out = _row_to_dict(row)
@@ -836,6 +904,27 @@ class CommentsView(APIView):
             return Response({'error': str(exc), 'decisions': DECISIONS},
                             status=http.HTTP_400_BAD_REQUEST)
 
+        # Assignment is a property of the COMMENT, not of the console that
+        # usually writes it. An agent raising a correction request from the
+        # Excel pane goes through THIS door, and a request that cannot name who
+        # should act lands in nobody's queue.
+        try:
+            assignee = _resolve_assignee(d.get('assignee'), requester=author_key)
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=http.HTTP_400_BAD_REQUEST)
+        assign_set = '  assignee_key = EXCLUDED.assignee_key, ' if 'assignee' in d else ''
+
+        # `_norm_tags` returns None for ABSENT, documented as "leave as is" --
+        # but this door passed that None straight into a NOT NULL column, so
+        # every post here without a `tags` key was a 500. It is the door the MCP
+        # and an Excel-side agent use, and a correction request that 500s is a
+        # request nobody ever sees. Absent now means what the helper says it
+        # means: [] on insert, stored tags untouched on conflict.
+        tags = _norm_tags(d.get('tags'))
+        tags_set = '  tags = EXCLUDED.tags, ' if tags is not None else ''
+        if tags is None:
+            tags = []
+
         if not comment:
             with connection.cursor() as c:
                 c.execute('DELETE FROM app.cube_comments WHERE subject_type = %s '
@@ -856,12 +945,13 @@ class CommentsView(APIView):
                 'INSERT INTO app.cube_comments '
                 '(cell_key, subject_type, subject_key, subject_label, tenant_id, measure, '
                 ' row_dims, row_path, col_dims, col_path, filters, cell_value, '
-                ' comment, author, author_key, status, decision, tags) '
-                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                ' comment, author, author_key, assignee_key, status, decision, tags) '
+                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
                 'ON CONFLICT (subject_type, subject_key, author_key) DO UPDATE SET '
                 '  comment = EXCLUDED.comment, subject_label = EXCLUDED.subject_label, '
-                '  tags = EXCLUDED.tags, cell_value = EXCLUDED.cell_value, '
-                '  filters = EXCLUDED.filters, status = EXCLUDED.status, '
+                '  cell_value = EXCLUDED.cell_value, '
+                '  filters = EXCLUDED.filters, status = EXCLUDED.status, ' +
+                tags_set + assign_set +
                 '  decision = EXCLUDED.decision, updated_at = now() '
                 'RETURNING ' + COLS,
                 [
@@ -871,8 +961,8 @@ class CommentsView(APIView):
                     subject_type, subject_key, (d.get('subject_label') or '').strip()[:300],
                     (context.get('tenant') or '').strip(), (d.get('measure') or '').strip(),
                     [], [], [], '', json.dumps(context), val,
-                    comment, author_name, author_key,
-                    (d.get('status') or 'open').strip(), decision, _norm_tags(d.get('tags')),
+                    comment, author_name, author_key, assignee,
+                    (d.get('status') or 'open').strip(), decision, tags,
                 ],
             )
             row = c.fetchone()
