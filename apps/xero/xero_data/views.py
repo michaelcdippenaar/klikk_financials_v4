@@ -48,7 +48,9 @@ class XeroJournalSearchView(APIView):
     - account: account code or account name fragment
     - contact: contact name fragment
     - reference: reference fragment
-    - journal_type: 'journal' or 'transaction' (journals are mirrored under both)
+    - journal_type: one of the values /journals/filters/ reports. Omit it and the
+      frozen legacy 'journal' mirror is excluded, matching the pivot endpoint and
+      the trial balance; pass journal_type=journal to inspect the mirror itself.
     - description: description fragment
     - limit/offset: pagination, max limit 1000
     """
@@ -110,6 +112,25 @@ class XeroJournalSearchView(APIView):
         journal_type = (request.query_params.get('journal_type') or '').strip()
         if journal_type:
             qs = qs.filter(journal_type__iexact=journal_type)
+        else:
+            # Same default as the pivot endpoint (pivot_views.apply_journal_filters)
+            # and the trial balance (xero_cube/models.py: journal_type != 'journal').
+            #
+            # 'journal' is the legacy Xero Journals API mirror, frozen at
+            # 2025-11-25 since Xero moved that API to the Advanced tier in
+            # March 2026. It re-states the SAME entries the live transaction /
+            # manual_journal / system_journal feeds carry, under its own journal
+            # numbers -- so a blank type used to return the ledger twice and any
+            # PivotTable built off these rows summed every figure about double.
+            # Measured against Xero's own Trial Balance (2026-09-03): the mirror
+            # alone reproduced Xero's FY-to-date P&L exactly for every account
+            # (Dippenaar 47/47, Klikk 77/77 within 0.05), and adding it to the
+            # live feeds overstated the total by 2.01x.
+            #
+            # This costs the ability to see the mirror by accident, which is the
+            # point; journal_type=journal is the deliberate way in, and
+            # `mirror_excluded` in the response says which mode you are in.
+            qs = qs.exclude(journal_type='journal')
 
         amount_param = (request.query_params.get('amount') or '').strip()
         if amount_param:
@@ -196,6 +217,10 @@ class XeroJournalSearchView(APIView):
             'count': total_count,
             'limit': limit,
             'offset': offset,
+            # True when no journal_type was asked for and the frozen legacy
+            # mirror was therefore left out. The add-in reads this to say which
+            # ledger the sheet is showing rather than guessing from the filter.
+            'mirror_excluded': not journal_type,
             'results': results,
         })
 

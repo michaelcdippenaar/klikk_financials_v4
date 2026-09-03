@@ -147,9 +147,28 @@ Revoke by deleting the `excel-addin` row from `authtoken_token`.
 
 Three properties of the journal mirror that silently corrupt totals if ignored:
 
-1. `journal_type` mirrors every entry four ways (`journal` 142,437 /
-   `transaction` 65,883 / `system_journal` 56,067 / `manual_journal` 7,377).
-   Summing across all four double-counts.
+1. `journal_type` has ONE mirror, not four. `journal` (142,437 rows) is the
+   legacy Xero Journals API feed, frozen at 2025-11-25 — Xero moved that API to
+   the Advanced tier in March 2026 — and it re-states the same entries the live
+   feeds carry, under its own journal numbers. The live feeds `transaction`
+   (66,299), `system_journal` (56,067) and `manual_journal` (7,439) are
+   COMPLEMENTARY: each covers source types the others do not, and together they
+   are the whole ledger. No tenant even carries all four values — Klikk has no
+   `system_journal`, Tremly has no `journal`.
+
+   So summing `journal` alongside the live feeds double-counts (measured
+   2026-09-03 against Xero's own Trial Balance: the mirror alone reproduced
+   Xero's FY-to-date P&L exactly, 47/47 accounts for Dippenaar Family and 77/77
+   for Klikk within the project's 0.05 tolerance, and adding it to the live
+   feeds overstated the total by 2.01×). Summing the three live feeds together
+   does not — that IS the reporting basis.
+
+   Both `/journals/pivot/` and `/journals/search/` therefore exclude `journal`
+   when no `journal_type` is given, matching the trial balance
+   (`xero_cube/models.py`). Pass `journal_type=journal` to inspect the mirror
+   deliberately; the search response's `mirror_excluded` flag says which mode
+   you are in.
+
 2. `contact_id` is NULL on **every** `journal` row. Xero hangs the supplier off
    the source document, so the supplier is resolved via
    `transaction_source → contact` (`supplier_name`, with `supplier_via`

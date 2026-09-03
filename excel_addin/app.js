@@ -210,7 +210,7 @@
     [
       'app', 'boot', 'connLabel', 'btnSettings', 'settingsPanel', 'baseUrl', 'token',
       'btnConnect', 'btnForget', 'settingsMsg', 'queryPanel', 'tenant', 'journalType',
-      'typeHint', 'dateFrom', 'dateTo', 'account', 'accountList', 'contact', 'reference',
+      'typeHint', 'typeMirrorHint', 'dateFrom', 'dateTo', 'account', 'accountList', 'contact', 'reference',
       'contactList', 'description', 'amount', 'q', 'maxRows', 'countLine', 'btnLoad', 'btnCount',
       'detailPanel', 'btnPivot', 'cubePanel', 'measure', 'btnResetComments',
       'queryPanel', 'refreshPanel', 'commentPanel', 'settingsPanel',
@@ -450,7 +450,8 @@
     fill(el.tenant, opts.tenants || [], 'All entities', function (t) {
       return { value: t.tenant_id, label: t.tenant_name || t.tenant_id };
     });
-    fill(el.journalType, (opts.journal_types || []).map(function (t) { return t; }), 'All types',
+    fill(el.journalType, (opts.journal_types || []).map(function (t) { return t; }),
+      'Ledger (excludes legacy mirror)',
       function (t) { return { value: t, label: t }; });
 
     el.accountList.innerHTML = '';
@@ -492,7 +493,13 @@
   }
 
   function updateTypeHint() {
-    el.typeHint.hidden = !!el.journalType.value;
+    // The blank type is now a real control, not a trap: search and pivot both
+    // drop the frozen 'journal' mirror when no type is asked for, so the
+    // default ties to the trial balance. The only unsafe selection left is the
+    // mirror itself, chosen deliberately.
+    var t = (el.journalType.value || '').toLowerCase();
+    el.typeHint.hidden = !!t;
+    el.typeMirrorHint.hidden = t !== 'journal';
   }
 
   /* ── API ───────────────────────────────────────────────── */
@@ -653,7 +660,10 @@
       var opt = el.tenant.querySelector('option[value="' + qy.tenant + '"]');
       bits.push(opt ? opt.textContent : 'one entity');
     }
-    if (qy.journal_type) bits.push(qy.journal_type);
+    // A saved sheet has to say which ledger it holds. The blank type is not
+    // "everything" any more -- both endpoints drop the frozen 'journal' mirror
+    // by default -- so name the cut either way.
+    bits.push(qy.journal_type ? qy.journal_type : 'ledger (no legacy mirror)');
     if (qy.date_from || qy.date_to) bits.push((qy.date_from || '…') + ' to ' + (qy.date_to || '…'));
     if (qy.account) bits.push('account ' + qy.account);
     if (qy.contact) bits.push('contact ' + qy.contact);

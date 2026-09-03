@@ -102,10 +102,14 @@
       <select id="tenant"><option value="">All entities</option></select>
 
       <label for="journalType">Journal type</label>
-      <select id="journalType"><option value="">All types</option></select>
-      <p class="hint hint--warn" id="typeHint" hidden>
-        Xero mirrors each entry under more than one type. Leaving this on “All types”
-        double-counts totals — pick one before summing.
+      <select id="journalType"><option value="">Ledger (excludes legacy mirror)</option></select>
+      <p class="hint" id="typeHint" hidden>
+        The default leaves out the frozen legacy <code>journal</code> mirror, so totals
+        tie to the trial balance. Pick a single type to narrow further.
+      </p>
+      <p class="hint hint--warn" id="typeMirrorHint" hidden>
+        The legacy <code>journal</code> mirror is frozen at 2025-11-25 and restates the
+        same entries the live feeds carry. These totals will not tie to any report.
       </p>
 
       <div class="grid2">

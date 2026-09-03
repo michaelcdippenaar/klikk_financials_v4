@@ -260,10 +260,15 @@ def apply_journal_filters(qs, p):
         # 'journal' mirror is frozen at 2025-11-25 and cannot be refreshed. It
         # duplicates the live transaction / manual_journal / system_journal
         # feeds, which are complementary and together form the whole ledger.
+        # Verified 2026-09-03 against Xero's own Trial Balance: the mirror
+        # alone reproduced Xero's FY-to-date P&L for every account (Dippenaar
+        # 47/47, Klikk 77/77 within 0.05) and adding it to the live feeds
+        # overstated the total by 2.01x; no tenant carries all four types.
         # The trial balance already excludes it (xero_cube/models.py:
-        # journal_type != 'journal'); the cube MUST match or the two disagree
-        # on every figure. Pass journal_type=journal to inspect the legacy
-        # mirror deliberately.
+        # journal_type != 'journal'), and since 2026-09-03 so does the search
+        # endpoint (views.XeroJournalSearchView) -- all three MUST agree or
+        # they disagree on every figure. Pass journal_type=journal to inspect
+        # the legacy mirror deliberately.
         qs = qs.exclude(journal_type='journal')
 
     date_from = parse_date(p.get('date_from') or '')
