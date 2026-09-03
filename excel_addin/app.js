@@ -632,6 +632,50 @@
     };
   }
 
+  /* The same cut WITHOUT dimf.
+
+     journals/pivot/members/ deliberately does not apply dimf -- it runs
+     apply_journal_filters only -- so the members of a dimension depend on the
+     tenant, the date window and the rest of the journal vocabulary, and NOT on
+     which subset is currently selected. Keying the member cache on the full
+     toParams would churn it on every subset edit and, worse, invite the reading
+     that the list narrows itself (it does not: if it did, "the subset covers
+     every member" would be trivially true and every anchor would collapse). */
+  function journalParams(qy) {
+    var p = toParams(qy);
+    delete p.dimf;
+    return p;
+  }
+
+  /* {dim: {members: [...], truncated: bool}} for the anchor's all-members test.
+     Cached per dimension per cut; one GET each, only for dimensions that
+     actually carry a subset. A failure leaves the entry absent, which
+     anchorDimfParam reads as "cannot prove it" and keeps the verbose form. */
+  var dimTotalCache = {};
+
+  async function loadDimTotals(keys, qy) {
+    var base = JSON.stringify(journalParams(qy));
+    var out = {};
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var ck = k + '::' + base;
+      if (!dimTotalCache[ck]) {
+        try {
+          var d = await apiGet('/xero/data/journals/pivot/members/',
+            Object.assign({}, journalParams(qy), { dim: k }));
+          dimTotalCache[ck] = {
+            members: (d.members || []).map(function (m) { return m.value; }),
+            truncated: !!d.truncated
+          };
+        } catch (e) {
+          continue;                  // unprovable: the verbose anchor stands
+        }
+      }
+      out[k] = dimTotalCache[ck];
+    }
+    return out;
+  }
+
   function describe(qy) {
     var bits = [];
     if (qy.tenant) {
@@ -2220,9 +2264,22 @@
     /* The dimension filters ride on the query, not just the spec, because the
        comment anchor is built from the query. Without this, the same row under
        "FY2026 only" and under no filter would share an anchor -- two different
-       figures, one comment. */
-    var df = LIB.dimfParam(spec);
-    qy.dimf = df.dimf || '';
+       figures, one comment.
+
+       THIS IS THE SPLIT between the two forms, and it is load-bearing.
+       fetchCube overrides this dimf with LIB.dimfParam(spec), whose list order
+       IS the row/column layout order; qy.dimf reaches nothing but the anchor.
+       So the anchor gets the collapsed form -- a subset naming every member of
+       a dimension is the same cut as no filter, and is written the same way --
+       while the query keeps the user's hand-made arrangement intact. Do not
+       "simplify" these into one call: collapsing the query form silently
+       discards a layout someone built by hand. */
+    var narrowed = Object.keys(spec.filters || {}).filter(function (k) {
+      return (spec.filters[k] || []).length;
+    });
+    if (narrowed.length) progress(0, 1, 'Reading dimension members…');
+    var totals = await loadDimTotals(narrowed, qy);
+    qy.dimf = LIB.anchorDimfParam(spec, totals).dimf || '';
 
     progress(0, 1, 'Aggregating in Postgres…');
     var cube = await fetchCube(qy, spec);

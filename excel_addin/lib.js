@@ -66,6 +66,53 @@
     return Object.keys(live).length ? { dimf: JSON.stringify(live) } : {};
   }
 
+  /* The SAME filters, written for the comment ANCHOR rather than for the query.
+     Two forms on purpose, and they must not be merged back into one.
+
+     dimfParam above is the QUERY. Its list order IS the layout order -- the
+     server lays rows and columns out in exactly that sequence -- so a subset
+     naming every member still carries the arrangement the user built by hand.
+     Collapsing it there would silently throw that arrangement away.
+
+     The ANCHOR is only ever asked "which cut of the ledger is this figure
+     from?", and order cannot change that answer. A subset that names EVERY
+     member of a dimension narrows nothing, so it is the same cut as no filter
+     at all -- and the add-in already writes "no filter" as an omitted key
+     (README: "An empty subset means ALL members, never none"). Writing the
+     same cut two different ways is what buried MC's comments under a dimf
+     enumerating twelve years and a hundred and forty-four months.
+
+     `totals` is {dim: {members: [...], truncated: bool}} from
+     journals/pivot/members/?dim=<key> -- note ?dim=, not ?dimension=.
+
+     Collapsing is deliberately PROVE-IT-OR-KEEP-IT. A dimension is dropped
+     only when we hold its full member list and the subset covers every value
+     in it. No entry, a capped list, or an empty one proves nothing, so the
+     verbose form survives -- a filter wrongly called "all" would re-point a
+     comment at a figure it was never written about. */
+  function anchorDimfParam(spec, totals) {
+    var f = spec && spec.filters ? spec.filters : {};
+    var live = {};
+    Object.keys(f).forEach(function (k) {
+      var vals = f[k];
+      if (!vals || !vals.length) return;          // already means ALL members
+      var t = totals && totals[k];
+      if (t && t.truncated !== true && t.members && t.members.length) {
+        var picked = {};
+        vals.forEach(function (v) { picked[String(v)] = true; });
+        // Coverage, not a count: a subset can hold values that are no longer
+        // in the member list because the journal filters moved under it, so
+        // equal LENGTHS do not mean equal SETS.
+        var coversAll = t.members.every(function (m) {
+          return picked[String(m)] === true;
+        });
+        if (coversAll) return;                    // narrows nothing -> omit
+      }
+      live[k] = vals.slice();
+    });
+    return Object.keys(live).length ? { dimf: JSON.stringify(live) } : {};
+  }
+
   /* rtotals / ctotals — which fields carry a total.
 
      Each is sent ONLY when it differs from the server's default, so an
@@ -216,6 +263,7 @@
   return {
     depthRuns: depthRuns,
     dimfParam: dimfParam,
+    anchorDimfParam: anchorDimfParam,
     totalsParams: totalsParams,
     samePrefix: samePrefix,
     toSerial: toSerial,
