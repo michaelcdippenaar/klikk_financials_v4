@@ -4,6 +4,7 @@ The cube-comment register and its reply threads, on the AUDIT surface.
     GET  /audit/cube-comments/                       the register (+ reply_count)
     GET  /audit/cube-comments/<id>/replies/          one thread, oldest first
     POST /audit/cube-comments/<id>/replies/          {text, parent_id?}
+    GET  /audit/cube-comments/<id>/context/          the lines captured at raise time
 
 Why here and not under /xero/data/: the comment register lives in the Xero app
 because that is where cube cells are, but ``/xero/data/...`` is the general
@@ -125,3 +126,42 @@ def _truthy(raw):
     if isinstance(raw, bool):
         return raw
     return str(raw or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def cube_comment_context_view(request, comment_id: int):
+    """The lines behind a point, as captured when it was raised.
+
+    This is the route that makes the preparer loop workable. The live drill
+    lives under ``/xero/data/``, where the auditor role is 403 on every path --
+    so a bookkeeper could be assigned a point and answer it, but never see the
+    transaction it was about, which is the single thing that would have made
+    her day easier.
+
+    Granting her the drill would have meant opening the general ledger to an
+    account deliberately kept out of it. Reading a CAPTURED context does not:
+    the evidence was resolved once, by someone who already had access, and is
+    served here as stored data. Her access does not widen by one route.
+
+    READ ONLY, and there is no POST here on purpose. Capturing runs a ledger
+    query, and the auditor gate exists precisely so that an outside party
+    cannot make this server do work against the books. Capture stays on the
+    cube door under ``/xero/data/``, where only a full-access account reaches
+    it -- the same split as the register itself.
+    """
+    comment = replies.get_comment(comment_id)
+    if comment is None:
+        return Response({'detail': 'comment not found'}, status=status.HTTP_404_NOT_FOUND)
+    record_auditor_read(
+        request, A.CUBE_COMMENT_VIEWED, target_kind='cube_comment',
+        target_id=comment_id, target_ref=replies.subject_ref(comment),
+    )
+    context = pivot_comments.fetch_context(comment_id)
+    if context is None:
+        # An empty shape rather than a 404: "nothing was captured for this
+        # point" is a different answer from "no such point", and a preparer
+        # seeing 404 would reasonably think the point had been withdrawn.
+        return Response({'comment_id': comment_id, 'captured_at': None,
+                         'lines': [], 'line_count': 0})
+    return Response(context)

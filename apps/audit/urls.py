@@ -44,6 +44,7 @@ urlpatterns = [
     path('cube-comments/', cube_comment_views.cube_comments_view, name='cube_comments'),
     path('cube-comments/<int:comment_id>/replies/',
          cube_comment_views.cube_comment_replies_view, name='cube_comment_replies'),
+    path('cube-comments/<int:comment_id>/context/', cube_comment_views.cube_comment_context_view, name='cube_comment_context'),
 
     # --- findings register: fixed-segment routes (MUST precede findings/<int:pk>/) ---
     path('findings/summary/', findings_views.findings_summary_view, name='findings_summary'),
