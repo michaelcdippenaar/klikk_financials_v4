@@ -23,13 +23,18 @@ URL = '/xero/data/journals/pivot/comments/%s/assign/'
 
 
 class AssignByIdTests(TestCase):
-    @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
+    def setUp(self):
+        # The DDL guard is a MODULE GLOBAL. An earlier TestCase in the same run
+        # sets it True and then has its DDL rolled back with its transaction, so
+        # a setUpClass call here is a no-op against a database that no longer has
+        # the table. That is why this ran green in isolation and errored 13 times
+        # in CI -- taking the row-forking test, the whole point of this file,
+        # with it. Reset both flags per test, as every sibling module does.
+        cube_mentions._ready = False
+        pivot_comments._ready = False
         pivot_comments._ensure_table()
         cube_mentions.ensure_tables()
 
-    def setUp(self):
         self.mc = U.objects.create_user(username='mc-assign', email='mc-assign@x.test',
                                         password='pass12345!')
         self.mc.is_superuser = True; self.mc.is_staff = True
