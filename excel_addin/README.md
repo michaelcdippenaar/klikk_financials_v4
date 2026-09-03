@@ -105,3 +105,25 @@ Sideload on macOS by copying `manifest.xml` into
 Excel. Everything else is fetched over HTTPS, so updating the served files
 updates every installed client — no re-sideload needed unless `manifest.xml`
 itself changes.
+
+**Bump `<Version>` on every manifest change.** Excel caches a sideloaded
+manifest by `Id` + `Version`, at
+
+```
+~/Library/Containers/com.microsoft.Excel/Data/Library/Application Support/
+  Microsoft/Office/16.0/Wef/{…}/…/Manifests/<id>_<version>
+```
+
+and that cached copy is the one that runs. Edit the file in `wef/` without
+touching the version and Excel keeps the old manifest forever — the change
+looks applied on disk and does nothing, with no error anywhere. This cost a
+debugging round on 2026-09-03 when `AutoOpenTaskpane` silently never loaded.
+Compare the two files by size when a manifest change appears to have no effect.
+
+**A sideloaded add-in does not put its ribbon tab up on its own.** On a fresh
+Excel start the **Klikk** tab is absent until the add-in is activated once from
+**Add-ins → Developer Add-ins → Klikk Journals**; after that it stays for the
+session. `AutoOpenTaskpane` does not change this — it re-opens the *task pane*
+for a workbook carrying the `Office.AutoShowTaskpaneWithDocument` flag, and a
+brand-new blank workbook carries no flag. To get the pane on every new
+workbook, set the flag in a workbook and save it as the default template.
