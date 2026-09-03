@@ -519,6 +519,60 @@ That endpoint is safe to test against because it does **not** apply `dimf` —
 narrow itself as the subset changes. If that ever stops being true, every
 anchor collapses to nothing, and the check must be removed rather than patched.
 
+### The collapse rule is part of comment IDENTITY — do not change it casually
+
+`cell_key` is derived from the collapsed form, so `anchorDimfParam` does not
+just decide how an anchor *reads*. It decides which stored comment a cell **is**.
+
+Change what it collapses and the add-in computes a different key for a cell that
+already carries a comment. That does not raise an error anywhere. It writes a
+SECOND comment on the same figure, while MC's original sits under the old key —
+silent duplication, which is the exact failure the anchor exists to prevent.
+
+`app.cube_comments` was migrated on 2026-09-03 to match **this** implementation:
+per row, under that row's own journal filters, using the same
+`apply_journal_filters` + labeller + `MAX_MEMBERS` truncation refusal that
+`anchorDimfParam` relies on. The stored register and this function therefore
+agreed as of that date, and this function is the live rule — it runs on every
+Build, so any other implementation must follow it, not the reverse.
+
+It ran in **two passes, and both moved 56 rows**. That repetition is real, not a
+transcription slip — check it before "correcting" it:
+
+| Pass | Collapsed | Rows | Backup |
+|---|---|---|---|
+| 1 | `account`, `month`, `quarter`, `year` | 56 of 113 | `app.cube_comments_anchor_norm_20260903` |
+| 2 | `report` — the dimension pass 1 omitted | 56 of 113 | `app.cube_comments_anchor_norm2_20260903` |
+
+Pass 2 is the one that brought the register into agreement with this function,
+with 0 collisions. **Both backup tables must survive**: neither alone reverses
+the migration.
+
+That migration's first pass got it wrong in a way worth knowing, because it is
+how this defect will recur: it approximated the rule with a precomputed
+"universe" dict of four dimensions instead of reproducing it, and `report` was
+not one of the four — so 56 rows kept a verbose `report` the add-in collapses.
+The approximation was not the same *kind* of object as the members call, and
+nothing errored. If you must reimplement this rule somewhere else, reproduce it
+against `journals/pivot/members/` rather than modelling it, record the date it
+was checked against this file, and treat any dimension you enumerate by hand as
+a bug waiting to happen.
+
+The same pass computed its member universe **globally**, with no tenant and no
+date filter, where `journals/pivot/members/` applies `apply_journal_filters`.
+That did not diverge, but only because no stored anchor currently carries a
+tenant — the two populations coincide by accident of the data, not by the logic
+agreeing. **The first tenant-scoped comment reopens it**, and that is a
+plausible near-term event: the console has a tenant filter and the add-in passes
+the query straight through to the anchor. A universe computed for the whole
+ledger is not the universe this function tests against.
+
+Known and NOT covered by the above: 15 rows whose `cell_key` does not match
+`_cell_key()` of their own stored filters. They carry `transaction_date` /
+`account_name` / `invoice` / `supplier` keys rather than the pivot's filter
+shape, so they came from the MCP `add_cube_comment` path, which derives identity
+its own way. They are not add-in cells, so they do not duplicate on Build.
+
 ## Checks
 
 There was no automated check on this add-in until 2026-09-03, and everything
