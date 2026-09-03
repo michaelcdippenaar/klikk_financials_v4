@@ -285,6 +285,23 @@ class GapFillScopeTests(_Fixture):
         self.assertEqual(bank_months, [1, 2, 3, 4])
         self.assertFalse(XeroTrailBalance.objects.filter(account=other, month=7).exists())
 
+    def test_a_month_whose_only_rows_were_gap_rows_is_refilled_after_the_rebuild_wiped_it(self):
+        # Production 2026-09-03: rebuilding Sep-2025 deleted every Sep row,
+        # zero gap rows included; a gap-fill restricted to accounts that
+        # still HAD a Sep row skipped the 194 accounts whose only Sep rows
+        # were gaps, and the balance sheet lost those months.
+        self._tb(self.bank, 2025, 1)
+        self._tb(self.bank, 2025, 3)
+        self._tb(self.bank, 2025, 2, amount='0')          # the gap row
+        XeroTrailBalance.objects.consolidate_journals(self.tenant, affected_periods=[(2025, 2)])
+        self.assertFalse(XeroTrailBalance.objects.filter(account=self.bank, month=2).exists(),
+                         'precondition: the incremental consolidate wipes the month')
+
+        inserted = fill_balance_sheet_gaps(self.tenant.tenant_id, affected_periods=[(2025, 2)])
+
+        self.assertEqual(inserted, 1)
+        self.assertTrue(XeroTrailBalance.objects.filter(account=self.bank, month=2, amount=0).exists())
+
     def test_without_periods_every_balance_sheet_account_is_filled(self):
         self._tb(self.bank, 2025, 1)
         self._tb(self.bank, 2025, 3)

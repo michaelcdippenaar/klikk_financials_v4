@@ -197,13 +197,17 @@ def fill_balance_sheet_gaps(tenant_id, affected_periods=None):
     Args:
         tenant_id: Xero tenant ID
         affected_periods: optional list of (year, month) just rebuilt. When
-            given, only ACCOUNTS with a row in those months are examined —
-            accounts, not partitions, because a new month on one partition
-            extends the account's latest month and every sibling partition
-            then needs a zero row for it; and the whole series of each such
-            account, not just the affected months, because a backdated
+            given, only ACCOUNTS whose series spans any of those months are
+            examined — accounts, not partitions, because a new month on one
+            partition extends the account's latest month and every sibling
+            partition then needs a zero row for it; the whole series of each
+            such account, not just the affected months, because a backdated
             movement earlier than a partition's old first month needs the
-            months in between filled too.
+            months in between filled too; and "spans", not "has a row in",
+            because the incremental consolidate has just deleted every row
+            in those months, gap rows included — an account whose only rows
+            there were zero rows has none left to be found by, yet needs
+            them back (194 such rows went missing on 2026-09-03).
 
     Returns:
         int: number of gap-fill rows inserted
@@ -219,13 +223,16 @@ def fill_balance_sheet_gaps(tenant_id, affected_periods=None):
     account_filter = ""
     account_params = []
     if affected_periods:
+        yms = sorted(int(y) * 100 + int(m) for y, m in affected_periods)
         account_filter = """
               AND tb.account_id IN (
-                  SELECT DISTINCT account_id FROM xero_cube_xerotrailbalance
+                  SELECT account_id FROM xero_cube_xerotrailbalance
                   WHERE organisation_id = %s
-                    AND (year * 100 + month) = ANY(%s)
+                  GROUP BY account_id
+                  HAVING MIN(year * 100 + month) <= %s
+                     AND MAX(year * 100 + month) >= %s
               )"""
-        account_params = [tenant_id, [int(y) * 100 + int(m) for y, m in affected_periods]]
+        account_params = [tenant_id, yms[-1], yms[0]]
 
     # The NOT EXISTS below compares nullable keys with COALESCE instead of
     # IS NOT DISTINCT FROM: the latter is not hash- or merge-joinable, so the
