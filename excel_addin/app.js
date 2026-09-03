@@ -1008,7 +1008,12 @@
 
   var DIMS = [];
   var wells = { avail: [], rows: [], cols: [], filt: [] };
-  var MAX = { rows: 4, cols: 3, filt: 6 };
+  /* rows is capped at 8 because that is Excel's own limit — a sheet supports 8
+     outline levels, and "Collapsible groups in the sheet" spends one per row
+     dimension. Past 8 the grouping silently stops nesting rather than erroring,
+     which reads as a broken cube. The server has no cap: it happily groups by
+     7 dimensions (4,287 rows, verified), so 4 was only ever a client guess. */
+  var MAX = { rows: 8, cols: 3, filt: 6 };
   // dimension key -> array of selected labels. Empty array = the field is
   // on Filters but not yet narrowed, which passes everything through.
   var filterVals = {};
