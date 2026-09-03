@@ -127,3 +127,19 @@ session. `AutoOpenTaskpane` does not change this — it re-opens the *task pane*
 for a workbook carrying the `Office.AutoShowTaskpaneWithDocument` flag, and a
 brand-new blank workbook carries no flag. To get the pane on every new
 workbook, set the flag in a workbook and save it as the default template.
+
+`scripts/make_excel_autoopen_template.py --install` builds that template and
+drops it in Excel for Mac's startup folder as `Book.xltx`. Its webextension
+parts mirror what Excel itself writes — `store="developer" storeType="Registry"`,
+and the taskpanes relationship in the package-level `_rels/.rels` rather than
+`xl/_rels/workbook.xml.rels`. Both were read off a real workbook; guessing
+either gives a template Excel silently repairs. Undo by deleting `Book.xltx`.
+
+## An empty subset means ALL members, never none
+
+`dimfParam` omits a dimension from `dimf` when its subset is empty, so a field
+dragged into rows, columns or filters starts unrestricted and its chip reads
+plainly (`Year`) rather than `Year · 0 selected`. Clearing every member in the
+subset editor therefore widens back to all — a cube filtered to nothing is not
+reachable, deliberately. Keep that: it is the difference between a new field
+showing the whole ledger and showing an empty sheet.
