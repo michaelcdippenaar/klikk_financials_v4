@@ -1,22 +1,28 @@
-"""INVESTEC_OWNER_MAP — entity / capacity attribution for the 14 Investec accounts.
+"""INVESTEC_OWNER_MAP — entity / capacity attribution for the 18 Investec accounts.
 
-The 14 Investec Private Bank accounts span MC's whole economic unit (Klikk, the
+The 18 Investec Private Bank accounts span MC's whole economic unit (Klikk, the
 trusts, LucaNaude, and the personal/household accounts). The forecast and the
 cash-actuals view need to roll transactions up to ENTITY and CAPACITY so the
 report can show business-vs-personal cash combined (FINANCIAL_PRIORITIES.md
 priority #1 — "manage cash in both business AND personal capacity").
 
 Attribution is unambiguous from account_number (surveyed against the live DB,
-2026-06-25). Keyed by account_number → {entity, capacity, liquid}:
+2026-06-25; the four profile-2 accounts added 2026-09-03). Keyed by
+account_number → {entity, capacity, liquid}:
 
   entity     ∈ {Klikk, MC personal, MLD Trust, Testamentary Trust,
-                Lucanaude, L Dippenaar}
+                Lucanaude, L Dippenaar, T Naudé, L Naudé}
   capacity   ∈ {business, personal}
   liquid     bool — True for transactional / cash accounts that count toward the
              group LIQUID opening cash position; False for the Mortgage Loan
              Accounts (363177001 / 363177003), which are DEBT facilities, not
              spendable cash. Summing them into "opening cash" would understate
              the liquid position by the drawn loan balance.
+
+Credential profile 2 (added 2026-09-03) carries four accounts across two people
+— T Naudé's two transactional accounts, and L Naudé's Youth Account and
+PrimeSaver. Lucanaude (the company) and L Naudé (the person) are separate
+entities despite the similar name; do not merge them.
 
 The Mortgage Loan Accounts carry account_name "Klikk (Pty) Ltd" in the API but
 are the "Klikk Mortgage Loan Account" per the entity survey — they are Klikk
@@ -34,6 +40,8 @@ MLD_TRUST = "MLD Trust"
 TESTAMENTARY_TRUST = "Testamentary Trust"
 LUCANAUDE = "Lucanaude"
 L_DIPPENAAR = "L Dippenaar"
+T_NAUDE = "T Naudé"
+L_NAUDE = "L Naudé"
 
 BUSINESS = "business"
 PERSONAL = "personal"
@@ -62,9 +70,17 @@ INVESTEC_OWNER_MAP: dict[str, dict] = {
     # --- Lucanaude (Pty) Ltd ---
     "10014572054":   {"entity": LUCANAUDE,          "capacity": BUSINESS, "liquid": True},
     "1100612949540": {"entity": LUCANAUDE,          "capacity": BUSINESS, "liquid": True},
+    # --- T Naudé (personal) — credential profile 2 ---
+    "10012985320":   {"entity": T_NAUDE,            "capacity": PERSONAL, "liquid": True},
+    "1100007340540": {"entity": T_NAUDE,            "capacity": PERSONAL, "liquid": True},
+    # --- L Naudé (personal) — profile 2. A child's Youth Account and PrimeSaver:
+    # real balances, but not spendable group liquidity, so liquid=False (the same
+    # treatment the mortgage loan accounts get, for the opposite reason).
+    "10014870332":   {"entity": L_NAUDE,            "capacity": PERSONAL, "liquid": False},
+    "1100123814500": {"entity": L_NAUDE,            "capacity": PERSONAL, "liquid": False},
 }
 
-# The set of all 14 internal account numbers. Used by the cash-flow category map
+# The set of all 18 internal account numbers. Used by the cash-flow category map
 # to detect internal transfers (counterparty account number appears in the
 # transaction description) — these ELIMINATE at group level (one economic unit).
 INTERNAL_ACCOUNT_NUMBERS: frozenset[str] = frozenset(INVESTEC_OWNER_MAP.keys())
