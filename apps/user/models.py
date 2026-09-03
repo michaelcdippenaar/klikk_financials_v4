@@ -25,6 +25,12 @@ class User(AbstractUser):
         default=Role.STANDARD,
     )
 
+    # Set when an account is handed a temporary password (create_auditor).
+    # AuditorGateMiddleware then 403s everything except the auth endpoints and
+    # the change-password endpoint until the holder picks their own password —
+    # a shared/emailed temporary credential must not stay usable indefinitely.
+    must_change_password = models.BooleanField(default=False)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

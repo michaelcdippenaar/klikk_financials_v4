@@ -8,6 +8,8 @@ the access trail says who looked at what — never a shared login.
 Usage:
     python manage.py create_auditor <username> --email a@firm.co.za
         Creates the user with role=auditor and prints a generated password.
+        The account is flagged must_change_password, so the holder is forced
+        to replace that temporary password before they can use the console.
 
     python manage.py create_auditor <existing-username> --convert
         Sets role=auditor on an existing account (e.g. to downgrade one).
@@ -41,6 +43,8 @@ class Command(BaseCommand):
         if options['convert']:
             if existing is None:
                 raise CommandError(f'No user named {username!r} to convert')
+            # --convert deliberately leaves must_change_password alone: the
+            # account already has a password its owner chose.
             existing.role = User.Role.AUDITOR
             existing.is_staff = False
             existing.is_superuser = False
@@ -61,7 +65,8 @@ class Command(BaseCommand):
             first_name=options['first_name'],
             last_name=options['last_name'],
             role=User.Role.AUDITOR,
+            must_change_password=True,
         )
         self.stdout.write(self.style.SUCCESS(f'Created auditor account {username!r}'))
         self.stdout.write(f'Temporary password: {password}')
-        self.stdout.write('Share it over a secure channel and ask them to change it.')
+        self.stdout.write('Share it over a secure channel — they MUST change it at first login.')
