@@ -285,8 +285,10 @@
         </div>
       </div>
 
+      <p class="hint" id="cubeTarget">No cube sheet is in front, so Build writes a new sheet.</p>
       <div class="row">
-        <button class="btn btn--primary" id="btnCube">Build cube view</button>
+        <button class="btn btn--primary" id="btnCube" title="Write the cube to a new sheet">Build cube view</button>
+        <button class="btn" id="btnCubeNew" hidden title="Build this layout on a new sheet and leave the one in front alone">New sheet</button>
       </div>
       <p class="hint">Aggregated in Postgres over every matching journal line —
         the row limit above does not apply.</p>

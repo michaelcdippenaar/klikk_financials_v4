@@ -206,6 +206,40 @@ above, not the served bundle. A pane that rendered `taskpane.html` at all
 shows `URL Navigation` in that log and a `GET /excel-addin/taskpane.html`
 in the backend container log; a blank one shows neither.
 
+## Build rewrites the cube sheet in front; New sheet is the other button
+
+A cube sheet carries its own spec inside the workbook
+(`Office.context.document.settings`, key `klikkJournalQuery::<worksheet id>`).
+The id is the sheet's `xr:uid`, which is written into `xl/worksheets/sheetN.xml`
+and survives save / close / reopen — verified 2026-09-03 by unzipping
+`Audit FY 2026 View.xlsx`: the three live sheets' `xr:uid`s matched their
+binding keys exactly. So on reopen, and on every sheet switch
+(`worksheets.onActivated`), the pane reads the binding and points the wells at
+that sheet's rows / columns / filters / measure (`syncCubeToSheet`).
+
+Until 2026-09-03 `buildCube` always rendered to a **new** sheet, so a layout
+could never be edited: every Build — and every drag with "Rebuild on every
+change" ticked — produced Cube 2, Cube 3, Cube 4 … (one workbook had three
+bindings written 08:03:33, :42 and :44). Now:
+
+- **Rebuild &lt;sheet&gt;** (the primary button, relabelled whenever the active
+  sheet is one of our cubes) rewrites that sheet in place from the wells —
+  the PivotTable model. Groups and frozen panes are peeled off before the
+  clear, because `Range.clear` leaves both behind.
+- **New sheet** appears next to it only when a cube is in front, and always
+  creates a fresh sheet.
+- With no cube sheet in front the primary button reads **Build cube view**
+  and writes a new sheet, as before.
+- **Saved views → Rebuild** follows the same rule and says in its message
+  whether it went onto the sheet in front or a new one.
+
+Boot order matters for this: `inspectActiveSheet()` must finish before
+`connect()` reaches `populateCube()`, or the wells come up as defaults on top
+of a cube the pane should have recognised. `Office.onReady` sequences them.
+
+Bindings for deleted sheets are never pruned — the settings API has no key
+enumeration — so a much-edited workbook carries a few dead entries. Harmless.
+
 ## An empty subset means ALL members, never none
 
 `dimfParam` omits a dimension from `dimf` when its subset is empty, so a field

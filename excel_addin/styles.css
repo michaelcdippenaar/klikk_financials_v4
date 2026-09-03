@@ -429,6 +429,8 @@ input:focus, select:focus {
   background: rgba(0, 0, 0, .38);
 }
 .modal[hidden] { display: none; }
+/* .btn sets display:inline-flex, which beats the UA's [hidden] rule. */
+.btn[hidden] { display: none; }
 
 .modal__card {
   /* Fills the pane rather than sitting in it. A task pane is narrow and the

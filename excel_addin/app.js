@@ -178,7 +178,7 @@
       'contactList', 'description', 'amount', 'q', 'maxRows', 'countLine', 'btnLoad', 'btnCount',
       'detailPanel', 'btnPivot', 'cubePanel', 'measure', 'btnResetComments',
       'queryPanel', 'refreshPanel', 'commentPanel', 'settingsPanel',
-      'suppress', 'btnCube', 'cubeMsg', 'btnDrill', 'headTheme', 'showDecimals', 'btnReload', 'wellAvail', 'wellRows',
+      'suppress', 'btnCube', 'btnCubeNew', 'cubeTarget', 'cubeMsg', 'btnDrill', 'headTheme', 'showDecimals', 'btnReload', 'wellAvail', 'wellRows',
       'wellCols', 'wellFilt', 'autoBuild', 'outline',
       'pickerModal', 'pickerTitle', 'pickerClose', 'pickerSearch',
       'pickerAvail', 'pickerSel', 'pickerAvailCount', 'pickerSelCount',
@@ -218,12 +218,19 @@
     el.boot.hidden = true;
     el.app.hidden = false;
 
-    if (settings.token) {
-      connect(true);
-    } else {
-      el.settingsPanel.hidden = false;
-    }
-    inspectActiveSheet();
+    /* Read the sheet in front BEFORE connecting. connect() ends in
+       populateCube(), which points the wells at the active sheet's cube spec,
+       and that needs the binding already read. Firing both at once left it to
+       a race the network usually -- not always -- lost, and the pane came up
+       showing defaults on top of a cube it should have recognised. Capped so
+       a host that never answers cannot hold the connect. */
+    Promise.race([
+      inspectActiveSheet(),
+      new Promise(function (r) { setTimeout(r, 4000); })
+    ]).then(function () {
+      if (settings.token) connect(true);
+      else el.settingsPanel.hidden = false;
+    });
   });
 
 
@@ -236,8 +243,9 @@
     el.btnLoad.addEventListener('click', function () { run(loadToNewSheet); });
     el.btnCount.addEventListener('click', function () { run(showCount); });
     el.btnCube.addEventListener('click', function () { run(buildCube); });
+    el.btnCubeNew.addEventListener('click', function () { run(buildCubeToNewSheet); });
     el.btnPivot.addEventListener('click', function () { run(addNativePivot); });
-    el.btnReload.addEventListener('click', function () { run(reloadThisSheet); });
+    el.btnReload.addEventListener('click', function () { run(refreshActiveSheet); });
     el.btnSyncComments.addEventListener('click', function () { run(syncComments); });
     el.btnResetComments.addEventListener('click', function () { run(resetSheetComments); });
     var nav = document.getElementById('sectionNav');
@@ -817,6 +825,32 @@
       if (DIMS.length) syncCubeToSheet();
     }
     paintRefreshPanel();
+    paintCubeTarget();
+  }
+
+  /* Build is in place when a cube sheet is in front -- the way a PivotTable
+     refreshes, rather than sprouting "Cube 2", "Cube 3", ... on every change
+     -- so the button must say which of the two it is about to do. */
+  function cubeTargetId() {
+    var b = activeSheet.binding;
+    return (b && b.kind === 'cube' && b.spec && activeSheet.id) ? activeSheet.id : null;
+  }
+
+  function paintCubeTarget() {
+    if (!el.btnCube) return;
+    var inPlace = !!cubeTargetId();
+    el.btnCube.textContent = inPlace ? 'Rebuild ' + activeSheet.name : 'Build cube view';
+    el.btnCube.title = inPlace
+      ? 'Rewrite ' + activeSheet.name + ' from the wells above'
+      : 'Write the cube to a new sheet';
+    if (el.btnCubeNew) el.btnCubeNew.hidden = !inPlace;
+    if (el.cubeTarget) {
+      el.cubeTarget.textContent = inPlace
+        ? 'The wells show the layout of ' + activeSheet.name + '. Change them and Rebuild '
+          + 'rewrites that sheet in place; New sheet leaves it alone.'
+        : 'No cube sheet is in front, so Build writes a new sheet. Select a cube sheet '
+          + 'to edit that one in place.';
+    }
   }
 
   function paintRefreshPanel() {
@@ -1570,8 +1604,10 @@
     if (!wells.rows.length) {
       throw new Error('"' + name + '" has no row fields saved, so there is nothing to build.');
     }
+    var onto = cubeTargetId() ? activeSheet.name : null;
     await buildCube();
-    el.cubeMsg.textContent = 'Rebuilt "' + name + '" from its saved definition.';
+    el.cubeMsg.textContent = 'Rebuilt "' + name + '" from its saved definition'
+      + (onto ? ' onto ' + onto + '.' : ' on a new sheet.');
     el.cubeMsg.className = 'msg msg--ok';
   }
 
@@ -1850,6 +1886,16 @@
         tables.load('items/name');
         await ctx.sync();
         tables.items.forEach(function (t) { t.delete(); });
+        /* clear() leaves outline groups and frozen panes behind, so a rebuild
+           with fewer row levels kept stale +/- buttons on rows that no longer
+           head a group. Peel every level off, then clear. */
+        try { sheet.freezePanes.unfreeze(); await ctx.sync(); } catch (e) { /* none set */ }
+        for (var lvl = 0; lvl < 8; lvl++) {
+          try {
+            sheet.getRange().ungroup(Excel.GroupOption.byRows);
+            await ctx.sync();
+          } catch (e) { break; }
+        }
         sheet.getRange().clear(Excel.ClearApplyTo.all);
       } else {
         sheet = ctx.workbook.worksheets.add(await uniqueSheetName(ctx, 'Cube'));
@@ -2078,7 +2124,12 @@
     return a;
   }
 
-  async function buildCube() {
+  async function buildCube(opts) {
+    /* The sheet in front is the target when it is a cube of ours. Every build
+       used to open a new sheet, so "Rebuild on every change" produced
+       Cube 2 ... Cube 5 in eleven seconds of dragging (bindings 08:03:33,
+       :42, :44 in one workbook) and the layout could never be edited. */
+    var target = (opts && opts.newSheet) ? null : cubeTargetId();
     var spec = readCubeSpec();
     var bad = validateCube(spec);
     if (bad) { el.cubeMsg.textContent = bad; el.cubeMsg.className = 'msg msg--err'; return; }
@@ -2097,7 +2148,7 @@
     var cube = await fetchCube(qy, spec);
     if (cancelFlag.cancelled) { el.cubeMsg.textContent = 'Cancelled.'; return; }
 
-    var out = await renderCube(null, cube, qy, spec);
+    var out = await renderCube(target, cube, qy, spec);
     await inspectActiveSheet();
 
     if (cube.balancing_hint) {
@@ -2113,7 +2164,7 @@
       return;
     }
     var note = fmtNum(cube.leaf_count) + ' leaf rows × ' + fmtNum(cube.cols.length)
-      + ' columns written to ' + out.sheetName + '.';
+      + (target ? ' columns rebuilt in place on ' : ' columns written to ') + out.sheetName + '.';
     if (cube.zero_rows && cube.spec !== null) {
       note += ' ' + fmtNum(cube.zero_rows) + ' zero rows suppressed.';
     }
@@ -2121,6 +2172,10 @@
     if (cube.truncated_cols) note += ' Column cap hit — use a coarser column dimension.';
     el.cubeMsg.textContent = note;
     el.cubeMsg.className = cube.truncated_rows || cube.truncated_cols ? 'msg msg--err' : 'msg msg--ok';
+  }
+
+  function buildCubeToNewSheet() {
+    return buildCube({ newSheet: true });
   }
 
   /* ── native Excel PivotTable over a detail sheet ───────── */
@@ -3029,6 +3084,7 @@
     el.btnLoad.disabled = !on;
     el.btnCount.disabled = !on;
     el.btnCube.disabled = !on;
+    el.btnCubeNew.disabled = !on;
     el.btnRefresh.disabled = !on || !activeSheet.binding;
     el.btnRestore.disabled = !on || !activeSheet.binding;
     el.btnPivot.disabled = !on || !activeSheet.binding || activeSheet.binding.kind !== 'detail';
