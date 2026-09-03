@@ -79,6 +79,10 @@
     { key: 'account_name',            label: 'Account',    fmt: null,    width: 28 },
     { key: 'account_type',            label: 'Acct type',  fmt: null,    width: 12 },
     { key: 'supplier_name',           label: 'Supplier / contact', fmt: null, width: 30 },
+    // Populated on a drill ("show transactions"); blank on a plain detail
+    // load, which does not resolve documents. ~7% of ledger lines have a
+    // receipt at all — a blank cell means no document, not a broken link.
+    { key: 'receipt_url',             label: 'Receipt',    fmt: 'link',  width: 12 },
     { key: 'supplier_via',            label: 'Name from',  fmt: null,    width: 10 },
     { key: 'description',             label: 'Description', fmt: null,   width: 34 },
     { key: 'reference',               label: 'Reference',  fmt: null,    width: 18 },
@@ -671,6 +675,13 @@
         var v = r[c.key];
         if (c.fmt === 'date') return toSerial(v);
         if (c.fmt === 'money' || c.fmt === 'int') return toNum(v);
+        /* A clickable link without a per-cell Range.hyperlink call, which would
+           be one Office round trip per row and make a large drill crawl.
+           HYPERLINK() rides along in the same values write as everything else.
+           Quotes are doubled so a stray one cannot terminate the formula. */
+        if (c.fmt === 'link') {
+          return v ? '=HYPERLINK("' + String(v).replace(/"/g, '""') + '","Receipt")' : '';
+        }
         return v == null ? '' : String(v);
       });
     });

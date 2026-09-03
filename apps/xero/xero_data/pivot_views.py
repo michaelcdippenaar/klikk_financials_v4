@@ -22,7 +22,9 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
-from apps.xero.xero_data.models import XeroJournals
+from apps.xero.xero_data.models import XeroJournals, XeroDocument
+from apps.xero.xero_data.document_views import (
+    public_base_url, xero_document_signature)
 
 logger = logging.getLogger(__name__)
 
@@ -851,6 +853,44 @@ class XeroCubeDrillView(APIView):
                 'transaction_source_type': src.transaction_source if src else '',
                 'transaction_source_id': src.transactions_id if src else '',
             })
+
+        # The receipt behind each line. "Which transactions make up this
+        # number" is only half an answer if the source document cannot be
+        # opened from the same row.
+        #
+        # One bulk query over the rows actually RETURNED (capped at `limit`),
+        # never per row — a drill can be thousands of lines and this must not
+        # become N+1. The link is the existing HMAC-signed document route, so
+        # it opens from Excel without a session, and the signature is scoped to
+        # the single document id.
+        #
+        # Note the two transaction_source columns are different types:
+        # XeroJournals joins on to_field='transactions_id' (the Xero string),
+        # XeroDocument on the table's own pk. Join through transactions_id or
+        # the comparison is bigint = varchar and Postgres refuses it.
+        tids = {r['transaction_source_id'] for r in rows if r['transaction_source_id']}
+        if tids:
+            base = public_base_url(request)
+            by_txn = {}
+            for d in (XeroDocument.objects
+                      .filter(transaction_source__transactions_id__in=tids)
+                      .values('id', 'file_name', 'transaction_source__transactions_id')
+                      .order_by('file_name')):
+                by_txn.setdefault(d['transaction_source__transactions_id'], []).append({
+                    'file_name': d['file_name'],
+                    'url': '%s/xero/data/documents/%s/file/?s=%s' % (
+                        base, d['id'], xero_document_signature(d['id'])),
+                })
+            for r in rows:
+                docs = by_txn.get(r['transaction_source_id']) or []
+                r['receipts'] = docs
+                r['receipt_count'] = len(docs)
+                r['receipt_name'] = docs[0]['file_name'] if docs else ''
+                r['receipt_url'] = docs[0]['url'] if docs else ''
+        else:
+            for r in rows:
+                r['receipts'], r['receipt_count'] = [], 0
+                r['receipt_name'], r['receipt_url'] = '', ''
 
         return Response({
             'coords': coords,
