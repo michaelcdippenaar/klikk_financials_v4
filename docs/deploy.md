@@ -55,6 +55,39 @@ from the previous one, and confirm afterwards that BOTH `klikk-financials-v4`
 and `klikk-financials-ingest-worker` are up under their proper names — a
 concurrent recreate has renamed the worker before now.
 
+## A healthy container is not evidence the schema applied
+
+The register's DDL lives in `_ensure_table()` and runs on the FIRST AUTHENTICATED
+REQUEST to the comments endpoint — not at container start. So after a release the
+container is up, `/app/pipeline` is 200, the four journal endpoints are 401, and the
+new column still does not exist.
+
+Seen twice on 2026-09-03. Both times every mechanism check passed:
+
+```
+container   Up 8 seconds          <- true
+pages       200 200               <- true
+gate        401 401 401 401       <- true
+column      assignee_key          <- STILL THE OLD NAME
+log table   does not exist
+```
+
+Unauthenticated probes cannot trigger it: they are rejected before the view runs. So
+verify the SCHEMA directly after any release that changes it, and trigger the DDL
+deliberately rather than waiting for a user to do it:
+
+```bash
+sudo docker exec klikk-financials-v4 python manage.py shell -c \
+  "from apps.xero.xero_data import pivot_comments as pc; pc._ensure_table()"
+```
+
+Then assert the specific thing that changed — the column name, the new table — not
+that the command exited 0.
+
+The failure mode this creates is the worst kind: the first real user's request runs
+the migration, so the schema appears minutes later and the deploy looks fine in
+between. If the DDL is wrong, the person who finds out is a user, not you.
+
 ## Verify the payload, not just the mechanism
 
 After any release, "the command succeeded" is not evidence. Check that the
