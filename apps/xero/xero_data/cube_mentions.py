@@ -50,6 +50,12 @@ CREATE TABLE IF NOT EXISTS app.cube_people (
     updated_at   timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS cube_people_active_idx ON app.cube_people (active);
+-- HOW to reach this person, kept apart from WHO they are. MC's view is that
+-- email is the wrong platform for this and expects Slack, Google Chat or
+-- WhatsApp later, so the queue records who and what while the sender decides
+-- how. Defaults to 'email' because that is the transport that exists; an
+-- unimplemented channel is refused at send time rather than silently skipped.
+ALTER TABLE app.cube_people ADD COLUMN IF NOT EXISTS channel text NOT NULL DEFAULT 'email';
 
 CREATE TABLE IF NOT EXISTS app.cube_comment_mentions (
     id          bigserial PRIMARY KEY,
@@ -147,8 +153,15 @@ def parse_mentions(text):
 # Resolution
 # --------------------------------------------------------------------------
 
-def resolve_mention(token):
+def resolve_mention(token, include_inactive=False):
     """Resolve one token to {'handle', 'email', 'display_name'} or None.
+
+    ``include_inactive`` is for QUEUEING. A mention of a stood-down seat used to
+    resolve to None and vanish -- silently, which is the exact failure the loud
+    rules here exist to prevent. Queueing records the intent and shows it as
+    un-sendable with a reason instead; whether it CAN go is decided at send
+    time, so reactivating a seat makes what is already queued sendable without
+    anyone re-typing it.
 
     Order: the people directory first, then Django users, then an explicit
     address. The directory wins so that a handle MC has deliberately curated is
@@ -157,7 +170,8 @@ def resolve_mention(token):
     ensure_tables()
     with connection.cursor() as c:
         c.execute('SELECT handle, display_name, email FROM app.cube_people '
-                  'WHERE lower(handle) = %s AND active', [token])
+                  'WHERE lower(handle) = %s AND (active OR %s)',
+                  [token, bool(include_inactive)])
         row = c.fetchone()
     if row:
         return {'handle': row[0], 'display_name': row[1] or row[0], 'email': row[2]}
@@ -229,85 +243,174 @@ def _body(comment_row, coords, author):
     return '\n'.join(lines)
 
 
-def notify(comment_row, coords, author, tokens):
-    """Resolve and email each mention. NEVER raises.
+def queue(comment_row, tokens):
+    """Resolve each mention and RECORD the intent. Sends nothing. Never raises.
 
-    The contract that matters: the comment is already saved by the time this
-    runs, and nothing in here may undo that. A dead SMTP server must cost an
-    email, never a comment -- so every failure is caught, written to
-    app.cube_comment_mentions, and returned to the caller instead of
-    propagating.
+    Notification is not a side effect of saving a comment. MC wrote 68 comments
+    in one day, 33 of them inside a single hour -- per-mention email would have
+    put 33 messages into one bookkeeper's inbox that evening. A design that
+    only works while the user keeps their own volume down is the wrong design,
+    so the send moved behind an explicit action and this half only queues.
 
-    Returns {notified, already_notified, failed, unresolved}.
+    Three things fall out of taking SMTP off the request path, and they are the
+    reason this is better rather than merely quieter:
+
+    * an SMTP outage can no longer present as the comments page hanging -- a
+      symptom this console has already paid a day for;
+    * work at 21:54 has no send time to get wrong, because there is no send;
+    * a queued mention is REVIEWABLE. A typo in a point can be fixed before
+      Anzelle ever sees it, which an immediate send makes impossible.
+
+    Returns {queued, already_notified, already_queued, unresolved}.
     """
     ensure_tables()
-    result = {'notified': [], 'already_notified': [], 'failed': [], 'unresolved': []}
+    result = {'queued': [], 'already_notified': [], 'already_queued': [],
+              'unresolved': []}
     comment_id = comment_row.get('id')
     if not comment_id or not tokens:
         return result
 
     for token in tokens:
         try:
-            person = resolve_mention(token)
+            # include_inactive: a mention of a stood-down seat is RECORDED and
+            # shown as un-sendable, not dropped. Dropping it is how an intent
+            # disappears with nothing anywhere reporting it.
+            person = resolve_mention(token, include_inactive=True)
         except Exception as exc:                       # pragma: no cover - defensive
             logger.warning('mention resolve failed for %r: %s', token, exc)
             person = None
-
         if not person:
-            # Reported, not dropped. The author gets to see that @finance went
-            # nowhere and can add them to the directory or fix the spelling.
+            # Reported, not dropped: the author gets to see that @finance went
+            # nowhere and can fix the spelling or add them to the directory.
             result['unresolved'].append(token)
             continue
-
         email = (person.get('email') or '').strip()
         if not email:
             result['unresolved'].append(token)
             continue
 
-        # Claim the (comment, person) slot first. If a delivered row already
-        # exists we stop here -- editing a comment five times must not email
-        # the same person five times.
+        # Claiming the (comment, person) slot IS the queue. The unique index
+        # makes re-saving a comment idempotent: a delivered mention is never
+        # re-sent and a pending one is never duplicated.
         with connection.cursor() as c:
             c.execute(
                 'INSERT INTO app.cube_comment_mentions (comment_id, handle, email) '
                 'VALUES (%s, %s, %s) '
                 'ON CONFLICT (comment_id, lower(email)) DO UPDATE SET handle = EXCLUDED.handle '
-                'RETURNING id, notified_at',
+                'RETURNING id, notified_at, (xmax = 0) AS inserted',
                 [comment_id, person.get('handle') or '', email],
             )
-            row_id, notified_at = c.fetchone()
+            _row_id, notified_at, inserted = c.fetchone()
         if notified_at is not None:
             result['already_notified'].append(email)
-            continue
+        elif inserted:
+            result['queued'].append(email)
+        else:
+            result['already_queued'].append(email)
+    return result
 
-        subject = 'Klikk: %s mentioned you on %s' % (
-            author or 'someone', comment_row.get('measure') or 'a figure')
+
+def pending_for(comment_id):
+    """Who is waiting to be told about this comment, and how they'd be reached."""
+    ensure_tables()
+    with connection.cursor() as c:
+        c.execute(
+            'SELECT m.id, m.handle, m.email, '
+            "       COALESCE(p.channel, 'email'), COALESCE(p.display_name, m.handle), "
+            '       p.handle IS NOT NULL, COALESCE(p.active, true), m.error '
+            'FROM app.cube_comment_mentions m '
+            'LEFT JOIN app.cube_people p ON lower(p.handle) = lower(m.handle) '
+            'WHERE m.comment_id = %s AND m.notified_at IS NULL '
+            'ORDER BY m.id', [comment_id])
+        rows = c.fetchall()
+    out = []
+    for r in rows:
+        channel, in_directory, active = r[3], r[5], r[6]
+        # Sendability is decided HERE, at read time, never frozen onto the row.
+        # A seat stood down today and brought back tomorrow must make what is
+        # already queued sendable without anyone re-typing the comment.
+        blocked = ''
+        if in_directory and not active:
+            blocked = 'the %r seat is stood down \u2014 reactivate it to send' % r[1]
+        elif channel != 'email':
+            blocked = '%r is not an implemented channel yet' % channel
+        out.append({'id': r[0], 'handle': r[1], 'email': r[2], 'channel': channel,
+                    'display_name': r[4] or r[1], 'sendable': not blocked,
+                    'blocked_reason': blocked, 'last_error': r[7] or ''})
+    return out
+
+
+def _deliver(channel, recipient, subject, body):
+    """The transport seam. One place that knows HOW, so the queue only knows WHO.
+
+    An unknown channel RAISES rather than returning quietly. Adding
+    `channel='whatsapp'` to a directory row must not start sending WhatsApp
+    messages the moment someone edits the directory -- MC's standing rule is
+    that no WhatsApp message goes out without his explicit confirmation of
+    recipient AND text, and a seam that silently no-ops would make that rule
+    unenforceable while looking like it worked. Failing loudly keeps the
+    decision where it belongs: in whoever implements that channel.
+    """
+    if channel != 'email':
+        raise NotImplementedError(
+            '%r is not an implemented channel yet \u2014 mentions for %s stay queued'
+            % (channel, recipient))
+    EmailMessage(
+        subject=subject,
+        body=body,
+        from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
+        to=[recipient],
+        # fail_silently=False so a broken backend raises HERE, inside the
+        # caller's guard, and is recorded -- rather than being swallowed by
+        # Django and looking like a successful send.
+        connection=get_connection(fail_silently=False),
+    ).send()
+
+
+def send_pending(comment_row, coords, author, only_ids=None):
+    """Send the queued mentions for one comment. The EXPLICIT action. Never raises.
+
+    Separate from `queue` on purpose: nothing reaches anybody until a person
+    asks for it. `only_ids` narrows to a subset, so "notify her but not him"
+    is expressible without inventing a second endpoint.
+
+    Returns {notified, failed, skipped}.
+    """
+    ensure_tables()
+    out = {'notified': [], 'failed': [], 'skipped': [], 'blocked': []}
+    comment_id = comment_row.get('id')
+    if not comment_id:
+        return out
+    wanted = None if only_ids is None else {int(i) for i in only_ids}
+    subject = 'Klikk: %s mentioned you on %s' % (
+        author or 'someone', comment_row.get('measure') or 'a figure')
+    body = _body(comment_row, coords, author)
+
+    for person in pending_for(comment_id):
+        if wanted is not None and person['id'] not in wanted:
+            out['skipped'].append(person['email'])
+            continue
+        if not person['sendable']:
+            # Stays queued. A blocked mention is not a failed one -- it becomes
+            # sendable the moment the seat is back, with no re-typing.
+            out['blocked'].append({'email': person['email'],
+                                   'reason': person['blocked_reason']})
+            continue
         try:
-            # An explicit connection with fail_silently=False so a broken
-            # backend raises HERE, inside the guard, and gets recorded --
-            # rather than being swallowed by Django and looking like success.
-            EmailMessage(
-                subject=subject,
-                body=_body(comment_row, coords, author),
-                from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', None),
-                to=[email],
-                connection=get_connection(fail_silently=False),
-            ).send()
+            _deliver(person['channel'], person['email'], subject, body)
         except Exception as exc:
             detail = '%s: %s' % (type(exc).__name__, exc)
-            logger.warning('mention email to %s failed: %s', email, detail)
+            logger.warning('mention to %s failed: %s', person['email'], detail)
             with connection.cursor() as c:
                 c.execute('UPDATE app.cube_comment_mentions SET error = %s WHERE id = %s',
-                          [detail[:500], row_id])
-            result['failed'].append({'email': email, 'error': detail[:500]})
+                          [detail[:500], person['id']])
+            out['failed'].append({'email': person['email'], 'error': detail[:500]})
             continue
-
         with connection.cursor() as c:
             c.execute("UPDATE app.cube_comment_mentions "
-                      "SET notified_at = now(), error = '' WHERE id = %s", [row_id])
-        result['notified'].append(email)
-
-    return result
+                      "SET notified_at = now(), error = '' WHERE id = %s", [person['id']])
+        out['notified'].append(person['email'])
+    return out
 
 
 HANDLE_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
@@ -365,16 +468,21 @@ class XeroCubePeopleView(APIView):
         active = d.get('active')
         active = True if active is None else bool(active)
         display = (d.get('display_name') or '').strip() or handle
+        # Stored as given rather than validated against a list: a channel this
+        # build cannot send on is refused at SEND time, loudly, which keeps an
+        # unimplemented transport from looking configured and silently dropping
+        # everything routed to it.
+        channel = (d.get('channel') or 'email').strip().lower()
 
         with connection.cursor() as c:
             c.execute(
-                'INSERT INTO app.cube_people (handle, display_name, email, active) '
-                'VALUES (%s,%s,%s,%s) '
+                'INSERT INTO app.cube_people (handle, display_name, email, active, channel) '
+                'VALUES (%s,%s,%s,%s,%s) '
                 'ON CONFLICT (handle) DO UPDATE SET '
                 '  display_name = EXCLUDED.display_name, email = EXCLUDED.email, '
-                '  active = EXCLUDED.active, updated_at = now() '
-                'RETURNING id, handle, display_name, email, active',
-                [handle, display, email, active])
+                '  active = EXCLUDED.active, channel = EXCLUDED.channel, updated_at = now() '
+                'RETURNING id, handle, display_name, email, active, channel',
+                [handle, display, email, active, channel])
             r = c.fetchone()
         return Response({'id': r[0], 'handle': r[1], 'display_name': r[2],
-                         'email': r[3], 'active': r[4]})
+                         'email': r[3], 'active': r[4], 'channel': r[5]})

@@ -24,6 +24,7 @@ User = get_user_model()
 
 COMMENTS = '/xero/data/journals/pivot/comments/'
 PEOPLE = '/xero/data/journals/pivot/people/'
+NOTIFY = '/xero/data/journals/pivot/comments/%s/notify/'
 
 LOCMEM = 'django.core.mail.backends.locmem.EmailBackend'
 # Points at a port nothing listens on, so .send() raises the way the live host
@@ -209,116 +210,206 @@ class PeopleDirectoryTests(_Base):
 
 
 @override_settings(EMAIL_BACKEND=LOCMEM, DEFAULT_FROM_EMAIL='klikk@example.invalid')
-class MentionNotificationTests(_Base):
-    """Never sends to a real person: locmem backend, example.invalid addresses."""
+class MentionQueueTests(_Base):
+    """Saving a comment QUEUES a mention. It does not send one.
+
+    This class used to assert the opposite, and the change is deliberate. MC
+    wrote 68 comments in one day, 33 inside a single hour; per-mention email
+    would have put 33 messages into one bookkeeper's inbox that evening. His
+    words: "I don't want to spam people." A design that only holds while the
+    user keeps their own volume down is the wrong design.
+
+    Never sends to a real person: locmem backend, example.invalid addresses.
+    """
 
     def setUp(self):
         super().setUp()
         self.client.post(PEOPLE, {'handle': 'bookkeeper', 'email': 'bk@example.invalid',
                                   'display_name': 'The Bookkeeper'}, format='json')
 
-    def test_resolved_mention_is_notified_once_with_the_figure_in_it(self):
+    def _notify(self, comment_id, **body):
+        return self.client.post(NOTIFY % comment_id, body, format='json')
+
+    def test_saving_a_comment_sends_nothing(self):
         from django.core import mail
         mail.outbox = []
         r = self.client.post(COMMENTS, _payload(
             comment='@bookkeeper does this look right?'), format='json')
-        self.assertEqual(r.data['mentions']['notified'], ['bk@example.invalid'])
-        self.assertEqual(len(mail.outbox), 1)
-        body = mail.outbox[0].body
-        # Enough to identify the figure without opening Excel.
-        self.assertIn('does this look right?', body)
-        self.assertIn('406 - Consulting', body)
-        self.assertIn('FY2023', body)
-        self.assertIn('134,200.00', body)
-        self.assertIn('amount', body)
+        self.assertEqual(mail.outbox, [], 'saving a comment sent mail')
+        self.assertEqual(r.data['mentions']['queued'], ['bk@example.invalid'])
 
-    def test_same_person_is_never_notified_twice_for_one_comment(self):
+    def test_the_explicit_trigger_is_what_sends(self):
         from django.core import mail
         mail.outbox = []
+        r = self.client.post(COMMENTS, _payload(
+            comment='@bookkeeper does this look right?'), format='json')
+        sent = self._notify(r.data['id'])
+        self.assertEqual(sent.data['notified'], ['bk@example.invalid'])
+        self.assertEqual(len(mail.outbox), 1)
+        body = mail.outbox[0].body
+        # Still enough to identify the figure without opening Excel.
+        for fragment in ('does this look right?', '406 - Consulting', 'FY2023',
+                         '134,200.00', 'amount'):
+            self.assertIn(fragment, body)
+
+    def test_the_affordance_can_ask_who_is_waiting_before_sending(self):
+        r = self.client.post(COMMENTS, _payload(comment='@bookkeeper look'), format='json')
+        pending = self.client.get(NOTIFY % r.data['id'])
+        self.assertEqual(pending.data['count'], 1)
+        self.assertEqual(pending.data['pending'][0]['display_name'], 'The Bookkeeper')
+        self.assertTrue(pending.data['pending'][0]['sendable'])
+
+    def test_re_saving_does_not_queue_a_second_time(self):
         self.client.post(COMMENTS, _payload(comment='@bookkeeper look'), format='json')
         r = self.client.post(COMMENTS, _payload(comment='@bookkeeper look again'),
                              format='json')
+        self.assertEqual(r.data['mentions']['already_queued'], ['bk@example.invalid'])
+        self.assertEqual(self.client.get(NOTIFY % r.data['id']).data['count'], 1)
+
+    def test_a_delivered_mention_is_never_sent_again(self):
+        from django.core import mail
+        mail.outbox = []
+        r = self.client.post(COMMENTS, _payload(comment='@bookkeeper look'), format='json')
+        cid = r.data['id']
+        self._notify(cid)
+        again = self.client.post(COMMENTS, _payload(comment='@bookkeeper look again'),
+                                 format='json')
+        self.assertEqual(again.data['mentions']['already_notified'], ['bk@example.invalid'])
+        self.assertEqual(self._notify(cid).data['notified'], [], 're-triggering re-sent')
         self.assertEqual(len(mail.outbox), 1)
-        self.assertEqual(r.data['mentions']['already_notified'], ['bk@example.invalid'])
+
+    def test_only_the_named_mentions_are_sent(self):
+        from django.core import mail
+        self.client.post(PEOPLE, {'handle': 'auditor', 'email': 'aud@example.invalid'},
+                         format='json')
+        mail.outbox = []
+        r = self.client.post(COMMENTS, _payload(
+            comment='@bookkeeper and @auditor please'), format='json')
+        pending = self.client.get(NOTIFY % r.data['id']).data['pending']
+        one = [p['id'] for p in pending if p['handle'] == 'auditor']
+        sent = self._notify(r.data['id'], mention_ids=one)
+        self.assertEqual(sent.data['notified'], ['aud@example.invalid'])
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(self.client.get(NOTIFY % r.data['id']).data['count'], 1)
+
+    def test_a_stood_down_seat_is_QUEUED_and_explained_not_dropped(self):
+        # MC's stopgap stood @bookkeeper down so nothing could reach Moore by
+        # accident. A mention of it must record the intent and say why it
+        # cannot go -- vanishing is the failure the loud rules exist to stop.
+        from django.core import mail
+        self.client.post(PEOPLE, {'handle': 'bookkeeper', 'email': 'bk@example.invalid',
+                                  'active': False}, format='json')
+        mail.outbox = []
+        r = self.client.post(COMMENTS, _payload(comment='@bookkeeper urgent'), format='json')
+        self.assertEqual(r.data['mentions']['queued'], ['bk@example.invalid'])
+        pending = self.client.get(NOTIFY % r.data['id']).data['pending'][0]
+        self.assertFalse(pending['sendable'])
+        self.assertIn('stood down', pending['blocked_reason'])
+        blocked = self._notify(r.data['id'])
+        self.assertEqual(blocked.data['notified'], [])
+        self.assertEqual(len(blocked.data['blocked']), 1)
+        self.assertEqual(mail.outbox, [])
+
+    def test_reactivating_the_seat_makes_what_is_queued_sendable(self):
+        # Sendability is read at send time, never frozen onto the row, so
+        # bringing a seat back must not require re-typing the comment.
+        from django.core import mail
+        self.client.post(PEOPLE, {'handle': 'bookkeeper', 'email': 'bk@example.invalid',
+                                  'active': False}, format='json')
+        r = self.client.post(COMMENTS, _payload(comment='@bookkeeper urgent'), format='json')
+        self.client.post(PEOPLE, {'handle': 'bookkeeper', 'email': 'bk@example.invalid',
+                                  'active': True}, format='json')
+        mail.outbox = []
+        self.assertEqual(self._notify(r.data['id']).data['notified'],
+                         ['bk@example.invalid'])
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_an_unimplemented_channel_blocks_rather_than_silently_dropping(self):
+        # Adding channel='whatsapp' to a row must never start sending WhatsApp:
+        # MC's standing rule is no message without his confirmation of
+        # recipient AND text, and a seam that no-ops would hide that.
+        from django.core import mail
+        self.client.post(PEOPLE, {'handle': 'bookkeeper', 'email': 'bk@example.invalid',
+                                  'channel': 'whatsapp'}, format='json')
+        mail.outbox = []
+        r = self.client.post(COMMENTS, _payload(comment='@bookkeeper hi'), format='json')
+        res = self._notify(r.data['id'])
+        self.assertEqual(res.data['notified'], [])
+        self.assertIn('whatsapp', res.data['blocked'][0]['reason'])
+        self.assertEqual(mail.outbox, [])
 
     def test_unresolved_mention_is_REPORTED_not_dropped(self):
         from django.core import mail
         mail.outbox = []
         r = self.client.post(COMMENTS, _payload(comment='@nobody-here check'), format='json')
         self.assertEqual(r.data['mentions']['unresolved'], ['nobody-here'])
-        self.assertEqual(r.data['mentions']['notified'], [])
-        self.assertEqual(len(mail.outbox), 0)
-        # And the comment itself still saved.
-        self.assertTrue(r.data['id'])
+        self.assertEqual(r.data['mentions']['queued'], [])
+        self.assertEqual(mail.outbox, [])
+        self.assertTrue(r.data['id'], 'the comment itself still saved')
 
-    def test_email_in_prose_notifies_nobody(self):
-        from django.core import mail
-        mail.outbox = []
+    def test_email_in_prose_queues_nobody(self):
         r = self.client.post(COMMENTS, _payload(
             comment='invoice came from bob@example.com, see ref INV-9@ACME'), format='json')
-        self.assertEqual(mail.outbox, [])
-        self.assertEqual(r.data['mentions']['notified'], [])
+        self.assertEqual(r.data['mentions']['queued'], [])
         self.assertEqual(r.data['mentions']['unresolved'], [])
 
     def test_django_user_is_resolvable_when_not_in_the_directory(self):
-        from django.core import mail
-        mail.outbox = []
         User.objects.create_user(username='auditor', email='aud@example.invalid')
         r = self.client.post(COMMENTS, _payload(comment='@auditor please review'),
                              format='json')
-        self.assertEqual(r.data['mentions']['notified'], ['aud@example.invalid'])
+        self.assertEqual(r.data['mentions']['queued'], ['aud@example.invalid'])
 
     def test_directory_wins_over_a_coincidental_django_username(self):
-        from django.core import mail
-        mail.outbox = []
         User.objects.create_user(username='bookkeeper', email='wrong@example.invalid')
-        self.client.post(COMMENTS, _payload(comment='@bookkeeper hi'), format='json')
-        self.assertEqual(mail.outbox[0].to, ['bk@example.invalid'])
+        r = self.client.post(COMMENTS, _payload(comment='@bookkeeper hi'), format='json')
+        self.assertEqual(r.data['mentions']['queued'], ['bk@example.invalid'])
 
 
 @override_settings(EMAIL_BACKEND=LOCMEM)
 class MailFailureIsSafeTests(_Base):
-    def test_comment_survives_a_dead_mail_backend_and_the_failure_is_visible(self):
-        """The whole point of the fail-safe path.
+    """A dead mail server must cost an email, never a comment — and now it
+    cannot even cost the request, because no send happens inside it."""
 
-        A comment lost because an SMTP server was down is a far worse bug than
-        an unsent email -- and on this host TODAY every send fails, because no
-        EMAIL_* settings are configured at all.
-        """
+    def test_a_dead_backend_cannot_touch_the_comment_at_all(self):
         self.client.post(PEOPLE, {'handle': 'bookkeeper', 'email': 'bk@example.invalid'},
                          format='json')
         boom = ConnectionRefusedError('[Errno 111] Connection refused')
         with patch('django.core.mail.EmailMessage.send', side_effect=boom):
             r = self.client.post(COMMENTS, _payload(comment='@bookkeeper urgent'),
                                  format='json')
-
-        # 1. the comment saved
+        # Nothing was even attempted during the save — SMTP is off this path.
         self.assertEqual(r.status_code, 200)
-        self.assertTrue(r.data['id'])
         self.assertEqual(r.data['comment'], '@bookkeeper urgent')
-        # 2. the failure is returned to the caller
-        self.assertEqual(len(r.data['mentions']['failed']), 1)
-        self.assertIn('Connection refused', r.data['mentions']['failed'][0]['error'])
-        self.assertEqual(r.data['mentions']['notified'], [])
-        # 3. and recorded, so it is visible after the response is gone
+        self.assertEqual(r.data['mentions']['queued'], ['bk@example.invalid'])
+
+    def test_a_failure_at_send_time_is_recorded_and_stays_queued(self):
+        self.client.post(PEOPLE, {'handle': 'bookkeeper', 'email': 'bk@example.invalid'},
+                         format='json')
+        r = self.client.post(COMMENTS, _payload(comment='@bookkeeper urgent'), format='json')
+        with patch('django.core.mail.EmailMessage.send',
+                   side_effect=ConnectionRefusedError('[Errno 111] Connection refused')):
+            res = self.client.post(NOTIFY % r.data['id'], {}, format='json')
+        self.assertEqual(len(res.data['failed']), 1)
+        self.assertIn('Connection refused', res.data['failed'][0]['error'])
         with connection.cursor() as c:
             c.execute('SELECT email, notified_at, error FROM app.cube_comment_mentions '
                       'WHERE comment_id = %s', [r.data['id']])
             row = c.fetchone()
         self.assertEqual(row[0], 'bk@example.invalid')
-        self.assertIsNone(row[1])
+        self.assertIsNone(row[1], 'a failed send was marked delivered')
         self.assertIn('Connection refused', row[2])
 
-    def test_a_failed_mention_can_be_retried_by_reposting(self):
+    def test_a_failed_mention_can_be_retried_without_re_typing_the_comment(self):
         from django.core import mail
         self.client.post(PEOPLE, {'handle': 'bookkeeper', 'email': 'bk@example.invalid'},
                          format='json')
+        r = self.client.post(COMMENTS, _payload(comment='@bookkeeper hi'), format='json')
         with patch('django.core.mail.EmailMessage.send',
                    side_effect=ConnectionRefusedError('down')):
-            self.client.post(COMMENTS, _payload(comment='@bookkeeper hi'), format='json')
+            self.client.post(NOTIFY % r.data['id'], {}, format='json')
         mail.outbox = []
-        r = self.client.post(COMMENTS, _payload(comment='@bookkeeper hi'), format='json')
-        self.assertEqual(r.data['mentions']['notified'], ['bk@example.invalid'])
+        res = self.client.post(NOTIFY % r.data['id'], {}, format='json')
+        self.assertEqual(res.data['notified'], ['bk@example.invalid'])
         self.assertEqual(len(mail.outbox), 1)
 
 
