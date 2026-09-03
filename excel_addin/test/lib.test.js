@@ -153,3 +153,61 @@ test('a detail sheet, a foreign sheet or no sheet means a new sheet', () => {
   assert.strictEqual(lib.cubeTarget({ id: null, binding: { kind: 'cube', spec: {} } }), null);
   assert.strictEqual(lib.cubeTarget(null), null);
 });
+
+/* ── column widths across a rebuild ─────────────────────────────────────
+   The behavioural side of this is test/widths.test.js, which drives the pane.
+   These pin the mapping itself: which old column a new column inherits from,
+   and what happens when there is no honest answer. */
+
+test('a fresh sheet gets the defaults: outer row labels, the long one, values', () => {
+  assert.deepStrictEqual(lib.cubeWidths({ nRowDims: 2, nCols: 3 }, null),
+    [130, 330, 104, 104, 104, 104]);
+  // One row dimension: that one column IS the long one.
+  assert.deepStrictEqual(lib.cubeWidths({ nRowDims: 1, nCols: 1 }, null), [330, 104, 104]);
+});
+
+test('an unchanged layout keeps every width, defaults included', () => {
+  const prev = { widths: [60, 240, 70, 150], nRowDims: 2 };
+  assert.deepStrictEqual(lib.cubeWidths({ nRowDims: 2, nCols: 1 }, prev), [60, 240, 70, 150]);
+});
+
+test('the grand total is matched to the grand total, not to its index', () => {
+  const prev = { widths: [60, 240, 70, 150], nRowDims: 2 };
+  // A second period: the new column takes the default and 150 moves right.
+  assert.deepStrictEqual(lib.cubeWidths({ nRowDims: 2, nCols: 2 }, prev),
+    [60, 240, 70, 104, 150]);
+});
+
+test('a row-label column whose dimension went away takes the default', () => {
+  const prev = { widths: [60, 240, 70, 150], nRowDims: 2 };
+  assert.deepStrictEqual(lib.cubeWidths({ nRowDims: 1, nCols: 1 }, prev), [330, 70, 150]);
+});
+
+test('a width that could not be read falls back to the default for that column', () => {
+  const prev = { widths: [null, null, 70, 150], nRowDims: 2 };
+  assert.deepStrictEqual(lib.cubeWidths({ nRowDims: 2, nCols: 1 }, prev), [130, 330, 70, 150]);
+});
+
+test('a sheet too narrow to be a cube of ours is defaulted, not guessed at', () => {
+  // Someone deleted columns by hand; there is no honest mapping left.
+  assert.deepStrictEqual(lib.cubeWidths({ nRowDims: 2, nCols: 1 },
+    { widths: [60, 240], nRowDims: 2 }), [130, 330, 104, 104]);
+  assert.deepStrictEqual(lib.cubeWidths({ nRowDims: 2, nCols: 1 },
+    { widths: [], nRowDims: 2 }), [130, 330, 104, 104]);
+});
+
+test('detail columns are fixed, so position is identity', () => {
+  assert.deepStrictEqual(lib.detailWidths([80, 60, 90], null), [80, 60, 90]);
+  assert.deepStrictEqual(lib.detailWidths([80, 60, 90], { widths: [30, null] }), [30, 60, 90]);
+  // A sheet from an older, narrower COLUMNS list: the new columns default.
+  assert.deepStrictEqual(lib.detailWidths([80, 60, 90], { widths: [30] }), [30, 60, 90]);
+});
+
+test('adjacent equal widths collapse into one range call', () => {
+  assert.deepStrictEqual(lib.widthRuns([130, 330, 104, 104, 104]),
+    [{ col: 0, span: 1, width: 130 },
+     { col: 1, span: 1, width: 330 },
+     { col: 2, span: 3, width: 104 }]);
+  assert.deepStrictEqual(lib.widthRuns([]), []);
+  assert.deepStrictEqual(lib.widthRuns([90]), [{ col: 0, span: 1, width: 90 }]);
+});

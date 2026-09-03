@@ -2,7 +2,7 @@
 /* prove-regressions.js — proof that the harness would have caught 2026-09-03.
  *
  * A test that has never failed has proved nothing. This reconstructs each of
- * the four bugs that shipped that day in a throwaway copy of the add-in, runs
+ * the bugs that shipped that day in a throwaway copy of the add-in, runs
  * the check that is supposed to catch it, and requires the check to FAIL —
  * then requires it to pass on the tree as it stands. A check that passes on
  * both is not a check; this script says so and exits non-zero.
@@ -62,6 +62,22 @@ const REGRESSIONS = [
     find: `      var kind = (r.is_total ? 'T' : 'L') + r.depth;`,
     replace: `      var kind = (r.is_total ? 'T' : 'L') + Math.min(r.depth, 2);`,
     check: ['test', 'test/lib.test.js']
+  },
+  {
+    name: 'widths-reset-on-rebuild',
+    story: 'the in-place rebuild re-applied the default widths afterwards, so '
+         + 'hand-sizing the columns survived only until the next Build '
+         + '("when I rebuild the cube it resets my column spacing")',
+    file: 'app.js',
+    find: `      applyColumnWidths(sheet, headerRowIdx,
+        LIB.cubeWidths({ nRowDims: nRowDims, nCols: nCols }, prevWidths));`,
+    replace: `      if (nRowDims > 1) {
+        sheet.getRangeByIndexes(headerRowIdx, 0, 1, nRowDims - 1).format.columnWidth = 130;
+      }
+      sheet.getRangeByIndexes(headerRowIdx, nRowDims - 1, 1, 1).format.columnWidth = 330;
+      sheet.getRangeByIndexes(headerRowIdx, nRowDims, 1, width - nRowDims)
+        .format.columnWidth = 104;`,
+    check: ['test', 'test/widths.test.js']
   },
   {
     name: 'dead-handler',
@@ -135,7 +151,8 @@ function prove(reg, check, mutatedDir) {
 }
 
 let allGood = true;
-console.log('Reconstructing the 2026-09-03 regressions and checking that each check sees them.\n');
+console.log('Reconstructing the ' + REGRESSIONS.length + ' 2026-09-03 regressions and '
+  + 'checking that each check sees them.\n');
 
 for (const reg of REGRESSIONS) {
   console.log('  ' + reg.name);
@@ -164,7 +181,8 @@ for (const reg of REGRESSIONS) {
 }
 
 if (allGood) {
-  console.log('All four regressions are caught by a check that passes on HEAD.');
+  console.log('All ' + REGRESSIONS.length
+    + ' regressions are caught by a check that passes on HEAD.');
   process.exit(0);
 }
 console.log('At least one check is blind, or does not pass on HEAD. See above.');

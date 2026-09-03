@@ -122,12 +122,107 @@
     return (b && b.kind === 'cube' && b.spec && activeSheet.id) ? activeSheet.id : null;
   }
 
+  /* ── column widths across a rebuild ────────────────────── */
+
+  /* What a cube column is worth when nobody has said otherwise.
+     The row-label columns are not all the same job: the outer ones hold short
+     codes (REVENUE, OVERHEADS), the innermost holds the long account name, and
+     the value columns are uniform so the eye can compare down one. */
+  var CUBE_W = { rowDim: 130, rowLeaf: 330, value: 104 };
+
+  function defaultCubeWidth(i, nRowDims) {
+    if (i < nRowDims - 1) return CUBE_W.rowDim;
+    if (i === nRowDims - 1) return CUBE_W.rowLeaf;
+    return CUBE_W.value;
+  }
+
+  /* The width every column of a rebuilt cube should end up at.
+   *
+   * A rebuild rewrites the sheet in place, and until now it re-applied the
+   * defaults above afterwards -- so hand-sizing the columns (narrow ones with
+   * the last one wide, which is how the row-label hierarchy reads) survived
+   * only until the next Build. Manual sizing is intent, not noise: a column
+   * that was already on this sheet keeps the width it has, and only a
+   * genuinely NEW column takes a default.
+   *
+   * `prev` is null for a fresh sheet (everything defaults). Otherwise it is
+   * `{ widths: [...], nRowDims: n }` read off the sheet before it was cleared,
+   * `widths` positional and holding null where a width could not be read.
+   *
+   * Position alone is not identity, because the layout changes between
+   * rebuilds. So columns are matched by ROLE:
+   *
+   *   - row-label columns keep their width only if there are still as many of
+   *     them; if the layout went from two row dimensions to one, old column 0
+   *     held a class code and new column 0 holds an account name, and carrying
+   *     130 across would be stretching a saved width onto an unrelated column.
+   *   - the k-th value column keeps the k-th old value column's width, so
+   *     adding months appends columns rather than shifting every width along.
+   *   - the grand total keeps the old grand total's width -- it is the last
+   *     column in both layouts, at different indices.
+   *   - anything with no counterpart (the new months) takes the default.
+   */
+  function cubeWidths(layout, prev) {
+    var nRowDims = layout.nRowDims;
+    var width = nRowDims + layout.nCols + 1;
+    /* A sheet whose used range cannot hold even one value column and a total
+       is not a cube we rendered -- someone edited it. Default the lot rather
+       than guess. */
+    var usable = !!(prev && prev.widths && prev.widths.length >= prev.nRowDims + 2);
+    var out = [];
+    for (var i = 0; i < width; i++) {
+      var j = -1;
+      if (!usable) j = -1;                                    // nothing to keep
+      else if (i < nRowDims) j = (prev.nRowDims === nRowDims) ? i : -1;
+      else if (i === width - 1) j = prev.widths.length - 1;
+      else {
+        j = prev.nRowDims + (i - nRowDims);
+        if (j >= prev.widths.length - 1) j = -1;   // a column the old sheet did not have
+      }
+      var kept = (j >= 0 && j < prev.widths.length) ? prev.widths[j] : null;
+      out.push(kept > 0 ? kept : defaultCubeWidth(i, nRowDims));
+    }
+    return out;
+  }
+
+  /* The same, for a detail sheet: fixed columns, so position IS identity.
+     `defaults` is one width per column; `prev` as above, or null. */
+  function detailWidths(defaults, prev) {
+    var have = (prev && prev.widths) ? prev.widths : [];
+    return defaults.map(function (d, i) {
+      return have[i] > 0 ? have[i] : d;
+    });
+  }
+
+  /* Widths as runs of adjacent columns that share one width.
+   *
+   * Setting columnWidth column by column is one queued range call per column,
+   * and a wide cube is fifty of them -- the same shape of cost that made
+   * per-row formatting appear to hang. Adjacent equal widths collapse into one
+   * call, so the defaults on a fresh sheet cost exactly the three calls they
+   * did when they were three literals. */
+  function widthRuns(widths) {
+    var runs = [];
+    var start = 0;
+    for (var i = 1; i <= widths.length; i++) {
+      if (i === widths.length || widths[i] !== widths[start]) {
+        runs.push({ col: start, span: i - start, width: widths[start] });
+        start = i;
+      }
+    }
+    return runs;
+  }
+
   return {
     depthRuns: depthRuns,
     dimfParam: dimfParam,
     totalsParams: totalsParams,
     samePrefix: samePrefix,
     toSerial: toSerial,
-    cubeTarget: cubeTarget
+    cubeTarget: cubeTarget,
+    defaultCubeWidth: defaultCubeWidth,
+    cubeWidths: cubeWidths,
+    detailWidths: detailWidths,
+    widthRuns: widthRuns
   };
 });

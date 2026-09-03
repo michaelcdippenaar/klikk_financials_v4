@@ -714,6 +714,7 @@
     // 1. Prepare the sheet (create or clear) and lay down the header.
     var keepTable = null;
     var prevRows = 0;
+    var prevWidths = null;
 
     await Excel.run(async function (ctx) {
       var sheet;
@@ -722,9 +723,11 @@
         var tables = sheet.tables;
         tables.load('items/name');
         var used = sheet.getUsedRange(true);
-        used.load('rowCount');
+        used.load('rowCount,columnCount');
         await ctx.sync();
         prevRows = used.rowCount || 0;
+        // Same rule as a cube rebuild: a refresh must not undo hand-sizing.
+        prevWidths = { widths: await readColumnWidths(ctx, sheet, used.columnCount || 0) };
         // Reuse the existing table rather than dropping it, so a PivotTable
         // built on this sheet keeps its source and refreshes with the data.
         keepTable = tables.items.length ? tables.items[0].name : null;
@@ -777,8 +780,9 @@
         if (c.fmt === 'money') col.numberFormat = [[MONEY_FMT]];
         else if (c.fmt === 'date') col.numberFormat = [[DATE_FMT]];
         else if (c.fmt === 'int') col.numberFormat = [['0']];
-        sheet.getRangeByIndexes(0, i, 1, 1).format.columnWidth = c.width * 7.5;
       });
+      applyColumnWidths(sheet, 0, LIB.detailWidths(
+        COLUMNS.map(function (c) { return c.width * 7.5; }), prevWidths));
 
       // A shorter result must not leave last refresh's rows stranded below.
       if (prevRows > rowCount) {
@@ -1933,6 +1937,9 @@
 
     var sheetId = targetId;
     var sheetName = '';
+    /* Set on a rebuild: the widths this sheet is carrying right now, so
+       hand-sizing survives the clear. See LIB.cubeWidths. */
+    var prevWidths = null;
 
     await Excel.run(async function (ctx) {
       var sheet;
@@ -1940,7 +1947,16 @@
         sheet = ctx.workbook.worksheets.getItem(targetId);
         var tables = sheet.tables;
         tables.load('items/name');
+        var used = sheet.getUsedRangeOrNullObject(true);
+        used.load('columnCount,isNullObject');
         await ctx.sync();
+        // The row dimensions this sheet was LAST built with, which is what
+        // decides whether its row-label columns still mean the same thing.
+        var wasSpec = (readBinding(targetId) || {}).spec;
+        prevWidths = {
+          widths: await readColumnWidths(ctx, sheet, used.isNullObject ? 0 : used.columnCount),
+          nRowDims: (wasSpec && wasSpec.rows) ? wasSpec.rows.length : nRowDims
+        };
         tables.items.forEach(function (t) { t.delete(); });
         /* clear() leaves outline groups and frozen panes behind, so a rebuild
            with fewer row levels kept stale +/- buttons on rows that no longer
@@ -2069,20 +2085,15 @@
       gt.format.borders.getItem('EdgeTop').style = 'Double';
       gt.format.borders.getItem('EdgeTop').color = SHEET.accent;
 
-      // Row-dimension columns get the room; value columns are uniform so the
-      // eye can compare down a column without re-reading its width.
-      /* Row-label columns are not all the same job. The outer ones hold short
-         codes (REVENUE, OVERHEADS); the innermost holds the long account name.
-         Giving all of them 200 wasted a screen of width on the outer ones and
-         still clipped the inner one. */
-      if (nRowDims > 1) {
-        sheet.getRangeByIndexes(headerRowIdx, 0, 1, nRowDims - 1).format.columnWidth = 130;
-      }
-      sheet.getRangeByIndexes(headerRowIdx, nRowDims - 1, 1, 1).format.columnWidth = 330;
-      // One call for every value column rather than one call per column: a wide
-      // cube can be fifty columns, and each of those was a round trip.
-      sheet.getRangeByIndexes(headerRowIdx, nRowDims, 1, width - nRowDims)
-        .format.columnWidth = 104;
+      /* Row-dimension columns get the room; value columns are uniform so the
+         eye can compare down a column without re-reading its width -- but only
+         where nobody has sized the column by hand. A rebuild used to re-apply
+         these defaults unconditionally, which threw away MC's sizing on every
+         Build; a column that was already on this sheet now keeps its width and
+         only a genuinely new one defaults. Runs, not one call per column: a
+         wide cube is fifty columns and each of those was a round trip. */
+      applyColumnWidths(sheet, headerRowIdx,
+        LIB.cubeWidths({ nRowDims: nRowDims, nCols: nCols }, prevWidths));
       // Autofit rather than a fixed height: wrapText with a fixed height
       // clips a long column label instead of showing it.
       try { sheet.getRangeByIndexes(3, 0, nLevels, width).format.autofitRows(); }
@@ -2154,6 +2165,43 @@
     var a = [];
     for (var i = 0; i < n; i++) a.push('');
     return a;
+  }
+
+  /* ── column widths, read and written in one round trip each ──────── */
+
+  // A sheet with more columns than this is not a cube of ours; reading every
+  // one of them would cost more than the sizing is worth.
+  var WIDTH_SCAN_CAP = 256;
+
+  /* The width of each of the first `count` columns, positionally, with null
+     where the host would not give one.
+
+     One `load()` per column is unavoidable -- Excel reports columnWidth as
+     null for a multi-column range whose columns differ, which is exactly the
+     case we are here to preserve -- but they are all QUEUED and settled by a
+     single sync. Per-column round trips are what make a large cube appear to
+     hang; per-column queued loads do not. */
+  async function readColumnWidths(ctx, sheet, count) {
+    var n = Math.min(Math.max(count || 0, 0), WIDTH_SCAN_CAP);
+    if (!n) return [];
+    var fmts = [];
+    for (var i = 0; i < n; i++) {
+      var f = sheet.getRangeByIndexes(0, i, 1, 1).format;
+      f.load('columnWidth');
+      fmts.push(f);
+    }
+    await ctx.sync();
+    return fmts.map(function (f) {
+      var w = Number(f.columnWidth);
+      return isFinite(w) && w > 0 ? w : null;
+    });
+  }
+
+  // Adjacent columns that share a width go in one call -- see LIB.widthRuns.
+  function applyColumnWidths(sheet, row, widths) {
+    LIB.widthRuns(widths).forEach(function (r) {
+      sheet.getRangeByIndexes(row, r.col, 1, r.span).format.columnWidth = r.width;
+    });
   }
 
   async function buildCube(opts) {
