@@ -186,7 +186,7 @@
       'pickerApply', 'pickerCancel', 'pickerMsg',
       'btnPickUp', 'btnPickDown', 'btnPickSortAz',
       'subsetPick', 'subsetName', 'btnSubsetLoad', 'btnSubsetSave', 'btnSubsetDelete',
-      'viewPick', 'viewName', 'btnViewLoad', 'btnViewSave', 'btnViewDelete',
+      'viewPick', 'viewName', 'btnViewLoad', 'btnViewRebuild', 'btnViewSave', 'btnViewDelete',
       'commentPanel', 'commentAuthor', 'btnSyncComments', 'commentMsg',
       'btnFullPivot', 'selNone', 'selHas', 'selPath', 'selVal', 'selComment',
       'btnSaveComment', 'btnDeleteComment', 'selBox', 'markCells', 'btnPushComments',
@@ -313,6 +313,9 @@
     el.btnBulkFlag.addEventListener('click', function () { run(flagSelection); });
     el.btnViewSave.addEventListener('click', function () { run(saveCurrentView); });
     el.btnViewLoad.addEventListener('click', function () { run(openSavedView); });
+    if (el.btnViewRebuild) {
+      el.btnViewRebuild.addEventListener('click', function () { run(rebuildSavedView); });
+    }
     el.btnViewDelete.addEventListener('click', function () {
       run(async function () {
         var n = el.viewPick.value;
@@ -1592,6 +1595,37 @@
     el.cubeMsg.textContent = 'Opened "' + name + '". Build to write it to a sheet.';
     el.cubeMsg.className = 'msg';
     if (wells.rows.length) await buildCube();
+  }
+
+
+  /* Rebuild the selected view from its SAVED definition.
+
+     Open applies whatever definition was cached when the list was last
+     fetched, and only builds when rows happen to be populated. That is wrong
+     twice over once a view can be edited: the definition may have changed on
+     the server since — by the overwrite path, or by an agent — and the wells
+     may have drifted locally since you opened it.
+
+     Rebuild re-fetches the list first, so what lands on the sheet is what is
+     actually saved rather than what this pane remembers, and then builds
+     unconditionally instead of silently doing nothing. It DISCARDS local
+     well edits by design: that is the point of asking for the saved view. */
+  async function rebuildSavedView() {
+    var name = el.viewPick.value;
+    if (!name) throw new Error('Pick a saved view to rebuild.');
+    await loadViewList();
+    el.viewPick.value = name;
+    var v = savedViews[name];
+    if (!v) throw new Error('"' + name + '" is no longer saved — the list has been refreshed.');
+    applyCubeSpec(v.spec || {});
+    if (v.query) applyQuery(v.query);
+    rememberCubeSpec();
+    if (!wells.rows.length) {
+      throw new Error('"' + name + '" has no row fields saved, so there is nothing to build.');
+    }
+    await buildCube();
+    el.cubeMsg.textContent = 'Rebuilt "' + name + '" from its saved definition.';
+    el.cubeMsg.className = 'msg msg--ok';
   }
 
   var pickerWired = false;
