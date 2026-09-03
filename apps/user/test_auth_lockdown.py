@@ -41,9 +41,20 @@ GATED = [
     ("/xero/data/quotes/QU-0001/", "get"),
     ("/xero/data/invoices/", "get"),
     ("/xero/data/invoices/INV-0001/", "get"),
-    # xero_data — journal reads (gated 2026-08-19, re-pinned here)
+    # xero_data — journal reads (gated 2026-08-19, re-pinned here).
+    # The whole cube surface, not just the two the original sweep listed: this
+    # IS the Excel add-in's read surface, and excel_addin/README.md names four
+    # endpoints that "must stay IsAuthenticated" while only two of them were
+    # pinned anywhere. Every one of these returns journal detail or aggregates
+    # over all 271,764 Klikk journal lines.
     ("/xero/data/journals/search/?limit=1", "get"),
     ("/xero/data/journals/filters/", "get"),
+    ("/xero/data/journals/pivot/?rows=account_type&measure=amount", "get"),
+    ("/xero/data/journals/pivot/dimensions/", "get"),
+    ("/xero/data/journals/pivot/members/?dimension=account", "get"),
+    ("/xero/data/journals/pivot/drill/", "get"),
+    ("/xero/data/journals/pivot/subsets/", "get"),
+    ("/xero/data/journals/pivot/views/", "get"),
     # xero metadata / core / auth / sync / validation
     ("/xero/metadata/contacts/", "get"),
     ("/xero/metadata/accounts/", "get"),

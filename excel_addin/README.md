@@ -4,12 +4,15 @@ Office.js task pane over the Klikk Financials general ledger. Static bundle,
 served by Django from this directory at `/excel-addin/` (publicly
 `https://console.8-bit.space/backend/excel-addin/`).
 
-Read-only by design. There is no write path in this add-in — not to Postgres,
-not to Xero.
+Read-only against Xero and against every other upstream system: there is no
+write path to Xero in this add-in, and its credential cannot reach one either
+(see [Credentials](#credentials)). It *does* write to our own Postgres — cube
+comments and saved subsets/views — which is deliberate and is the only writing
+it does anywhere.
 
 ## The endpoints it depends on REQUIRE AUTHENTICATION. Do not regress them.
 
-These four are `IsAuthenticated` and must stay that way:
+These are `IsAuthenticated` and must stay that way:
 
 | Endpoint | Purpose |
 |---|---|
@@ -17,6 +20,13 @@ These four are `IsAuthenticated` and must stay that way:
 | `GET /xero/data/journals/filters/` | entity / account / supplier pickers |
 | `GET /xero/data/journals/pivot/` | server-side cross-tab (cube view) |
 | `GET /xero/data/journals/pivot/dimensions/` | dimension + measure catalogue |
+| `GET /xero/data/journals/pivot/members/` | member lists for the subset editor |
+| `GET /xero/data/journals/pivot/drill/` | the detail behind one cell |
+| `GET /xero/data/journals/pivot/subsets/` | saved member subsets |
+| `GET /xero/data/journals/pivot/views/` | saved layouts |
+
+All eight are pinned in `apps/user/test_auth_lockdown.py` (`GATED`), which
+until 2026-09-03 covered only the first two.
 
 `journals/search/` was `AllowAny` **and publicly routed** until 2026-08-19. In
 that state all 271,764 Klikk journal lines — accounts, suppliers, amounts,
@@ -58,9 +68,57 @@ This writes to OUR Postgres only. Nothing here goes near Xero.
 ## Credentials
 
 The add-in authenticates with a **DRF authtoken** (`Authorization: Token <key>`)
-bound to a dedicated, non-staff, non-superuser Django user `excel-addin`. The
-token is entered once by the operator and kept in the task pane's
-`localStorage`, scoped to this add-in's origin on that machine.
+bound to a dedicated, non-staff, non-superuser Django user `excel-addin` whose
+`role` is **`service_readonly`**. The token is entered once by the operator and
+kept in the task pane's `localStorage`, scoped to this add-in's origin on that
+machine.
+
+The role is what makes the identity least-privilege. **Until 2026-09-03 it was
+not.** The `excel-addin` user was `role=standard`, and `AuditorGateMiddleware`
+narrowed only `role=auditor`, so this token passed every `IsAuthenticated` view
+in the project. That included `XeroCreateDraftInvoiceView`
+(`POST /xero/data/invoices/create-draft/`) — the one path in this codebase that
+**writes to Xero** — and every Xero sync trigger (`update/journals/`,
+`process/journals/`, `sync/documents/`, `aged-payables/sync/`,
+`aged-receivables/sync/`, `quotes/sync/`, `invoices/sync/`), any of which can
+spend the 5,000-call daily Xero API budget. The JavaScript never called those;
+the credential could. Nothing was ever written to Xero through it.
+
+`service_readonly` is enforced by the same middleware as the auditor role
+(`apps/user/middleware.py`, gate C) — middleware and not a DRF permission
+class, because most views set their own `permission_classes` and would silently
+override a default. It is a pure allowlist:
+
+| Allowed | |
+|---|---|
+| `GET`/`HEAD` on `/xero/data/journals/...` | the whole cube read surface — search, filters, pivot, dimensions, members, drill, subsets, views, comments |
+| `GET` on `/xero/data/documents/<id>/file/` | the HMAC-signed receipt links a drill puts in its rows |
+| `POST` `journals/pivot/comments/`, `.../comments/bulk/`, `.../comments/<id>/status/` | cube comments — **our Postgres only** |
+| `POST` + `DELETE` `journals/pivot/subsets/`, `journals/pivot/views/` | saved subsets and views — our Postgres only |
+
+Everything else answers **403**: every Xero write, every sync trigger, the rest
+of `/xero/`, Investec, the pricelist, the audit surface, and the Django admin.
+"Read-only" here means read-only **against Xero and against every other
+system** — the add-in does write to our own Postgres, which is what cube
+comments and saved views are.
+
+Pinned by `apps/user/test_service_readonly_gate.py`. Note the gate is only real
+because `resolve_request_user` understands `Authorization: Token <key>`; it
+originally resolved sessions and `Bearer` JWTs alone, which is precisely the
+credential shape this add-in does *not* use.
+
+To apply the role to a service account:
+
+```bash
+ssh klikk-financials 'sudo docker exec klikk-financials-v4 python manage.py shell -c "
+from django.contrib.auth import get_user_model
+U = get_user_model()
+u = U.objects.get(username=\"excel-addin\")
+u.role = U.Role.SERVICE_READONLY
+u.save(update_fields=[\"role\"])
+print(u.username, u.role)
+"'
+```
 
 Do **not** move it to `Office.context.document.settings` — that persists inside
 the workbook, so the credential would travel to anyone the file is shared with.
@@ -75,7 +133,13 @@ It deliberately does **not** use the shared `KLIKK_API_TOKEN` service token
 write endpoints — and it is shared, so it could not be revoked for Excel alone.
 A read-only client whose credential lives on a laptop gets its own least-
 privilege identity. Keep it that way unless the whole token scheme is
-consolidated deliberately.
+consolidated deliberately — and note that a separate identity is only
+least-privilege if it is also separately *scoped*, which is the lesson of the
+2026-09-03 finding above: for two weeks it was separate and fully privileged.
+
+If the add-in needs a new endpoint, widen the allowlist in
+`apps/user/middleware.py` and add it to the test file. Do **not** move the
+account back to `role=standard` to make a call work.
 
 Revoke by deleting the `excel-addin` row from `authtoken_token`.
 
