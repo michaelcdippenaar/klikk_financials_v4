@@ -102,13 +102,21 @@ AUDITOR_AUTH_RE = re.compile(r'^/api/auth/(login|refresh|token(/(refresh|verify)
 # too (both before AND after the flag clears — voluntary changes are allowed).
 CHANGE_PASSWORD_PATH = '/api/auth/change-password/'
 
-# The ONLY write an auditor may make: POST a comment on a finding or a receipt.
+# The ONLY writes an auditor may make: POST a comment on a finding or a receipt,
+# or POST a REPLY on a comment in the cube-comment register.
 # Anchored at both ends and method-checked against POST alone, so it cannot be
 # widened by a trailing segment (…/comments/1/) or a different verb. The receipt
 # key is a sha256 — alphanumeric by construction; the class deliberately excludes
 # '/', '.' and every other separator so no sibling route can be reached through it.
+#
+# The cube alternative is the same shape and the same reasoning: a numeric comment
+# id and the literal 'replies', with nothing after it. It grants POST on
+# /audit/cube-comments/<id>/replies/ ONLY — not the register list (a safe method,
+# already allowed by the /audit/ prefix), not a reply-to-a-reply URL, and nothing
+# under /xero/data/, where the register itself lives and the whole GL sits.
 AUDITOR_WRITE_RE = re.compile(
-    r'^/audit/(findings/\d+/comments|receipts/[A-Za-z0-9]+/comments)/$'
+    r'^/audit/(findings/\d+/comments|receipts/[A-Za-z0-9]+/comments'
+    r'|cube-comments/\d+/replies)/$'
 )
 
 

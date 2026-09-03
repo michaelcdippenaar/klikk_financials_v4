@@ -1,14 +1,17 @@
 """
-Shared vocabulary for the two comment surfaces: receipts (SlipComment) and
-findings (AuditFindingComment).
+Shared vocabulary for the comment surfaces: receipts (SlipComment), findings
+(AuditFindingComment) and cube-comment replies (app.cube_comment_replies, raw
+SQL — hence the dict tolerance below).
 
 Both the live feed (comment_feed_views) and the outbound webhook
 (comment_webhook) need the same three things about any comment:
 
-  * ``kind``       — 'receipt' | 'finding'
-  * ``object_id``  — the sha256 or the finding pk, as a string
+  * ``kind``       — 'receipt' | 'finding' | 'cube_comment'
+  * ``object_id``  — the sha256, the finding pk, or the cube COMMENT id (never
+                     the reply id: the thread is the object, not the message)
   * ``object_ref`` — something a HUMAN recognises: "Makro · 2026-08-04 ·
-                     R259.00" or "FY26-001 Payments made before bill"
+                     R259.00", "FY26-001 Payments made before bill", or the
+                     figure a cube comment is pinned to
 
 They live here rather than in either app so the two surfaces cannot drift into
 describing the same comment two different ways — a feed event and a webhook
@@ -25,17 +28,30 @@ logger = logging.getLogger(__name__)
 
 RECEIPT = 'receipt'
 FINDING = 'finding'
+CUBE_COMMENT = 'cube_comment'
+
+
+def _field(comment, name):
+    """Attribute or key.
+
+    Receipt and finding comments are Django models; a cube reply is a dict off a
+    raw-SQL cursor. Both have to produce the SAME payload, and one accessor here
+    is better than a second serialiser that can drift from this one.
+    """
+    if isinstance(comment, dict):
+        return comment.get(name)
+    return getattr(comment, name, None)
 
 
 def comment_payload(comment) -> dict:
     """The comment body shared by feed events and webhook payloads."""
-    created = getattr(comment, 'created_at', None)
+    created = _field(comment, 'created_at')
     return {
-        'id': comment.id,
-        'parent_id': comment.parent_id,
-        'author': comment.author,
-        'text': comment.text,
-        'created_at': created.isoformat() if created else None,
+        'id': _field(comment, 'id'),
+        'parent_id': _field(comment, 'parent_id'),
+        'author': _field(comment, 'author') or '',
+        'text': _field(comment, 'text') or '',
+        'created_at': created.isoformat() if hasattr(created, 'isoformat') else (created or None),
     }
 
 
@@ -91,8 +107,19 @@ def receipt_ref(sha256: str) -> str:
 
 
 def object_ref(kind: str, target) -> str:
-    """``target`` is a sha256 string for receipts, a finding instance for findings."""
-    return receipt_ref(target) if kind == RECEIPT else finding_ref(target)
+    """``target``: a sha256 for receipts, a finding instance for findings, and an
+    already-resolved label string for cube comments.
+
+    The cube label is computed at the storage layer
+    (cube_comment_replies.subject_ref) because it needs the comment row that the
+    caller has already fetched — resolving it again here would be a second query
+    for a string we are holding.
+    """
+    if kind == RECEIPT:
+        return receipt_ref(target)
+    if kind == CUBE_COMMENT:
+        return str(target or '')[:300]
+    return finding_ref(target)
 
 
 def console_url(kind: str, object_id: str) -> str:
@@ -102,4 +129,6 @@ def console_url(kind: str, object_id: str) -> str:
     base = getattr(settings, 'CONSOLE_BASE_URL', '').rstrip('/')
     if kind == RECEIPT:
         return f'{base}/app/pipeline/audit/receipts?sha256={object_id}'
+    if kind == CUBE_COMMENT:
+        return f'{base}/app/pipeline/audit/comments?comment={object_id}'
     return f'{base}/app/pipeline/audit/findings?finding={object_id}'

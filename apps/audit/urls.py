@@ -16,8 +16,8 @@ by review).
 from django.urls import path
 
 from . import (
-    comment_feed_views, findings_cube_views, findings_graph_views, findings_links_views,
-    findings_views, views,
+    comment_feed_views, cube_comment_views, findings_cube_views, findings_graph_views,
+    findings_links_views, findings_views, views,
 )
 from .findings_file_view import finding_attachment_file_view
 from .slip_view import slip_file_view
@@ -36,6 +36,14 @@ urlpatterns = [
 
     # --- live comment feed (polled by the console; see comment_feed_views) ---
     path('comments/feed/', comment_feed_views.comment_feed_view, name='comment_feed'),
+
+    # --- cube-comment register + reply threads (see cube_comment_views) ---
+    # Mounted HERE, under /audit/, because that prefix is what the auditor gate
+    # reads. The register itself lives in apps.xero.xero_data; only these two
+    # routes are exposed to auditors, and /xero/data/... stays shut.
+    path('cube-comments/', cube_comment_views.cube_comments_view, name='cube_comments'),
+    path('cube-comments/<int:comment_id>/replies/',
+         cube_comment_views.cube_comment_replies_view, name='cube_comment_replies'),
 
     # --- findings register: fixed-segment routes (MUST precede findings/<int:pk>/) ---
     path('findings/summary/', findings_views.findings_summary_view, name='findings_summary'),

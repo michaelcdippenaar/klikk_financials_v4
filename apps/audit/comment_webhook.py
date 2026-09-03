@@ -33,7 +33,9 @@ import logging
 from django.conf import settings
 from django.db import transaction
 
-from .comment_events import FINDING, RECEIPT, comment_payload, console_url, object_ref
+from .comment_events import (
+    CUBE_COMMENT, FINDING, RECEIPT, comment_payload, console_url, object_ref,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +47,16 @@ def _config():
     return url, secret, timeout
 
 
-def build_payload(kind: str, comment, target) -> dict:
-    """The JSON body. ``target`` is a sha256 (receipts) or a finding instance."""
-    object_id = str(target if kind == RECEIPT else target.pk)
+def build_payload(kind: str, comment, target, object_id: str | None = None) -> dict:
+    """The JSON body.
+
+    ``target`` is a sha256 (receipts), a finding instance (findings), or a label
+    string (cube comments). A cube reply's OBJECT is the comment it hangs off,
+    and that id cannot be read back out of a label — so the caller passes
+    ``object_id`` explicitly there rather than this function guessing.
+    """
+    if object_id is None:
+        object_id = str(target if kind == RECEIPT else target.pk)
     return {
         'event': 'comment.created',
         'kind': kind,
@@ -101,20 +110,24 @@ def _deliver(kind: str, comment_id: int, author: str, payload: dict) -> None:
     _log(kind, comment_id, author, url, status_code=response.status_code, snippet=snippet)
 
 
-def notify_comment_created(kind: str, comment, target=None) -> None:
+def notify_comment_created(kind: str, comment, target=None, object_id: str | None = None) -> None:
     """Queue a webhook for one new comment. Never raises.
 
     Call from inside the same transaction as the comment write — delivery is
     deferred to ``on_commit`` so nothing fires for a POST that rolls back.
+
+    ``comment`` is a model instance (receipts, findings) or a dict (a cube reply,
+    which is raw SQL); ``comment_payload`` handles both.
     """
     try:
         url, _secret, _timeout = _config()
         if not url:
             return
-        if target is None:
+        if target is None and kind != CUBE_COMMENT:
             target = comment.sha256 if kind == RECEIPT else comment.finding
-        payload = build_payload(kind, comment, target)
-        comment_id, author = comment.id, comment.author
+        payload = build_payload(kind, comment, target, object_id)
+        body = payload['comment']
+        comment_id, author = body['id'], body['author']
         transaction.on_commit(lambda: _deliver(kind, comment_id, author, payload))
     except Exception:  # noqa: BLE001 — a comment must never fail over its webhook
         logger.exception('Could not queue comment webhook for %s comment', kind)
@@ -135,6 +148,7 @@ def notify_comments_created(kind: str, comments, targets=None) -> None:
 
 
 __all__ = [
+    'CUBE_COMMENT',
     'FINDING',
     'RECEIPT',
     'build_payload',
