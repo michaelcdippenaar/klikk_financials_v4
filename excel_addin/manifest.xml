@@ -179,6 +179,20 @@
                 </Group>
             </CustomTab>
           </ExtensionPoint>
+
+          <!-- Re-open the pane by itself when a workbook that asked for it is
+               opened. Office gates this on a per-workbook flag the add-in sets
+               (Office.AutoShowTaskpaneWithDocument in document settings), so it
+               is opt-in per file rather than a global "always on" — Office has
+               no supported way to pin a task pane open in every workbook.
+               The flag is a boolean and lives in the workbook, so it travels
+               with a shared file; the API token does NOT (that stays in this
+               machine's localStorage — see README, Credentials). -->
+          <ExtensionPoint xsi:type="AutoOpenTaskpane">
+            <TaskpaneId>Office.AutoShowTaskpaneWithDocument</TaskpaneId>
+            <Title resid="Klikk.OpenLabel"/>
+            <SourceLocation resid="Klikk.TaskpaneUrl"/>
+          </ExtensionPoint>
         </DesktopFormFactor>
       </Host>
     </Hosts>
