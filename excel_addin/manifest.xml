@@ -7,7 +7,7 @@
   xsi:type="TaskPaneApp">
 
   <Id>5b4e7ec6-3634-49f0-a1a9-a90223523e68</Id>
-  <Version>1.0.0.0</Version>
+  <Version>1.0.1.0</Version>
   <ProviderName>Klikk Financials</ProviderName>
   <DefaultLocale>en-ZA</DefaultLocale>
   <DisplayName DefaultValue="Klikk Journals"/>
@@ -190,7 +190,6 @@
                machine's localStorage — see README, Credentials). -->
           <ExtensionPoint xsi:type="AutoOpenTaskpane">
             <TaskpaneId>Office.AutoShowTaskpaneWithDocument</TaskpaneId>
-            <Title resid="Klikk.OpenLabel"/>
             <SourceLocation resid="Klikk.TaskpaneUrl"/>
           </ExtensionPoint>
         </DesktopFormFactor>
