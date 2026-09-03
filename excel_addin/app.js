@@ -202,6 +202,7 @@
       window.__klikkStep = 'wireEvents';
       wireEvents();
       window.__klikkStep = 'wired';
+      reportMissingControls();
     } catch (e) {
       // Claim the boot panel so the watchdog does not overwrite this with a
       // vaguer message — that clobbering is what hid the real error before.
@@ -234,20 +235,49 @@
   });
 
 
+  /* Listener registration that cannot take its neighbours down.
+
+     wireEvents() and wirePicker() register dozens of listeners in sequence.
+     With bare el.x.addEventListener, ONE control missing from the page --
+     a renamed id, an HTML/JS pair from different releases -- throws, and
+     every listener after it is never attached: the pane renders and half
+     its buttons are dead, with nothing on screen saying why. Register each
+     one on its own, remember what was missing, and say so. */
+  var missingControls = [];
+
+  function on(id, ev, fn) {
+    var node = el[id] || document.getElementById(id);
+    if (!node || typeof node.addEventListener !== 'function') {
+      if (missingControls.indexOf(id) < 0) missingControls.push(id);
+      return;
+    }
+    node.addEventListener(ev, fn);
+  }
+
+  function reportMissingControls() {
+    window.__klikkMissing = missingControls.slice();
+    if (!missingControls.length || !el.errorMsg) return;
+    el.errorMsg.textContent = 'This page is missing ' + missingControls.length
+      + ' control' + (missingControls.length === 1 ? '' : 's') + ' the add-in expects ('
+      + missingControls.join(', ') + '). Those buttons are inert; the rest work. '
+      + 'Close and reopen the pane to fetch a matching page.';
+    el.errorMsg.hidden = false;
+  }
+
   function wireEvents() {
-    el.btnSettings.addEventListener('click', function () {
+    on('btnSettings', 'click', function () {
       el.settingsPanel.hidden = !el.settingsPanel.hidden;
     });
-    el.btnConnect.addEventListener('click', function () { connect(false); });
-    el.btnForget.addEventListener('click', forget);
-    el.btnLoad.addEventListener('click', function () { run(loadToNewSheet); });
-    el.btnCount.addEventListener('click', function () { run(showCount); });
-    el.btnCube.addEventListener('click', function () { run(buildCube); });
-    el.btnCubeNew.addEventListener('click', function () { run(buildCubeToNewSheet); });
-    el.btnPivot.addEventListener('click', function () { run(addNativePivot); });
-    el.btnReload.addEventListener('click', function () { run(refreshActiveSheet); });
-    el.btnSyncComments.addEventListener('click', function () { run(syncComments); });
-    el.btnResetComments.addEventListener('click', function () { run(resetSheetComments); });
+    on('btnConnect', 'click', function () { connect(false); });
+    on('btnForget', 'click', forget);
+    on('btnLoad', 'click', function () { run(loadToNewSheet); });
+    on('btnCount', 'click', function () { run(showCount); });
+    on('btnCube', 'click', function () { run(buildCube); });
+    on('btnCubeNew', 'click', function () { run(buildCubeToNewSheet); });
+    on('btnPivot', 'click', function () { run(addNativePivot); });
+    on('btnReload', 'click', function () { run(refreshActiveSheet); });
+    on('btnSyncComments', 'click', function () { run(syncComments); });
+    on('btnResetComments', 'click', function () { run(resetSheetComments); });
     var nav = document.getElementById('sectionNav');
     if (nav) {
       nav.addEventListener('click', function (ev) {
@@ -260,18 +290,18 @@
       var h = sectionFromHash();
       if (h) showSection(h);
     });
-    el.btnFullPivot.addEventListener('click', function () { run(pivotFromFullDetail); });
-    el.btnPushComments.addEventListener('click', function () { run(pushCommentsToSheet); });
-    el.btnSaveComment.addEventListener('click', function () { run(saveSelectedComment); });
-    el.btnDeleteComment.addEventListener('click', function () { run(deleteSelectedComment); });
-    el.btnDrill.addEventListener('click', function () { run(drillSelection); });
-    el.btnBulkFlag.addEventListener('click', function () { run(flagSelection); });
-    el.btnViewSave.addEventListener('click', function () { run(saveCurrentView); });
-    el.btnViewLoad.addEventListener('click', function () { run(openSavedView); });
+    on('btnFullPivot', 'click', function () { run(pivotFromFullDetail); });
+    on('btnPushComments', 'click', function () { run(pushCommentsToSheet); });
+    on('btnSaveComment', 'click', function () { run(saveSelectedComment); });
+    on('btnDeleteComment', 'click', function () { run(deleteSelectedComment); });
+    on('btnDrill', 'click', function () { run(drillSelection); });
+    on('btnBulkFlag', 'click', function () { run(flagSelection); });
+    on('btnViewSave', 'click', function () { run(saveCurrentView); });
+    on('btnViewLoad', 'click', function () { run(openSavedView); });
     if (el.btnViewRebuild) {
-      el.btnViewRebuild.addEventListener('click', function () { run(rebuildSavedView); });
+      on('btnViewRebuild', 'click', function () { run(rebuildSavedView); });
     }
-    el.btnViewDelete.addEventListener('click', function () {
+    on('btnViewDelete', 'click', function () {
       run(async function () {
         var n = el.viewPick.value;
         if (!n) throw new Error('Pick a saved view to delete.');
@@ -282,10 +312,10 @@
       });
     });
     watchSelection();
-    el.btnRefresh.addEventListener('click', function () { run(refreshActiveSheet); });
-    el.btnRestore.addEventListener('click', restoreFiltersFromSheet);
-    el.btnCancel.addEventListener('click', function () { cancelFlag.cancelled = true; });
-    el.journalType.addEventListener('change', updateTypeHint);
+    on('btnRefresh', 'click', function () { run(refreshActiveSheet); });
+    on('btnRestore', 'click', restoreFiltersFromSheet);
+    on('btnCancel', 'click', function () { cancelFlag.cancelled = true; });
+    on('journalType', 'change', updateTypeHint);
 
     // Track sheet switches so the Refresh panel always describes what is in front.
     Excel.run(function (ctx) {
@@ -1048,6 +1078,7 @@
     reflowWells();
     wireWells();
     wirePicker();
+    reportMissingControls();
     loadViewList();   // async on purpose: the wells must not wait on it
   }
 
@@ -1617,21 +1648,21 @@
     if (pickerWired) return;
     pickerWired = true;
 
-    el.pickerSearch.addEventListener('input', renderPicker);
-    el.btnPickAdd.addEventListener('click', function () { addValues(chosenIn(el.pickerAvail)); });
-    el.btnPickRemove.addEventListener('click', function () { removeValues(chosenIn(el.pickerSel)); });
+    on('pickerSearch', 'input', renderPicker);
+    on('btnPickAdd', 'click', function () { addValues(chosenIn(el.pickerAvail)); });
+    on('btnPickRemove', 'click', function () { removeValues(chosenIn(el.pickerSel)); });
 
-    el.btnPickAddAll.addEventListener('click', function () {
+    on('btnPickAddAll', 'click', function () {
       // "All" means all VISIBLE: with a search term active that is the useful
       // meaning, and the only one that matches what is on screen.
       addValues(Array.prototype.map.call(el.pickerAvail.options, function (o) { return o.value; }));
     });
-    el.btnPickRemoveAll.addEventListener('click', function () { working = []; renderPicker(); });
+    on('btnPickRemoveAll', 'click', function () { working = []; renderPicker(); });
 
-    el.pickerAvail.addEventListener('dblclick', function () { addValues(chosenIn(el.pickerAvail)); });
-    el.pickerSel.addEventListener('dblclick', function () { removeValues(chosenIn(el.pickerSel)); });
+    on('pickerAvail', 'dblclick', function () { addValues(chosenIn(el.pickerAvail)); });
+    on('pickerSel', 'dblclick', function () { removeValues(chosenIn(el.pickerSel)); });
 
-    el.pickerApply.addEventListener('click', function () {
+    on('pickerApply', 'click', function () {
       if (!pickerKey) return closePicker();
       var key = pickerKey;
       filterVals[key] = working.slice();
@@ -1641,14 +1672,14 @@
       if (el.autoBuild.checked && wells.rows.length) run(buildCube);
     });
 
-    el.btnPickUp.addEventListener('click', function () { movePicked(-1); });
-    el.btnPickDown.addEventListener('click', function () { movePicked(1); });
-    el.btnPickSortAz.addEventListener('click', function () {
+    on('btnPickUp', 'click', function () { movePicked(-1); });
+    on('btnPickDown', 'click', function () { movePicked(1); });
+    on('btnPickSortAz', 'click', function () {
       working.sort(function (a, b) { return a.localeCompare(b); });
       renderPicker();
     });
 
-    el.btnSubsetLoad.addEventListener('click', function () {
+    on('btnSubsetLoad', 'click', function () {
       var n = el.subsetPick.value;
       if (!n || !savedSubsets[n]) return;
       working = savedSubsets[n].slice();
@@ -1656,7 +1687,7 @@
       renderPicker();
     });
 
-    el.btnSubsetSave.addEventListener('click', function () {
+    on('btnSubsetSave', 'click', function () {
       run(async function () {
         var n = (el.subsetName.value || '').trim();
         if (!n) throw new Error('Name the subset first.');
@@ -1672,7 +1703,7 @@
       });
     });
 
-    el.btnSubsetDelete.addEventListener('click', function () {
+    on('btnSubsetDelete', 'click', function () {
       run(async function () {
         var n = el.subsetPick.value;
         if (!n) throw new Error('Pick a saved subset to delete.');
@@ -1684,11 +1715,11 @@
       });
     });
 
-    el.pickerCancel.addEventListener('click', closePicker);
-    el.pickerClose.addEventListener('click', closePicker);
+    on('pickerCancel', 'click', closePicker);
+    on('pickerClose', 'click', closePicker);
 
     // Clicking the backdrop cancels; clicking the card must not.
-    el.pickerModal.addEventListener('click', function (e) {
+    on('pickerModal', 'click', function (e) {
       if (e.target === el.pickerModal) closePicker();
     });
     document.addEventListener('keydown', function (e) {
@@ -3060,39 +3091,50 @@
 
   /* ── plumbing ──────────────────────────────────────────── */
 
+  /* Everything between busy = true and the finally sits inside the try:
+     a throw before the await (a missing button in setButtons, say) used to
+     leave busy stuck at true, after which every click returned at the first
+     line -- the whole pane dead with no message. */
   async function run(fn) {
     if (busy) return;
     busy = true;
-    cancelFlag.cancelled = false;
-    el.errorMsg.hidden = true;
-    el.progressPanel.hidden = false;
-    setButtons(false);
     try {
+      cancelFlag.cancelled = false;
+      if (el.errorMsg) el.errorMsg.hidden = true;
+      if (el.progressPanel) el.progressPanel.hidden = false;
+      setButtons(false);
       await fn();
     } catch (e) {
-      el.errorMsg.textContent = e && e.message ? e.message : String(e);
-      el.errorMsg.hidden = false;
+      if (el.errorMsg) {
+        el.errorMsg.textContent = e && e.message ? e.message : String(e);
+        el.errorMsg.hidden = false;
+      }
     } finally {
       busy = false;
-      el.progressPanel.hidden = true;
-      el.progressFill.style.width = '0';
+      if (el.progressPanel) el.progressPanel.hidden = true;
+      if (el.progressFill) el.progressFill.style.width = '0';
       setButtons(true);
     }
   }
 
+  function setDisabled(id, off) {
+    if (el[id]) el[id].disabled = !!off;
+  }
+
   function setButtons(on) {
-    el.btnLoad.disabled = !on;
-    el.btnCount.disabled = !on;
-    el.btnCube.disabled = !on;
-    el.btnCubeNew.disabled = !on;
-    el.btnRefresh.disabled = !on || !activeSheet.binding;
-    el.btnRestore.disabled = !on || !activeSheet.binding;
-    el.btnPivot.disabled = !on || !activeSheet.binding || activeSheet.binding.kind !== 'detail';
-    el.btnReload.disabled = !on || !activeSheet.binding;
-    el.btnSyncComments.disabled = !on || !activeSheet.binding || (activeSheet.binding.kind !== 'cube' && activeSheet.binding.kind !== 'pivot');
-    el.btnFullPivot.disabled = !on;
-    el.btnPushComments.disabled = !on || !activeSheet.binding
-      || (activeSheet.binding.kind !== 'cube' && activeSheet.binding.kind !== 'pivot');
+    var b = activeSheet.binding;
+    var commentable = b && (b.kind === 'cube' || b.kind === 'pivot');
+    setDisabled('btnLoad', !on);
+    setDisabled('btnCount', !on);
+    setDisabled('btnCube', !on);
+    setDisabled('btnCubeNew', !on);
+    setDisabled('btnRefresh', !on || !b);
+    setDisabled('btnRestore', !on || !b);
+    setDisabled('btnPivot', !on || !b || b.kind !== 'detail');
+    setDisabled('btnReload', !on || !b);
+    setDisabled('btnSyncComments', !on || !commentable);
+    setDisabled('btnFullPivot', !on);
+    setDisabled('btnPushComments', !on || !commentable);
   }
 
   function progress(done, total, msg) {
