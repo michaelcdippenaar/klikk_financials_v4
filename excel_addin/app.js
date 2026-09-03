@@ -33,9 +33,41 @@
   var currentSection = DEFAULT_SECTION;
   var connected = false;
 
+  /* The cell context menu ("Klikk: Show transactions") opens the pane at
+     #drill. That is not a section: it lands on Comments -- where the
+     selection readout and the drill live -- and queues a drill of the cell
+     under the cursor, run once the pane is connected and has read the sheet
+     in front. The hash is then put back to #comments so the next
+     right-click is a URL change again; a same-URL ShowTaskpane may not
+     re-navigate the webview, and without a change there is no hashchange. */
+  var DRILL_HASH = 'drill';
+  var pendingDrill = false;
+
   function sectionFromHash() {
     var h = (window.location.hash || '').replace(/^#/, '');
+    if (h === DRILL_HASH) { pendingDrill = true; return 'comments'; }
     return SECTIONS[h] ? h : null;
+  }
+
+  function settleDrillHash() {
+    try {
+      if (window.history && window.history.replaceState) {
+        window.history.replaceState(null, '', '#comments');
+      }
+    } catch (e) { /* a webview that refuses replaceState just keeps #drill */ }
+  }
+
+  /* Runs the queued context-menu drill if the pane is in a state to do it:
+     connected, and nothing else in flight. Called from the hashchange
+     listener (pane already open) and from the end of connect() (pane opened
+     cold by the menu item, or connected by hand afterwards). */
+  function runPendingDrill() {
+    if (!pendingDrill) return;
+    if (!connected) return;          // connect() calls back in when it succeeds
+    pendingDrill = false;
+    settleDrillHash();
+    showSection('comments');
+    run(drillActiveCell);
   }
 
   function applySection() {
@@ -293,6 +325,7 @@
     window.addEventListener('hashchange', function () {
       var h = sectionFromHash();
       if (h) showSection(h);
+      runPendingDrill();
     });
     on('btnFullPivot', 'click', function () { run(pivotFromFullDetail); });
     on('btnPushComments', 'click', function () { run(pushCommentsToSheet); });
@@ -395,6 +428,9 @@
       el.settingsMsg.className = 'msg msg--ok';
       if (silent) el.settingsPanel.hidden = true;
       else setTimeout(function () { el.settingsPanel.hidden = true; }, 700);
+      // The boot path read the active sheet before calling connect(), so a
+      // drill queued by the context menu has its binding available now.
+      runPendingDrill();
     } catch (e) {
       setConnected(false);
       el.settingsPanel.hidden = false;
@@ -2651,6 +2687,29 @@
     var cp = (sel.col_path && sel.col_path !== 'Total') ? String(sel.col_path).split(' | ') : [];
     (sel.col_dims || []).forEach(function (d, i) { if (cp[i] !== undefined) c[d] = cp[i]; });
     return c;
+  }
+
+  /* Context-menu entry point: resolve the cell under the cursor right now
+     rather than trusting the last debounced onSelectionChanged read, which
+     may not have fired for the cell that was right-clicked (a right-click on
+     an unselected cell moves the selection and the pane may still be
+     loading). Then drill it exactly as the button does. */
+  async function drillActiveCell() {
+    await inspectActiveSheet();
+    var b = activeSheet.binding;
+    if (!b || (b.kind !== 'cube' && b.kind !== 'pivot')) {
+      throw new Error('Show transactions works on a cube view or PivotTable sheet built by '
+        + 'this add-in. The sheet in front (' + (activeSheet.name || 'unnamed') + ') is not one '
+        + '\u2014 build a cube view first, then right-click one of its figures.');
+    }
+    var sel = b.kind === 'cube' ? await resolveCubeSelection(b) : await resolvePivotSelection(b);
+    if (!sel || !sel.row_path) {
+      await showSelection(sel);
+      throw new Error('Right-click a single value cell inside the '
+        + (b.kind === 'cube' ? 'cube' : 'PivotTable') + ' \u2014 a figure, not a heading or a blank.');
+    }
+    await showSelection(sel);
+    await drillSelection();
   }
 
   async function drillSelection() {

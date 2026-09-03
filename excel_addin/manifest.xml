@@ -7,7 +7,7 @@
   xsi:type="TaskPaneApp">
 
   <Id>5b4e7ec6-3634-49f0-a1a9-a90223523e68</Id>
-  <Version>1.0.2.0</Version>
+  <Version>1.0.3.0</Version>
   <ProviderName>Klikk Financials</ProviderName>
   <DefaultLocale>en-ZA</DefaultLocale>
   <DisplayName DefaultValue="Klikk Journals"/>
@@ -48,7 +48,6 @@
 
           <ExtensionPoint xsi:type="PrimaryCommandSurface">
             <CustomTab id="Klikk.Tab">
-              <Label resid="Klikk.TabLabel"/>
                 <Group id="Klikk.Grp.Data">
                   <Label resid="Klikk.Grp.DataLabel"/>
                   <Icon>
@@ -177,7 +176,55 @@
                     </Action>
                   </Control>
                 </Group>
+              <!-- Schema order: Group* then Label. Excel tolerated Label first;
+                   the validator does not. -->
+              <Label resid="Klikk.TabLabel"/>
             </CustomTab>
+          </ExtensionPoint>
+
+          <!-- Cell right-click menu. ShowTaskpane, not ExecuteFunction: the
+               pane already resolves the selected cell against the sheet's cube
+               binding and drills it, so the menu item only has to bring the
+               pane up at #drill and the pane does the rest. An ExecuteFunction
+               would need a FunctionFile running in a separate runtime that
+               cannot reach the pane's state without a shared-runtime migration.
+               Same TaskpaneId as the ribbon buttons, so it re-uses the open
+               pane rather than opening a second one. -->
+          <ExtensionPoint xsi:type="ContextMenu">
+            <OfficeMenu id="ContextMenuCell">
+              <Control xsi:type="Button" id="Klikk.Ctx.Drill">
+                <Label resid="Klikk.CtxDrillLabel"/>
+                <Supertip>
+                  <Title resid="Klikk.CtxDrillLabel"/>
+                  <Description resid="Klikk.CtxDrillTip"/>
+                </Supertip>
+                <Icon>
+                  <bt:Image size="16" resid="Klikk.Detail16"/>
+                  <bt:Image size="32" resid="Klikk.Detail32"/>
+                  <bt:Image size="80" resid="Klikk.Detail80"/>
+                </Icon>
+                <Action xsi:type="ShowTaskpane">
+                  <TaskpaneId>KlikkJournalsPane</TaskpaneId>
+                  <SourceLocation resid="Klikk.Url.Drill"/>
+                </Action>
+              </Control>
+              <Control xsi:type="Button" id="Klikk.Ctx.Open">
+                <Label resid="Klikk.CtxOpenLabel"/>
+                <Supertip>
+                  <Title resid="Klikk.CtxOpenLabel"/>
+                  <Description resid="Klikk.OpenTip"/>
+                </Supertip>
+                <Icon>
+                  <bt:Image size="16" resid="Klikk.Icon16"/>
+                  <bt:Image size="32" resid="Klikk.Icon32"/>
+                  <bt:Image size="80" resid="Klikk.Icon80"/>
+                </Icon>
+                <Action xsi:type="ShowTaskpane">
+                  <TaskpaneId>KlikkJournalsPane</TaskpaneId>
+                  <SourceLocation resid="Klikk.Url.Query"/>
+                </Action>
+              </Control>
+            </OfficeMenu>
           </ExtensionPoint>
 
           <!-- No AutoOpenTaskpane extension point, deliberately. Excel for Mac
@@ -222,6 +269,7 @@
         <bt:Url id="Klikk.Url.Cube" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#cube"/>
         <bt:Url id="Klikk.Url.Sheet" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#sheet"/>
         <bt:Url id="Klikk.Url.Comments" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#comments"/>
+        <bt:Url id="Klikk.Url.Drill" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#drill"/>
         <bt:Url id="Klikk.Url.Settings" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#settings"/>
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://console.8-bit.space/"/>
       </bt:Urls>
@@ -239,6 +287,8 @@
         <bt:String id="Klikk.ConnLabel" DefaultValue="Connection"/>
         <bt:String id="Klikk.GroupLabel" DefaultValue="Klikk Financials"/>
         <bt:String id="Klikk.OpenLabel" DefaultValue="Journals"/>
+        <bt:String id="Klikk.CtxDrillLabel" DefaultValue="Klikk: Show transactions"/>
+        <bt:String id="Klikk.CtxOpenLabel" DefaultValue="Klikk: Open Journals pane"/>
         <bt:String id="GetStarted.Title" DefaultValue="Klikk Journals is ready."/>
       </bt:ShortStrings>
       <bt:LongStrings>
@@ -248,6 +298,7 @@
         <bt:String id="Klikk.SheetTip" DefaultValue="Refresh, reload or restore the filters for the sheet in front."/>
         <bt:String id="Klikk.CommentsTip" DefaultValue="Import comments onto the sheet, or clear and re-place them."/>
         <bt:String id="Klikk.ConnTip" DefaultValue="API address and token."/>
+        <bt:String id="Klikk.CtxDrillTip" DefaultValue="List the journal lines that add up to the figure in this cell, on a new sheet."/>
         <bt:String id="Klikk.OpenTip" DefaultValue="Open the Klikk Journals pane to pull ledger data into this workbook."/>
         <bt:String id="GetStarted.Description" DefaultValue="Open the Journals pane from the Home tab, paste your API token, and load the ledger."/>
       </bt:LongStrings>

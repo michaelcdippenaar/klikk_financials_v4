@@ -206,6 +206,41 @@ above, not the served bundle. A pane that rendered `taskpane.html` at all
 shows `URL Navigation` in that log and a `GET /excel-addin/taskpane.html`
 in the backend container log; a blank one shows neither.
 
+## Right-click a figure → "Klikk: Show transactions"
+
+The manifest adds a `ContextMenu` extension point on `ContextMenuCell`, the
+menu Excel opens on a cell right-click. Two entries, both `ShowTaskpane` with
+the ribbon's `TaskpaneId` so they reuse the open pane instead of opening a
+second one:
+
+- **Klikk: Show transactions** → `taskpane.html#drill`. The pane treats
+  `#drill` as "land on Comments, then drill the cell under the cursor": it
+  re-reads the sheet binding, resolves the selected cell against the cube /
+  PivotTable grid, and runs the same drill the **Show transactions** button
+  does (`GET /xero/data/journals/pivot/drill/` → new detail sheet, receipt
+  links included). On a sheet that is not one of ours, or on a heading cell,
+  it says so in the error line instead of drilling. After the drill the pane
+  rewrites its URL to `#comments` so the next right-click is a URL change
+  again — a same-URL `ShowTaskpane` may not re-navigate the webview, and
+  without a navigation there is no `hashchange` to react to.
+- **Klikk: Open Journals pane** → `#query`, the plain pane.
+
+Why `ShowTaskpane` and not `ExecuteFunction`: a function command runs in its
+own runtime, separate from the pane, and can neither reach the pane's cube
+cache nor its drill/render code without moving the whole add-in onto a shared
+runtime. The pane already does everything the drill needs; the menu item only
+has to get it there.
+
+Not verified live at the time of writing (2026-09-03): Excel was open on
+unsaved workbooks, and a manifest change needs a restart. The manifest
+validates (`npx office-addin-manifest validate`) — which the previous one did
+not: `<Label>` inside `<CustomTab>` must follow the `<Group>`s per the schema,
+and Excel had been tolerating it first. The two things to check on first use:
+that the entries appear at all on the cell menu (if not, the cached manifest is
+still 1.0.2.0 — see the version rule above), and that a second right-click
+drills again (if not, the `#comments` rewrite is not enough and the entry needs
+a cache-busting variant).
+
 ## Build rewrites the cube sheet in front; New sheet is the other button
 
 A cube sheet carries its own spec inside the workbook
