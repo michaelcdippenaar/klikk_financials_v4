@@ -216,7 +216,14 @@ function makeOffice(rec) {
    the non-fatal paths (comments) to take their catch. */
 function makeFetch(rec, routes) {
   return function (url, opts) {
-    rec.requests.push({ url: String(url), method: (opts && opts.method) || 'GET' });
+    // The BODY is recorded, not just the URL: "what did the pane send" is a
+    // question a test has to be able to ask -- the author field the server now
+    // stamps must not be re-introduced by a client that still sends one.
+    rec.requests.push({
+      url: String(url),
+      method: (opts && opts.method) || 'GET',
+      body: (opts && opts.body) || null
+    });
     const hit = Object.keys(routes).find(function (frag) { return String(url).indexOf(frag) >= 0; });
     const body = hit ? (typeof routes[hit] === 'function' ? routes[hit](String(url)) : routes[hit]) : null;
     return Promise.resolve({

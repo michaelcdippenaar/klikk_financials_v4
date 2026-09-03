@@ -188,6 +188,60 @@ CONSOLE_BASE_URL = (os.environ.get('CONSOLE_BASE_URL') or 'https://console.8-bit
 # Unset => service-token writes are denied (a warning is logged once).
 KLIKK_API_TOKEN = (os.environ.get('KLIKK_API_TOKEN') or '').strip()
 
+# ── Who is behind a shared service credential ───────────────────────────────
+#
+# The Excel add-in signs in as the Django user `excel-addin` (role
+# service_readonly). That name identifies the TOOL, not the person, so stamping
+# it on a comment would file every note MC writes under "excel-addin" — true,
+# and useless in an author filter. Until 2026-09-03 the pane worked around that
+# by asking the operator to TYPE their name into the task pane, which is how
+# `ewffew` became a durable author in app.cube_comments.
+#
+# So the operator behind a service credential is declared HERE, on the server,
+# and the client's claim is ignored. The token is the credential and the token
+# lives on one person's laptop, so the mapping is a property of the account,
+# not of the request — which is exactly what makes it unspoofable: a copied
+# token cannot claim to be someone else, it can only be the operator its
+# account is mapped to.
+#
+# Format: "service-username=operator-username[:label]". The operator must name a
+# real, active Django user or the mapping is refused at use time (see
+# apps.user.identity) -- a typo here must not invent an identity.
+#
+# The LABEL is what gets stamped, and it is separate from the operator on
+# purpose. The operator answers "which real account is accountable for this
+# credential"; the label answers "what should the register call them". MC's
+# login is mc@tremly.com and his 27 existing pane comments are authored `MC`,
+# so stamping the username would split him across two authors in the console's
+# author filter -- the exact split he spent an evening removing. Omit the label
+# and the operator's username is used.
+#
+# It is deliberately NOT derived from the user record (first_name / a profile
+# name): those are editable from the Django admin, and a register's author
+# vocabulary must not change because somebody tidied a profile. This is
+# configuration -- explicit, reviewed, and deployed on purpose.
+#
+# A SECOND person with the pane gets their OWN service user and their own entry
+# here, never a share of this one. See excel_addin/README.md § Credentials.
+def _parse_operators(raw):
+    """{'service-username': (operator_username, stamped_label)}."""
+    out = {}
+    for pair in (raw or '').split(','):
+        service, sep, rest = pair.partition('=')
+        if not sep or not service.strip() or not rest.strip():
+            continue
+        operator, _, label = rest.partition(':')
+        operator = operator.strip()
+        if not operator:
+            continue
+        out[service.strip()] = (operator, label.strip() or operator)
+    return out
+
+
+SERVICE_ACCOUNT_OPERATORS = _parse_operators(
+    os.environ.get('SERVICE_ACCOUNT_OPERATORS') or 'excel-addin=mc@tremly.com:MC'
+)
+
 # Web GraphQL transport limits. Variables and document contents must never be
 # written to application logs.
 WEB_API_V2_MAX_REQUEST_BYTES = int(os.environ.get('WEB_API_V2_MAX_REQUEST_BYTES', str(256 * 1024)))
