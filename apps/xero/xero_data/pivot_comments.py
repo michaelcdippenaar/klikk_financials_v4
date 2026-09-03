@@ -137,6 +137,47 @@ ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS assignee_role text NOT NU
 CREATE INDEX IF NOT EXISTS cube_comments_assignee_idx ON app.cube_comments (assignee_role)
     WHERE assignee_role <> '';
 
+-- WHAT THE POINT IS ABOUT, frozen when it was raised.
+--
+-- The pilot's blocker: a bookkeeper can be named, assigned and mailed, but she
+-- cannot SEE the transaction a point refers to. The lines live behind
+-- /xero/data/journals/pivot/drill/, and everything under /xero/data/ is 403
+-- for the auditor role she signs in as. The alternative to this table was
+-- granting her the general ledger, which is a much larger decision than the
+-- pilot needs and cannot be undone quietly.
+--
+-- So the point CARRIES its evidence instead: the lines and their receipt links
+-- are resolved once, at raise time, and stored here. She sees what the point is
+-- about; her access does not widen by one route.
+--
+-- Frozen ON PURPOSE, and this is the one place in the register where a stale
+-- copy is the correct thing to hold. The live drill re-resolves from the anchor
+-- because the lines behind a figure change when Xero is re-synced -- right for
+-- "what is this figure now", wrong for "what was I looking at when I raised
+-- this". `cell_value_at_capture` is the same idea: it is what makes
+-- "it was -535,301.79, it is now -498,112.40" answerable later without anyone
+-- typing either number.
+--
+-- Its own table, not a column: the captured lines are large and the register
+-- list must not carry them. That list was 1.4 MB for 113 rows once and hung
+-- the page.
+CREATE TABLE IF NOT EXISTS app.cube_comment_context (
+    comment_id   bigint      PRIMARY KEY REFERENCES app.cube_comments(id) ON DELETE CASCADE,
+    coords       jsonb       NOT NULL DEFAULT '{}'::jsonb,
+    measure      text        NOT NULL DEFAULT '',
+    lines        jsonb       NOT NULL DEFAULT '[]'::jsonb,
+    line_count   integer     NOT NULL DEFAULT 0,
+    line_total   numeric(30,2),
+    truncated    boolean     NOT NULL DEFAULT false,
+    receipt_count integer    NOT NULL DEFAULT 0,
+    cell_value_at_capture numeric(30,2),
+    captured_by  text        NOT NULL DEFAULT '',
+    -- clock_timestamp(), not now(): now() is TRANSACTION start time, so two
+    -- captures in one transaction would carry the same stamp and "when did I
+    -- last look at this" would be answered with a time that is not when.
+    captured_at  timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
 -- WHERE A POINT HAS BEEN, and since when.
 --
 -- The comment row knows where a point is NOW and cannot answer "how long has
@@ -925,6 +966,111 @@ class XeroCubeCommentNotifyView(APIView):
             only_ids=ids,
         )
         return Response({'comment_id': comment_id, **result})
+
+
+# A captured context is read by a person deciding what to fix, not by a
+# reconciliation. Past a couple of hundred lines it stops being evidence and
+# starts being a database dump attached to every point -- and it is stored, so
+# the cost is paid on every read forever rather than once.
+MAX_CONTEXT_LINES = 200
+
+
+class XeroCubeCommentContextView(APIView):
+    """POST/GET /xero/data/journals/pivot/comments/<id>/context/
+
+    Capture the lines behind a point, so the person fixing it can see what it
+    is about without being given the general ledger.
+
+    A separate act rather than part of saving a comment, for the same reason
+    the mention send is: MC wrote 68 comments in one day and resolving a drill
+    on every one of them would make writing a note cost a ledger scan. The
+    points that go to a preparer are the few that need this.
+
+    Re-capturing REPLACES, deliberately. This is a snapshot of one moment, not
+    a history -- and unlike assignment, where every change of hands matters,
+    nobody needs the third-most-recent view of the same lines. The moment that
+    matters is recorded in `captured_at`.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _comment(self, comment_id):
+        with connection.cursor() as c:
+            c.execute('SELECT ' + COLS + ' FROM app.cube_comments WHERE id = %s', [comment_id])
+            row = c.fetchone()
+        return _row_to_dict(row) if row else None
+
+    def get(self, request, comment_id):
+        _ensure_table()
+        return Response(fetch_context(comment_id) or
+                        {'comment_id': comment_id, 'captured_at': None, 'lines': []})
+
+    def post(self, request, comment_id):
+        _ensure_table()
+        row = self._comment(comment_id)
+        if row is None:
+            return Response({'error': 'no such comment'}, status=http.HTTP_404_NOT_FOUND)
+        if row['subject_type'] != 'cube_cell':
+            # A bank transaction IS the transaction; there is nothing to drill
+            # into. Saying so beats storing an empty capture that reads as "no
+            # lines found" and looks like the ledger moved.
+            return Response({'error': 'only a cube_cell comment has lines behind it; '
+                                      'a %s comment already names its subject'
+                                      % row['subject_type']},
+                            status=http.HTTP_400_BAD_REQUEST)
+
+        coords = _coords(row['row_dims'], row['row_path'], row['col_dims'], row['col_path'])
+        params = {str(k): '' if v is None else str(v)
+                  for k, v in (row['filters'] or {}).items()}
+        params.update({'coords': json.dumps(coords),
+                       'measure': row['measure'] or 'amount',
+                       'limit': str(MAX_CONTEXT_LINES)})
+
+        from apps.xero.xero_data.pivot_views import drill_result
+        data, error = drill_result(request, params)
+        if error:
+            return Response({'error': error}, status=http.HTTP_400_BAD_REQUEST)
+
+        lines = data.get('rows') or []
+        receipts = sum(1 for l in lines if l.get('receipt_count'))
+        author_key, _name, _v = _author_identity(request, None)
+        with connection.cursor() as c:
+            c.execute(
+                'INSERT INTO app.cube_comment_context '
+                '(comment_id, coords, measure, lines, line_count, line_total, truncated, '
+                ' receipt_count, cell_value_at_capture, captured_by) '
+                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                'ON CONFLICT (comment_id) DO UPDATE SET '
+                '  coords = EXCLUDED.coords, measure = EXCLUDED.measure, '
+                '  lines = EXCLUDED.lines, line_count = EXCLUDED.line_count, '
+                '  line_total = EXCLUDED.line_total, truncated = EXCLUDED.truncated, '
+                '  receipt_count = EXCLUDED.receipt_count, '
+                '  cell_value_at_capture = EXCLUDED.cell_value_at_capture, '
+                '  captured_by = EXCLUDED.captured_by, captured_at = clock_timestamp()',
+                [comment_id, json.dumps(coords), data.get('measure') or '',
+                 json.dumps(lines), len(lines), data.get('line_total'),
+                 bool(data.get('truncated')), receipts, row['cell_value'], author_key])
+        return Response(fetch_context(comment_id), status=http.HTTP_200_OK)
+
+
+def fetch_context(comment_id):
+    """One captured context, or None. Shared by the cube door and the audit door."""
+    _ensure_table()
+    with connection.cursor() as c:
+        c.execute('SELECT comment_id, coords, measure, lines, line_count, line_total, '
+                  '       truncated, receipt_count, cell_value_at_capture, captured_by, '
+                  '       captured_at '
+                  'FROM app.cube_comment_context WHERE comment_id = %s', [comment_id])
+        r = c.fetchone()
+    if not r:
+        return None
+    return {
+        'comment_id': r[0], 'coords': _jsonb(r[1]), 'measure': r[2],
+        'lines': _jsonb(r[3]), 'line_count': r[4],
+        'line_total': float(r[5]) if r[5] is not None else None,
+        'truncated': r[6], 'receipt_count': r[7],
+        'cell_value_at_capture': float(r[8]) if r[8] is not None else None,
+        'captured_by': r[9], 'captured_at': r[10].isoformat() if r[10] else None,
+    }
 
 
 MAX_BULK = 1000

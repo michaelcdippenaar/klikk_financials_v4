@@ -698,6 +698,211 @@ PUSHDOWN = {
 }
 
 
+def drill_result(request, p):
+    """The journal lines behind one cube cell, as data rather than a response.
+
+    Split out of XeroCubeDrillView so a comment can CAPTURE the same lines
+    the drill shows. Two implementations would drift, and the one that
+    drifted would be the one a bookkeeper reads while the auditable one
+    stayed correct -- the em-dash account bug below is exactly the kind of
+    subtlety that would only get fixed in one copy.
+
+    Returns (payload, error). The caller decides the status code.
+
+    ``p`` is any mapping with .get -- query params from the view, or a dict
+    built from a comment's stored anchor when a point captures its evidence.
+    The extraction left `p = request.query_params` here at first, which read
+    straight past the argument: the capture drilled on the empty params of its
+    own POST and returned zero lines for a cell built from real rows. Exactly
+    the failure this endpoint's own em-dash comment describes, arriving through
+    a different door.
+    """
+    try:
+        coords = json.loads(p.get('coords') or '{}')
+        if not isinstance(coords, dict):
+            raise ValueError
+    except (TypeError, ValueError):
+        return None, 'coords must be a JSON object of dimension -> value'
+
+    unknown = [k for k in coords if k not in DIMENSIONS]
+    if unknown:
+        return None, 'unknown dimension(s): %s' % ', '.join(unknown)
+
+    try:
+        limit = min(max(int(p.get('limit', 500)), 1), 5000)
+    except (TypeError, ValueError):
+        limit = 500
+
+    # The total must be computed on the SAME measure the cell showed.
+    # Summing amount for a comment written on a debit or credit figure
+    # reconciles only by luck -- it happens to agree when a line's debit
+    # equals its amount, and disagrees silently when it does not.
+    measure = (p.get('measure') or 'amount').strip()
+    if measure not in MEASURES:
+        return None, 'unknown measure: %s' % measure
+    FIELD = {'amount': 'amount', 'debit': 'debit', 'credit': 'credit',
+             'tax': 'tax_amount'}
+
+    qs = apply_journal_filters(XeroJournals.objects.all(), p)
+
+    # Push down what SQL can do.
+    deferred = {}
+    for dim, val in coords.items():
+        val = '' if val is None else str(val)
+        if dim in PUSHDOWN:
+            if val == BLANK:
+                # A blank member covers BOTH an empty string and a NULL, and
+                # they need different SQL. `__in=['', None]` compiles to
+                # `IN ('', NULL)`, and nothing is ever equal to NULL — so
+                # every drill on a "(none)" member silently returned no rows
+                # and looked like the ledger had moved underneath it.
+                qs = qs.filter(Q(**{PUSHDOWN[dim]: ''})
+                               | Q(**{PUSHDOWN[dim] + '__isnull': True}))
+            else:
+                qs = qs.filter(**{PUSHDOWN[dim]: val})
+        elif dim == 'account':
+            # The label is "code — name" only when BOTH exist: _label_account
+            # falls back to `code or name or BLANK`. An account with a blank
+            # code therefore labels as its NAME alone, with no separator —
+            # and 24 of them exist here, every bank and investment account.
+            #
+            # Splitting on the bare em dash then treated that whole name as a
+            # CODE, which matched nothing, and the `if '—' in val` guard also
+            # skipped the deferred re-test that would have caught it. The
+            # drill returned zero lines for a cell the cube had just built out
+            # of real rows — the one failure that makes a figure look
+            # unauditable. Names contain em dashes of their own, so split on
+            # the full ' — ' separator, not the character.
+            sep = ' — '
+            if sep in val:
+                code = val.split(sep)[0].strip()
+                if code:
+                    qs = qs.filter(account__code=code)
+            # Always re-test the whole label in Python. A code is not unique
+            # either ("260 — Other Revenue" and "260 — Luca Support Wyndam"
+            # are two accounts), so the pushdown narrows but never decides.
+            deferred[dim] = val
+        else:
+            deferred[dim] = val
+
+    ann = _dim_annotations(list(deferred.keys()))
+    if ann:
+        qs = qs.annotate(**ann)
+
+    qs = qs.select_related('organisation', 'account', 'contact', 'tracking1', 'tracking2',
+                           'transaction_source', 'transaction_source__contact')
+
+    tests = [(d, _labeller(d), v) for d, v in deferred.items()]
+    aliases = []
+    for d in deferred:
+        aliases.extend(_dim_aliases(d))
+
+    rows, total, scanned = [], 0.0, 0
+    truncated = False
+    for j in qs.iterator(chunk_size=2000):
+        scanned += 1
+        if tests:
+            rec = {a: _attr_path(j, a) for a in aliases}
+            if any(f(rec) != v for _, f, v in tests):
+                continue
+        if measure == 'count':
+            total += 1
+        else:
+            total += float(getattr(j, FIELD[measure], None) or 0)
+        if len(rows) >= limit:
+            truncated = True
+            continue
+        src = j.transaction_source
+        supplier = j.contact or (src.contact if src else None)
+        acct = j.account
+        org = j.organisation
+        # Same field set as the journal search endpoint, so a drill result
+        # renders through the add-in's existing sheet writer untouched --
+        # one column contract, no second renderer to drift.
+        fy_rec = {
+            'd_year': j.date.year if j.date else None,
+            'd_month': j.date.month if j.date else None,
+            'organisation__fiscal_year_start_month': (
+                getattr(org, 'fiscal_year_start_month', None) if org else None),
+        }
+        rows.append({
+            'id': j.id,
+            'date': j.date.date().isoformat() if j.date else None,
+            'journal_number': j.journal_number,
+            'journal_type': j.journal_type,
+            'fin_year': _label_fin_year(fy_rec),
+            'tenant_id': org.tenant_id if org else '',
+            'tenant_name': org.tenant_name if org else '',
+            'report': (('Income Statement' if acct.grouping in ('REVENUE', 'EXPENSE')
+                        else 'Balance Sheet') if acct and acct.grouping else ''),
+            'account_class': acct.grouping if acct else '',
+            'account_code': acct.code if acct else '',
+            'account_name': acct.name if acct else '',
+            'account_type': acct.type if acct else '',
+            'amount': str(j.amount),
+            'debit': str(j.debit),
+            'credit': str(j.credit),
+            'tax_amount': str(j.tax_amount),
+            'contact_name': j.contact.name if j.contact else '',
+            'supplier_name': supplier.name if supplier else '',
+            'supplier_via': ('journal' if j.contact else ('source' if (src and src.contact) else '')),
+            'description': j.description or '',
+            'reference': j.reference or '',
+            'tracking1_category': j.tracking1.name if j.tracking1 else '',
+            'tracking1': j.tracking1.option if j.tracking1 else '',
+            'tracking2_category': j.tracking2.name if j.tracking2 else '',
+            'tracking2': j.tracking2.option if j.tracking2 else '',
+            'transaction_source_type': src.transaction_source if src else '',
+            'transaction_source_id': src.transactions_id if src else '',
+        })
+
+    # The receipt behind each line. "Which transactions make up this
+    # number" is only half an answer if the source document cannot be
+    # opened from the same row.
+    #
+    # One bulk query over the rows actually RETURNED (capped at `limit`),
+    # never per row — a drill can be thousands of lines and this must not
+    # become N+1. The link is the existing HMAC-signed document route, so
+    # it opens from Excel without a session, and the signature is scoped to
+    # the single document id.
+    #
+    # Note the two transaction_source columns are different types:
+    # XeroJournals joins on to_field='transactions_id' (the Xero string),
+    # XeroDocument on the table's own pk. Join through transactions_id or
+    # the comparison is bigint = varchar and Postgres refuses it.
+    tids = {r['transaction_source_id'] for r in rows if r['transaction_source_id']}
+    if tids:
+        base = public_base_url(request)
+        by_txn = {}
+        for d in (XeroDocument.objects
+                  .filter(transaction_source__transactions_id__in=tids)
+                  .values('id', 'file_name', 'transaction_source__transactions_id')
+                  .order_by('file_name')):
+            by_txn.setdefault(d['transaction_source__transactions_id'], []).append({
+                'file_name': d['file_name'],
+                'url': '%s/xero/data/documents/%s/file/?s=%s' % (
+                    base, d['id'], xero_document_signature(d['id'])),
+            })
+        for r in rows:
+            docs = by_txn.get(r['transaction_source_id']) or []
+            r['receipts'] = docs
+            r['receipt_count'] = len(docs)
+            r['receipt_name'] = docs[0]['file_name'] if docs else ''
+            r['receipt_url'] = docs[0]['url'] if docs else ''
+    else:
+        for r in rows:
+            r['receipts'], r['receipt_count'] = [], 0
+            r['receipt_name'], r['receipt_url'] = '', ''
+
+    return {
+        'coords': coords,
+        'measure': measure,
+        'count': len(rows),
+        'line_total': _r2(total),
+        'truncated': truncated,
+        'rows': rows,
+    }, None
+
 class XeroCubeDrillView(APIView):
     """GET /xero/data/journals/pivot/drill/?coords={"account":"406 — Consulting"}
 
@@ -716,192 +921,7 @@ class XeroCubeDrillView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        p = request.query_params
-        try:
-            coords = json.loads(p.get('coords') or '{}')
-            if not isinstance(coords, dict):
-                raise ValueError
-        except (TypeError, ValueError):
-            return Response({'error': 'coords must be a JSON object of dimension -> value'},
-                            status=status.HTTP_400_BAD_REQUEST)
-
-        unknown = [k for k in coords if k not in DIMENSIONS]
-        if unknown:
-            return Response({'error': 'unknown dimension(s): %s' % ', '.join(unknown)},
-                            status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            limit = min(max(int(p.get('limit', 500)), 1), 5000)
-        except (TypeError, ValueError):
-            limit = 500
-
-        # The total must be computed on the SAME measure the cell showed.
-        # Summing amount for a comment written on a debit or credit figure
-        # reconciles only by luck -- it happens to agree when a line's debit
-        # equals its amount, and disagrees silently when it does not.
-        measure = (p.get('measure') or 'amount').strip()
-        if measure not in MEASURES:
-            return Response({'error': 'unknown measure: %s' % measure},
-                            status=status.HTTP_400_BAD_REQUEST)
-        FIELD = {'amount': 'amount', 'debit': 'debit', 'credit': 'credit',
-                 'tax': 'tax_amount'}
-
-        qs = apply_journal_filters(XeroJournals.objects.all(), p)
-
-        # Push down what SQL can do.
-        deferred = {}
-        for dim, val in coords.items():
-            val = '' if val is None else str(val)
-            if dim in PUSHDOWN:
-                if val == BLANK:
-                    # A blank member covers BOTH an empty string and a NULL, and
-                    # they need different SQL. `__in=['', None]` compiles to
-                    # `IN ('', NULL)`, and nothing is ever equal to NULL — so
-                    # every drill on a "(none)" member silently returned no rows
-                    # and looked like the ledger had moved underneath it.
-                    qs = qs.filter(Q(**{PUSHDOWN[dim]: ''})
-                                   | Q(**{PUSHDOWN[dim] + '__isnull': True}))
-                else:
-                    qs = qs.filter(**{PUSHDOWN[dim]: val})
-            elif dim == 'account':
-                # The label is "code — name" only when BOTH exist: _label_account
-                # falls back to `code or name or BLANK`. An account with a blank
-                # code therefore labels as its NAME alone, with no separator —
-                # and 24 of them exist here, every bank and investment account.
-                #
-                # Splitting on the bare em dash then treated that whole name as a
-                # CODE, which matched nothing, and the `if '—' in val` guard also
-                # skipped the deferred re-test that would have caught it. The
-                # drill returned zero lines for a cell the cube had just built out
-                # of real rows — the one failure that makes a figure look
-                # unauditable. Names contain em dashes of their own, so split on
-                # the full ' — ' separator, not the character.
-                sep = ' — '
-                if sep in val:
-                    code = val.split(sep)[0].strip()
-                    if code:
-                        qs = qs.filter(account__code=code)
-                # Always re-test the whole label in Python. A code is not unique
-                # either ("260 — Other Revenue" and "260 — Luca Support Wyndam"
-                # are two accounts), so the pushdown narrows but never decides.
-                deferred[dim] = val
-            else:
-                deferred[dim] = val
-
-        ann = _dim_annotations(list(deferred.keys()))
-        if ann:
-            qs = qs.annotate(**ann)
-
-        qs = qs.select_related('organisation', 'account', 'contact', 'tracking1', 'tracking2',
-                               'transaction_source', 'transaction_source__contact')
-
-        tests = [(d, _labeller(d), v) for d, v in deferred.items()]
-        aliases = []
-        for d in deferred:
-            aliases.extend(_dim_aliases(d))
-
-        rows, total, scanned = [], 0.0, 0
-        truncated = False
-        for j in qs.iterator(chunk_size=2000):
-            scanned += 1
-            if tests:
-                rec = {a: _attr_path(j, a) for a in aliases}
-                if any(f(rec) != v for _, f, v in tests):
-                    continue
-            if measure == 'count':
-                total += 1
-            else:
-                total += float(getattr(j, FIELD[measure], None) or 0)
-            if len(rows) >= limit:
-                truncated = True
-                continue
-            src = j.transaction_source
-            supplier = j.contact or (src.contact if src else None)
-            acct = j.account
-            org = j.organisation
-            # Same field set as the journal search endpoint, so a drill result
-            # renders through the add-in's existing sheet writer untouched --
-            # one column contract, no second renderer to drift.
-            fy_rec = {
-                'd_year': j.date.year if j.date else None,
-                'd_month': j.date.month if j.date else None,
-                'organisation__fiscal_year_start_month': (
-                    getattr(org, 'fiscal_year_start_month', None) if org else None),
-            }
-            rows.append({
-                'id': j.id,
-                'date': j.date.date().isoformat() if j.date else None,
-                'journal_number': j.journal_number,
-                'journal_type': j.journal_type,
-                'fin_year': _label_fin_year(fy_rec),
-                'tenant_id': org.tenant_id if org else '',
-                'tenant_name': org.tenant_name if org else '',
-                'report': (('Income Statement' if acct.grouping in ('REVENUE', 'EXPENSE')
-                            else 'Balance Sheet') if acct and acct.grouping else ''),
-                'account_class': acct.grouping if acct else '',
-                'account_code': acct.code if acct else '',
-                'account_name': acct.name if acct else '',
-                'account_type': acct.type if acct else '',
-                'amount': str(j.amount),
-                'debit': str(j.debit),
-                'credit': str(j.credit),
-                'tax_amount': str(j.tax_amount),
-                'contact_name': j.contact.name if j.contact else '',
-                'supplier_name': supplier.name if supplier else '',
-                'supplier_via': ('journal' if j.contact else ('source' if (src and src.contact) else '')),
-                'description': j.description or '',
-                'reference': j.reference or '',
-                'tracking1_category': j.tracking1.name if j.tracking1 else '',
-                'tracking1': j.tracking1.option if j.tracking1 else '',
-                'tracking2_category': j.tracking2.name if j.tracking2 else '',
-                'tracking2': j.tracking2.option if j.tracking2 else '',
-                'transaction_source_type': src.transaction_source if src else '',
-                'transaction_source_id': src.transactions_id if src else '',
-            })
-
-        # The receipt behind each line. "Which transactions make up this
-        # number" is only half an answer if the source document cannot be
-        # opened from the same row.
-        #
-        # One bulk query over the rows actually RETURNED (capped at `limit`),
-        # never per row — a drill can be thousands of lines and this must not
-        # become N+1. The link is the existing HMAC-signed document route, so
-        # it opens from Excel without a session, and the signature is scoped to
-        # the single document id.
-        #
-        # Note the two transaction_source columns are different types:
-        # XeroJournals joins on to_field='transactions_id' (the Xero string),
-        # XeroDocument on the table's own pk. Join through transactions_id or
-        # the comparison is bigint = varchar and Postgres refuses it.
-        tids = {r['transaction_source_id'] for r in rows if r['transaction_source_id']}
-        if tids:
-            base = public_base_url(request)
-            by_txn = {}
-            for d in (XeroDocument.objects
-                      .filter(transaction_source__transactions_id__in=tids)
-                      .values('id', 'file_name', 'transaction_source__transactions_id')
-                      .order_by('file_name')):
-                by_txn.setdefault(d['transaction_source__transactions_id'], []).append({
-                    'file_name': d['file_name'],
-                    'url': '%s/xero/data/documents/%s/file/?s=%s' % (
-                        base, d['id'], xero_document_signature(d['id'])),
-                })
-            for r in rows:
-                docs = by_txn.get(r['transaction_source_id']) or []
-                r['receipts'] = docs
-                r['receipt_count'] = len(docs)
-                r['receipt_name'] = docs[0]['file_name'] if docs else ''
-                r['receipt_url'] = docs[0]['url'] if docs else ''
-        else:
-            for r in rows:
-                r['receipts'], r['receipt_count'] = [], 0
-                r['receipt_name'], r['receipt_url'] = '', ''
-
-        return Response({
-            'coords': coords,
-            'measure': measure,
-            'count': len(rows),
-            'line_total': _r2(total),
-            'truncated': truncated,
-            'rows': rows,
-        })
+        data, error = drill_result(request, request.query_params)
+        if error:
+            return Response({'error': error}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(data)
