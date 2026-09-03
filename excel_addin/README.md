@@ -184,11 +184,22 @@ Three properties of the journal mirror that silently corrupt totals if ignored:
 Served to Excel: `manifest.xml` · `taskpane.html` · `lib.js` · `app.js` ·
 `styles.css` · `assets/icon-*.png`
 
-Not served (the checks — see **Checks** at the end): `test/` · `package.json` ·
-`eslint.config.mjs` · `Makefile` · `node_modules/`. The add-in directory is
-published whole at `/excel-addin/`, so `_excel_addin_asset` in
-`klikk_business_intelligence/urls.py` 404s those paths explicitly. Add a file
-to that list if you add anything else to this folder that Excel does not fetch.
+**This whole directory is published at `/excel-addin/`, so anything you add to
+it is public the moment it deploys.** That is not hypothetical: the icon
+masters in `assets/src/` — the SVG sources plus `build.py` and
+`contact_sheet.py` — were readable on the internet from the day they were
+committed until 2026-09-03. Nobody chose to publish them; they were just put
+in the folder.
+
+So `_excel_addin_asset` in `klikk_business_intelligence/urls.py` 404s
+everything that is not part of the bundle: `assets/src/`, `test/`,
+`package*.json`, `eslint.config.mjs`, `Makefile`, `node_modules/`, and — by
+kind, wherever they are put — any `.py`, any `.md` and any dotfile. The dotfile
+rule is the one that matters: an `.env` dropped in here would be a real breach.
+
+**Adding a file Excel does not fetch? Add it to that list.** `make check` fails
+until you do — `test/exposure.test.js` reads the rules straight out of
+`urls.py` and requires every file in this folder to be either served or denied.
 
 `lib.js` is the pure half of the pane — run merging, `dimf`/`rtotals`
 serialisation, date serials, the Build-target rule — split out of `app.js`'s
@@ -401,6 +412,7 @@ npm ci          # once, to get eslint + jsdom. No bundler, no build step.
 | `test/boot.test.js` — jsdom loads `taskpane.html` with an `Office`/`Excel` stub | the pane not booting; a missing control killing the listeners *after* it; a dead handler, by clicking every button | `wireEvents()` registered 40+ listeners with bare `addEventListener`; one missing id threw and every later listener never attached, while the pane still rendered |
 | `test/cube.test.js` — clicks Build five times against a fake workbook | a Build that adds a sheet instead of rewriting the bound one | `Cube, Cube 2 … Cube 5` in eleven seconds of dragging the wells |
 | `test/lib.test.js` — pure functions, no DOM | run merging, `dimf`, `rtotals`/`ctotals`, date serials, the Build-target rule | rows keyed on `Math.min(depth, 2)` merged a depth-3 row into a depth-2 run, so the first child of every parent lost its indent |
+| `test/exposure.test.js` — cross-checks this folder against `urls.py` | a new file silently published on the public origin | `assets/src/build.py` and the SVG masters, readable at `console.8-bit.space` until 2026-09-03 |
 
 **`make prove` is the point.** A test that has never failed has proved
 nothing, so `test/prove-regressions.js` copies the add-in to a temp directory,
