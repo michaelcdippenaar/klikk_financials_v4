@@ -113,9 +113,62 @@ CREATE INDEX IF NOT EXISTS cube_comments_tags_gin ON app.cube_comments USING gin
 --
 -- Partial index: nearly every row is assigned to nobody, and the only query
 -- that matters is "the ones that are".
-ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS assignee_key text NOT NULL DEFAULT '';
-CREATE INDEX IF NOT EXISTS cube_comments_assignee_idx ON app.cube_comments (assignee_key)
-    WHERE assignee_key <> '';
+-- Named `assignee_role`, not `assignee`, because what is stored is a SEAT and
+-- not a worker. Renamed from the `assignee_role` this shipped as a few hours
+-- earlier, while every row still held '' -- a rename is free until the first
+-- point is assigned and then it is a data migration across three consumers.
+--
+-- The name leaves room for an `assignee_person` beside it without renaming a
+-- live column later. That column is deliberately NOT built: with one holder per
+-- seat the person is derivable from the directory, and a second field that can
+-- disagree with the first is worse than no field.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'app' AND table_name = 'cube_comments'
+                 AND column_name = 'assignee_key')
+       AND NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_schema = 'app' AND table_name = 'cube_comments'
+                         AND column_name = 'assignee_role') THEN
+        ALTER TABLE app.cube_comments RENAME COLUMN assignee_key TO assignee_role;
+    END IF;
+END $$;
+ALTER TABLE app.cube_comments ADD COLUMN IF NOT EXISTS assignee_role text NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS cube_comments_assignee_idx ON app.cube_comments (assignee_role)
+    WHERE assignee_role <> '';
+
+-- WHERE A POINT HAS BEEN, and since when.
+--
+-- The comment row knows where a point is NOW and cannot answer "how long has
+-- this been sitting with the bookkeeper" -- which is the number that says the
+-- review loop has stalled, and the reason this table earns its place day to
+-- day. The audit half matters at handover: `assignee_role` names a seat whose
+-- holder changes, so without a log every point ever routed to `bookkeeper`
+-- silently re-reads as whoever holds that seat later.
+--
+-- Append-only, and the INITIAL assignment gets a row like any other -- the
+-- commonest case by far is raised once and never moved, and deriving history
+-- from current membership is exactly what breaks when the membership changes.
+-- It cannot be backfilled: a day without it is a day of ageing lost for good.
+CREATE TABLE IF NOT EXISTS app.cube_comment_assignments (
+    id           bigserial   PRIMARY KEY,
+    comment_id   bigint      NOT NULL REFERENCES app.cube_comments(id) ON DELETE CASCADE,
+    from_role    text        NOT NULL DEFAULT '',
+    to_role      text        NOT NULL DEFAULT '',
+    -- Who held the seat at that moment. The seat cannot preserve it, and this
+    -- is the question an auditor asks of a review register.
+    held_by      text        NOT NULL DEFAULT '',
+    held_by_email text       NOT NULL DEFAULT '',
+    changed_by   text        NOT NULL DEFAULT '',
+    changed_at   timestamptz NOT NULL DEFAULT now()
+);
+-- The ageing read is "this comment's moves, newest first"; the queue-wide read
+-- is "everything that landed on this seat and when".
+CREATE INDEX IF NOT EXISTS cube_comment_assignments_comment_idx
+    ON app.cube_comment_assignments (comment_id, changed_at DESC);
+CREATE INDEX IF NOT EXISTS cube_comment_assignments_to_idx
+    ON app.cube_comment_assignments (to_role, changed_at DESC)
+    WHERE to_role <> '';
 
 -- A comment is a CONVERSATION, not a note.
 --
@@ -298,7 +351,7 @@ def _author_identity(request, declared):
 
 
 COLS = ('id, cell_key, subject_type, subject_key, subject_label, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
-        'filters, cell_value, comment, author, author_key, assignee_key, status, decision, created_at, updated_at, '
+        'filters, cell_value, comment, author, author_key, assignee_role, status, decision, created_at, updated_at, '
         'tags')
 
 
@@ -364,35 +417,113 @@ def _norm_decision(raw):
                      % (raw, ', '.join(sorted(DECISIONS))))
 
 
-def _resolve_assignee(raw, *, requester=''):
-    """Turn what a writer TYPED into a username the queue can be built from.
+def _resolve_assignee(raw, *, requester_email=''):
+    """Resolve what a writer typed to a `app.cube_people` HANDLE, plus who holds it.
 
-    Resolution happens here, at WRITE time, and the answer is what gets stored.
-    The alternative -- keeping '@anzelle' as prose and re-reading it whenever a
-    queue is built -- fails the first time someone writes '@anzelle?' or an
-    account is renamed, and it fails SILENTLY: the point then sits in nobody's
-    list while still looking assigned on the page that raised it.
+    Assignment names a ROLE, not a person: `bookkeeper`, not `anzelle`. The
+    handle is what gets stored on the comment, and `app.cube_people` says who
+    that is today -- so replacing a bookkeeper is one row in the directory
+    instead of a rewrite of every point ever sent to her. Storing the person
+    would throw that away the moment she is replaced.
 
-    So an unknown name is a 400, never a quiet drop. Assigning work to a
-    misspelling and being told nothing is the one outcome a review loop cannot
-    survive -- the raiser believes it was passed on and the preparer never sees
-    it.
+    Resolved against the DIRECTORY and not the Django user table, deliberately.
+    The people who receive work here have no login -- the mentions module is
+    explicit that an address "must be entered on purpose" and never guessed --
+    so resolving against users would mean nobody can be assigned until somebody
+    creates them an account they do not need. It also keeps ONE answer to "who
+    is the bookkeeper": mentions and assignment now read the same directory
+    instead of drifting apart.
 
-    'me' resolves to the caller, so the console, the add-in and an agent on the
-    MCP path can all say the same thing and mean themselves.
+    An unknown handle is an error, never a quiet drop -- a typo'd role is work
+    routed to a role nobody holds, and nothing anywhere reports it. An INACTIVE
+    handle is refused for the same reason: assigning to a role that has been
+    stood down is assigning to nobody. Rows already pointing at a stood-down
+    handle are left exactly as they are; see `_current_assignee`.
+
+    Returns (handle, holder) -- the holder being the snapshot recorded on the
+    activity trail, because the comment itself cannot preserve it.
     """
-    name = str(raw or '').strip().lstrip('@')
+    name = str(raw or '').strip().lstrip('@').lower()
     if not name:
-        return ''
-    if name.lower() == 'me':
-        if not requester:
-            raise ValueError("'me' needs a signed-in caller to resolve to")
-        return requester
-    from django.contrib.auth import get_user_model
-    match = get_user_model().objects.filter(username__iexact=name).first()
-    if match is None:
-        raise ValueError('no account named %r \u2014 assign to a user that exists' % name)
-    return match.get_username()
+        return '', {}
+    cube_mentions.ensure_tables()
+    if name == 'me':
+        # 'me' has no meaning in a directory of roles unless the caller is IN
+        # it. Matched on address rather than guessed from a username, and a
+        # loud failure when absent -- the alternative is silently assigning to
+        # a handle that merely looks like the caller.
+        email = (requester_email or '').strip().lower()
+        if not email:
+            raise ValueError("'me' needs a signed-in caller with an address")
+        with connection.cursor() as c:
+            c.execute('SELECT handle, display_name, email FROM app.cube_people '
+                      'WHERE lower(email) = %s AND active', [email])
+            row = c.fetchone()
+        if row is None:
+            raise ValueError("you have no entry in the people directory \u2014 add one "
+                             "before assigning to yourself")
+        return row[0], {'handle': row[0], 'display_name': row[1] or row[0], 'email': row[2]}
+    with connection.cursor() as c:
+        c.execute('SELECT handle, display_name, email, active FROM app.cube_people '
+                  'WHERE lower(handle) = %s', [name])
+        row = c.fetchone()
+    if row is None:
+        raise ValueError('no such handle %r \u2014 add it to the people directory first'
+                         % name)
+    if not row[3]:
+        raise ValueError('handle %r is not active \u2014 assigning to a role nobody '
+                         'holds is the same as assigning to nobody' % name)
+    return row[0], {'handle': row[0], 'display_name': row[1] or row[0], 'email': row[2]}
+
+
+def _current_assignee(subject_type, subject_key, author_key):
+    """The assignee a row already carries, read only when one is being SET.
+
+    Needed for the from/to on the trail. Not read on every post: an ordinary
+    re-save that says nothing about assignment pays nothing for this.
+    """
+    with connection.cursor() as c:
+        c.execute('SELECT assignee_role FROM app.cube_comments WHERE subject_type = %s '
+                  'AND subject_key = %s AND author_key = %s',
+                  [subject_type, subject_key, author_key])
+        row = c.fetchone()
+    return row[0] if row else ''
+
+
+def _record_assignment(request, row, before, holder, actor_key):
+    """Log a change of hands, and say on the activity trail that it happened.
+
+    TWO writes, with two different jobs, deliberately -- not one fact recorded
+    twice. `app.cube_comment_assignments` is the RECORD: typed columns, so
+    "how long has this been with the bookkeeper" is an indexed query rather
+    than a JSON dig, and it carries the holder snapshot the seat cannot keep.
+    The activity event is the NOTICE: assignment shows up on the audit surface
+    beside replies, and carries pointers rather than a second copy of the
+    content -- exactly how the reply event carries reply_id and not the text.
+
+    A no-op assignment writes nothing: re-saving a point that is already with
+    the bookkeeper is not a change of hands, and logging it would make the
+    ageing number reset every time somebody retypes the note.
+    """
+    to_role = holder.get('handle') or ''
+    if before == to_role:
+        return
+    comment_id = row.get('id')
+    if comment_id:
+        with connection.cursor() as c:
+            c.execute(
+                'INSERT INTO app.cube_comment_assignments '
+                '(comment_id, from_role, to_role, held_by, held_by_email, changed_by) '
+                'VALUES (%s,%s,%s,%s,%s,%s)',
+                [comment_id, before, to_role, holder.get('display_name') or '',
+                 holder.get('email') or '', actor_key or ''])
+    from apps.activity import models as A
+    from apps.activity.services import record_activity
+    record_activity(
+        request, A.CUBE_COMMENT_ASSIGNED, target_kind='cube_comment',
+        target_id=comment_id or '', target_ref=row.get('subject_label') or '',
+        changes={'assignee_role': {'from': before, 'to': to_role}},
+    )
 
 
 SUBJECT_KINDS = {
@@ -443,7 +574,7 @@ def _shape(d):
         'comment': d['comment'],
         'author': d['author'],
         'author_key': d['author_key'],
-        'assignee_key': d['assignee_key'],
+        'assignee_role': d['assignee_role'],
         'status': d['status'],
         'decision': d['decision'],
         'tags': list(d['tags'] or []),
@@ -490,7 +621,7 @@ def list_comments(params, *, with_reply_counts=False, with_replies=False):
     run the same SQL: two copies drift the first time a filter is added to one.
 
     Filters: status (default 'open', 'all' for every status), subject_type,
-    subject_key, author (author_key), assignee (assignee_key), tenant (tenant_id),
+    subject_key, author (author_key), assignee (assignee_role), tenant (tenant_id),
     measure, decision,
     tag / tags (containment -- ALL of them, so a tag filter NARROWS), q (free
     text over the note, the subject label and the author), limit, offset.
@@ -510,7 +641,8 @@ def list_comments(params, *, with_reply_counts=False, with_replies=False):
     for param, col in (('subject_type', 'subject_type'), ('subject_key', 'subject_key'),
                        ('author', 'author_key'), ('tenant', 'tenant_id'),
                        ('measure', 'measure'), ('decision', 'decision'),
-                       ('assignee', 'assignee_key')):
+                       ('assignee', 'assignee_role'),
+                       ('assignee_role', 'assignee_role')):
         val = (params.get(param) or '').strip()
         if val:
             where.append('%s = %%s' % col)
@@ -639,16 +771,19 @@ class XeroCubeCommentsView(APIView):
         if tags is None:
             tags = []
 
+        assign_given = 'assignee' in d
         try:
-            assignee = _resolve_assignee(d.get('assignee'), requester=author_key)
+            assignee, assignee_holder = _resolve_assignee(
+                d.get('assignee'), requester_email=getattr(request.user, 'email', ''))
         except ValueError as exc:
             return Response({'error': str(exc)}, status=http.HTTP_400_BAD_REQUEST)
+        assignee_before = _current_assignee('cube_cell', key, author_key) if assign_given else ''
         # An OMITTED assignee must leave the stored one alone; present-and-empty
         # is the explicit unassign. Same data-loss guard receipts already carries
         # (tests_archive.py: "a decision-less PATCH blanked the decision") -- an
         # add-in re-sync that does not know about assignment must not silently
         # empty somebody's queue.
-        assign_set = '  assignee_key = EXCLUDED.assignee_key, ' if 'assignee' in d else ''
+        assign_set = '  assignee_role = EXCLUDED.assignee_role, ' if assign_given else ''
 
         with connection.cursor() as c:
             c.execute(
@@ -660,7 +795,7 @@ class XeroCubeCommentsView(APIView):
                 # (cell_key, author_key) raised ProgrammingError on every POST.
                 'INSERT INTO app.cube_comments '
                 '(cell_key, subject_type, subject_key, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
-                ' filters, cell_value, comment, author, author_key, assignee_key, status, tags) '
+                ' filters, cell_value, comment, author, author_key, assignee_role, status, tags) '
                 'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
                 'ON CONFLICT (subject_type, subject_key, author_key) DO UPDATE SET '
                 '  comment = EXCLUDED.comment, cell_value = EXCLUDED.cell_value, '
@@ -675,6 +810,8 @@ class XeroCubeCommentsView(APIView):
             row = c.fetchone()
         out = _row_to_dict(row)
         out['author_verified'] = verified
+        if assign_given:
+            _record_assignment(request, out, assignee_before, assignee_holder, author_key)
 
         # The comment is saved and committed by this point. Notification is
         # strictly best-effort from here on: notify() catches everything and
@@ -908,11 +1045,15 @@ class CommentsView(APIView):
         # usually writes it. An agent raising a correction request from the
         # Excel pane goes through THIS door, and a request that cannot name who
         # should act lands in nobody's queue.
+        assign_given = 'assignee' in d
         try:
-            assignee = _resolve_assignee(d.get('assignee'), requester=author_key)
+            assignee, assignee_holder = _resolve_assignee(
+                d.get('assignee'), requester_email=getattr(request.user, 'email', ''))
         except ValueError as exc:
             return Response({'error': str(exc)}, status=http.HTTP_400_BAD_REQUEST)
-        assign_set = '  assignee_key = EXCLUDED.assignee_key, ' if 'assignee' in d else ''
+        assignee_before = (_current_assignee(subject_type, subject_key, author_key)
+                           if assign_given else '')
+        assign_set = '  assignee_role = EXCLUDED.assignee_role, ' if assign_given else ''
 
         # `_norm_tags` returns None for ABSENT, documented as "leave as is" --
         # but this door passed that None straight into a NOT NULL column, so
@@ -945,7 +1086,7 @@ class CommentsView(APIView):
                 'INSERT INTO app.cube_comments '
                 '(cell_key, subject_type, subject_key, subject_label, tenant_id, measure, '
                 ' row_dims, row_path, col_dims, col_path, filters, cell_value, '
-                ' comment, author, author_key, assignee_key, status, decision, tags) '
+                ' comment, author, author_key, assignee_role, status, decision, tags) '
                 'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
                 'ON CONFLICT (subject_type, subject_key, author_key) DO UPDATE SET '
                 '  comment = EXCLUDED.comment, subject_label = EXCLUDED.subject_label, '
@@ -968,4 +1109,6 @@ class CommentsView(APIView):
             row = c.fetchone()
         out = _row_to_dict(row)
         out['author_verified'] = verified
+        if assign_given:
+            _record_assignment(request, out, assignee_before, assignee_holder, author_key)
         return Response(out, status=http.HTTP_200_OK)

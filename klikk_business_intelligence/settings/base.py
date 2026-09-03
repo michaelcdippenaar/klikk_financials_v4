@@ -183,6 +183,39 @@ COMMENT_WEBHOOK_SECRET = (os.environ.get('COMMENT_WEBHOOK_SECRET') or '').strip(
 COMMENT_WEBHOOK_TIMEOUT = float(os.environ.get('COMMENT_WEBHOOK_TIMEOUT', '5'))
 # Where the console lives, for the deep link in the webhook payload.
 CONSOLE_BASE_URL = (os.environ.get('CONSOLE_BASE_URL') or 'https://console.8-bit.space').rstrip('/')
+# --- Outbound mail (apps.xero.xero_data.cube_mentions) ----------------------
+#
+# There were no EMAIL_* settings at all, so every mention fell through to
+# Django's own default of localhost:25 and went nowhere. That is not a
+# misconfiguration to fix in the env file -- there was nothing there to
+# configure, and the failure looked like a mail problem rather than a missing
+# one.
+#
+# Everything reads from the environment with Django's defaults intact, so an
+# unset variable leaves behaviour exactly as it is today: nothing starts
+# sending because this block merged. DEFAULT_FROM_EMAIL falls back to the
+# account actually authenticating, because a From: that does not match the
+# authenticated sender is the usual way Gmail SMTP accepts a message and then
+# drops it.
+EMAIL_BACKEND = (os.environ.get('EMAIL_BACKEND')
+                 or 'django.core.mail.backends.smtp.EmailBackend').strip()
+EMAIL_HOST = (os.environ.get('EMAIL_HOST') or 'localhost').strip()
+EMAIL_PORT = int(os.environ.get('EMAIL_PORT', '25'))
+EMAIL_HOST_USER = (os.environ.get('EMAIL_HOST_USER') or '').strip()
+# Not stripped and never logged: an app password is 16 characters that may be
+# stored with the spaces Google displays, and .strip() would hide only the ends
+# of a mistake rather than the mistake.
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD') or ''
+EMAIL_USE_TLS = (os.environ.get('EMAIL_USE_TLS') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+EMAIL_USE_SSL = (os.environ.get('EMAIL_USE_SSL') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+# A mention is sent INSIDE the request that saved the comment. Without a
+# timeout an unreachable SMTP host holds that request open until the gateway
+# gives up, so a mail outage would present as the comments page hanging --
+# which is a symptom this console has already paid for once.
+EMAIL_TIMEOUT = float(os.environ.get('EMAIL_TIMEOUT', '10'))
+DEFAULT_FROM_EMAIL = (os.environ.get('DEFAULT_FROM_EMAIL')
+                      or EMAIL_HOST_USER or 'webmaster@localhost').strip()
+
 # Shared service token for machine callers (the klikk-financials MCP server) that have no
 # Django user. Consumed by klikk_business_intelligence.permissions.ServiceTokenAuthentication.
 # Unset => service-token writes are denied (a warning is logged once).

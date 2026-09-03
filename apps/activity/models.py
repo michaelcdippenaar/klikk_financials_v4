@@ -48,6 +48,13 @@ COMMENT_POSTED = 'comment.posted'
 # Cube-comment threads: a reply on a comment in the register (app.cube_comments),
 # and — auditors only, like every other read here — a view of one of those threads.
 CUBE_COMMENT_REPLIED = 'cube_comment.replied'
+# Assignment names a ROLE handle ('bookkeeper'), and the person behind that
+# handle is expected to change. The comment therefore cannot say who it was
+# actually sent to at the time -- reassigning the role silently rewrites the
+# apparent history of every point ever assigned to it. This event is where that
+# fact is kept: it records the handle AND who held it at that moment, and being
+# append-only it stays true after the handover.
+CUBE_COMMENT_ASSIGNED = 'cube_comment.assigned'
 CUBE_COMMENT_VIEWED = 'cube_comment.viewed'
 ATTACHMENT_UPLOADED = 'attachment.uploaded'
 ATTACHMENT_DELETED = 'attachment.deleted'
@@ -63,7 +70,7 @@ ACTIONS = (
     FINDING_BULK_DUE, FINDING_BULK_COMMENT, FINDING_VIEWED,
     RECEIPT_TO_PROCESS_SET, RECEIPT_ARCHIVED, RECEIPT_RESTORED, RECEIPT_REVIEW_SAVED,
     RECEIPT_BULK_REVIEW, RECEIPT_BULK_COMMENT,
-    COMMENT_POSTED, CUBE_COMMENT_REPLIED, CUBE_COMMENT_VIEWED,
+    COMMENT_POSTED, CUBE_COMMENT_REPLIED, CUBE_COMMENT_VIEWED, CUBE_COMMENT_ASSIGNED,
     ATTACHMENT_UPLOADED, ATTACHMENT_DELETED, ATTACHMENT_VIEWED,
     LINK_ADDED, LINK_REMOVED, SLIP_VIEWED,
 )
