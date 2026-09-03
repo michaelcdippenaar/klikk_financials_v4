@@ -10,10 +10,23 @@ gets **1,000**.
 
 Measured, not inferred:
 
-| Date | How | Result |
+| Date | Tenant | Observation |
 |---|---|---|
-| 2026-08-19 | After the ids-queue lockout | ceiling observed at 1,000/tenant |
-| 2026-09-03 | Re-confirmed on Tremly and Dippenaar during the attachment backfill | 1,000/tenant |
+| 2026-08-19 | Klikk | the ids-queue run **died at 1,036 calls** and locked the 02:45 pipeline out — the hard ceiling data point |
+| 2026-08-29 | Klikk | 968 remaining after discovery; 611 after a 500-call fetch |
+| 2026-08-30 | Klikk | probe 906; 887 after discovery; 475 after a 412-call fetch |
+| 2026-09-03 | Dippenaar | **991 remaining after 7 discovery calls** → a start-of-run ceiling of ~998. The tightest single point. |
+| 2026-09-03 | Tremly | 969 on a 1-call pre-flight probe; stood down at 301 |
+
+**This is an inference, not a figure Xero returned.** No `X-DayLimit-Remaining`
+value above **998** has ever been observed, on any tenant, on any day — and the
+2026-08-19 run died at 1,036 calls. Nothing in a Xero response says "1000".
+Treat 1,000 as the working ceiling and keep reading the header rather than
+trusting this number.
+
+Second caveat: the daily window is fixed and per-tenant, and the script header
+records the reset at roughly **14:26 UTC**. That time was not re-verified on
+2026-09-03.
 
 The cause is Xero's **2 March 2026 move to tiered pricing**: Starter is
 1,000/day, every other tier is 5,000. So the cap is a property of **this app's
