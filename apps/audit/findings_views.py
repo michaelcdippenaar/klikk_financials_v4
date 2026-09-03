@@ -56,6 +56,7 @@ from .findings_services import (
     BULK_MAX, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE, allocate_ref, attachment_to_dict, build_queryset,
     clean_payload, comment_to_dict, current_fy, finding_to_dict, fy_options, summary_for, totals_for,
 )
+from .comment_webhook import notify_comment_created, notify_comments_created
 from .models import (
     AuditFinding, AuditFindingAttachment, AuditFindingComment, sanitise_attachment_filename,
 )
@@ -265,6 +266,35 @@ def finding_detail_view(request, pk: int):
     return Response(finding_to_dict(finding))
 
 
+_BAD_PARENT = 'parent_id must be the id of an existing comment on this finding'
+
+
+def _resolve_comment_parent(finding, raw):
+    """(parent, error_response) for an optional ``parent_id`` on this finding.
+
+    Same contract as the receipts side (apps.receipts.views._resolve_parent):
+    a parent from ANOTHER finding is rejected rather than silently ignored, and
+    replying to a reply re-parents onto the root so the thread stays one level
+    deep.
+    """
+    if raw is None:
+        return None, None
+    if isinstance(raw, bool):  # bools are ints; True would resolve comment id 1
+        return None, Response({'detail': _BAD_PARENT}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        parent_id = int(raw)
+    except (TypeError, ValueError):
+        return None, Response({'detail': _BAD_PARENT}, status=status.HTTP_400_BAD_REQUEST)
+    parent = AuditFindingComment.objects.filter(pk=parent_id, finding=finding).first()
+    if parent is None:
+        return None, Response({'detail': _BAD_PARENT}, status=status.HTTP_400_BAD_REQUEST)
+    if parent.parent_id is not None:
+        parent = AuditFindingComment.objects.filter(pk=parent.parent_id, finding=finding).first()
+        if parent is None:  # pragma: no cover — CASCADE makes this unreachable
+            return None, Response({'detail': _BAD_PARENT}, status=status.HTTP_400_BAD_REQUEST)
+    return parent, None
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def finding_comments_view(request, pk: int):
@@ -280,8 +310,15 @@ def finding_comments_view(request, pk: int):
     bad_nul = _nul_error('text', text)
     if bad_nul is not None:
         return bad_nul
+    parent, bad_parent = _resolve_comment_parent(finding, data.get('parent_id'))
+    if bad_parent is not None:
+        return bad_parent
     with transaction.atomic():
-        comment = AuditFindingComment.objects.create(finding=finding, text=text, author=actor(request))
+        # author from request.user only — an `author` in the body is ignored.
+        comment = AuditFindingComment.objects.create(
+            finding=finding, parent=parent, text=text, author=actor(request),
+        )
+        notify_comment_created('finding', comment)
     return Response(comment_to_dict(comment), status=status.HTTP_201_CREATED)
 
 
@@ -488,9 +525,11 @@ def findings_bulk_view(request):
             updated = AuditFinding.objects.filter(pk__in=targets).update(
                 **fields, updated_by=who, updated_at=timezone.now())
         if comment is not None:
-            AuditFindingComment.objects.bulk_create(
+            # Bulk comments stay TOP-LEVEL — see the receipts equivalent.
+            created = AuditFindingComment.objects.bulk_create(
                 [AuditFindingComment(finding_id=i, text=comment, author=who) for i in targets]
             )
+            notify_comments_created('finding', created)
             commented = len(targets)
     return Response({'updated': updated, 'commented': commented, 'unknown': unknown})
 

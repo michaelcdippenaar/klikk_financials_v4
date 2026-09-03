@@ -62,7 +62,9 @@ class SlipComment(models.Model):
     )
     text = models.TextField()
     author = models.CharField(max_length=150, blank=True, default='')
-    created_at = models.DateTimeField(auto_now_add=True)
+    # Indexed because the live-comment feed pages this table by created_at on
+    # every poll, from every open console tab.
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
         ordering = ['created_at']

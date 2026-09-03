@@ -143,13 +143,58 @@ class AuditFinding(models.Model):
 
 
 class AuditFindingComment(models.Model):
+    """A comment on one finding. Threaded ONE level deep — see SlipComment for
+    the reasoning; the two comment surfaces deliberately behave identically so
+    the console can render both with the same component."""
+
     finding = models.ForeignKey(AuditFinding, on_delete=models.CASCADE, related_name='comments')
+    parent = models.ForeignKey(
+        'self', null=True, blank=True, on_delete=models.CASCADE, related_name='replies',
+    )
     text = models.TextField()
     author = models.CharField(max_length=150, blank=True, default='')
-    created_at = models.DateTimeField(auto_now_add=True)
+    # Indexed because the live-comment feed pages this table by created_at on
+    # every poll, from every open console tab.
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
         ordering = ['created_at']
+
+
+
+class CommentWebhookDelivery(models.Model):
+    """One row per outbound comment-webhook ATTEMPT — success or failure.
+
+    This is the "log of who sent it": it answers, after the fact, which comment
+    was pushed where, by whom, and what the far end said. Written even when the
+    POST fails or the far end 500s, because a webhook that silently stopped
+    delivering is exactly the failure this table exists to surface.
+
+    Append-only by convention (no update/delete path exists in the app, and the
+    admin registers it read-only). ``response_snippet`` is capped so a chatty
+    or hostile endpoint cannot use this table as free storage.
+    """
+
+    KIND_CHOICES = (('receipt', 'Receipt'), ('finding', 'Finding'))
+    SNIPPET_MAX = 500
+
+    comment_kind = models.CharField(max_length=16, choices=KIND_CHOICES, db_index=True)
+    comment_id = models.BigIntegerField(db_index=True)
+    author = models.CharField(max_length=150, blank=True, default='')
+    target_url = models.URLField(max_length=500)
+    status_code = models.IntegerField(null=True, blank=True)  # None when the POST never completed
+    error = models.TextField(blank=True, default='')
+    response_snippet = models.TextField(blank=True, default='')
+    attempted_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-attempted_at']
+        verbose_name = 'Comment webhook delivery'
+        verbose_name_plural = 'Comment webhook deliveries'
+
+    def __str__(self):
+        outcome = self.status_code if self.status_code is not None else (self.error or 'no response')
+        return f'{self.comment_kind}#{self.comment_id} -> {outcome}'
 
 
 _UNSAFE_FILENAME = re.compile(r'[\x00-\x1f\\/]+')

@@ -49,6 +49,8 @@ from rest_framework.request import Request as DRFRequest
 from rest_framework.response import Response
 from rest_framework.settings import api_settings
 
+from apps.audit.comment_webhook import notify_comment_created, notify_comments_created
+
 from .models import DECISION_VALUES, SlipComment, SlipReview
 from .services import (
     DEFAULT_PAGE_SIZE, MAX_IDS, MAX_PAGE_SIZE, _bool, attach_review_state, build_filters, comment_to_dict,
@@ -280,9 +282,11 @@ def receipt_comments_view(request, sha256):
     # author comes from the authenticated request, NEVER from the body — an
     # `author` key in the payload is ignored, which is what makes the thread
     # usable as an audit trail.
-    comment = SlipComment.objects.create(
-        sha256=sha256, parent=parent, text=text, author=_username(request),
-    )
+    with transaction.atomic():
+        comment = SlipComment.objects.create(
+            sha256=sha256, parent=parent, text=text, author=_username(request),
+        )
+        notify_comment_created('receipt', comment)
     return Response(comment_to_dict(comment), status=status.HTTP_201_CREATED)
 
 
@@ -377,10 +381,13 @@ def receipts_bulk_view(request):
                 SlipReview.objects.update_or_create(sha256=sha, defaults=defaults)
                 updated += 1
         if comment is not None:
-            SlipComment.objects.bulk_create(
+            # Bulk comments stay TOP-LEVEL (no parent) — a bulk action is a
+            # statement about many receipts, not a reply to any one thread.
+            created = SlipComment.objects.bulk_create(
                 [SlipComment(sha256=sha, text=comment, author=username) for sha in targets]
             )
             commented = len(targets)
+            notify_comments_created('receipt', created)
     return Response({'updated': updated, 'commented': commented, 'unknown': unknown})
 
 

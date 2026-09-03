@@ -172,6 +172,16 @@ AUTH_USER_MODEL = 'user.User'
 
 # Public base for signed slip-viewer links (apps.audit.slip_view.slip_url / receipts view_url)
 SLIP_VIEW_BASE_URL = os.environ.get('SLIP_VIEW_BASE_URL', 'https://console.8-bit.space/backend')
+
+# --- Comment webhook (apps.audit.comment_webhook) ---------------------------
+# Empty URL = disabled, which is the default: nothing is POSTed anywhere unless
+# an operator opts in. Every attempt is logged to audit.CommentWebhookDelivery
+# regardless of outcome, so "who sent what where" is answerable after the fact.
+COMMENT_WEBHOOK_URL = (os.environ.get('COMMENT_WEBHOOK_URL') or '').strip()
+COMMENT_WEBHOOK_SECRET = (os.environ.get('COMMENT_WEBHOOK_SECRET') or '').strip()
+COMMENT_WEBHOOK_TIMEOUT = float(os.environ.get('COMMENT_WEBHOOK_TIMEOUT', '5'))
+# Where the console lives, for the deep link in the webhook payload.
+CONSOLE_BASE_URL = (os.environ.get('CONSOLE_BASE_URL') or 'https://console.8-bit.space').rstrip('/')
 # Shared service token for machine callers (the klikk-financials MCP server) that have no
 # Django user. Consumed by klikk_business_intelligence.permissions.ServiceTokenAuthentication.
 # Unset => service-token writes are denied (a warning is logged once).
