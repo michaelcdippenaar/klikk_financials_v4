@@ -1993,7 +1993,15 @@
       var run = null;
       var runs = [];
       cube.rows.forEach(function (r, i) {
-        var kind = (r.is_total ? 'T' : 'L') + Math.min(r.depth, 2);
+        /* Key on the REAL depth. Clamping it here (it was Math.min(depth, 2))
+           made a depth-3 row look identical to a depth-2 one, so the first
+           supplier under an account joined the ACCOUNT's run and was indented
+           with the account's depth -- into column C, leaving its own column D
+           flush left. The second supplier onwards began a fresh run and
+           indented correctly, which is why only the first child of each parent
+           looked wrong. Shading still clamps, below, so the colours are
+           unchanged; only the run boundaries move. */
+        var kind = (r.is_total ? 'T' : 'L') + r.depth;
         if (run && run.kind === kind && run.to === i - 1) {
           run.to = i;
         } else {
