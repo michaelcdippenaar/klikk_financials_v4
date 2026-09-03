@@ -3,7 +3,9 @@ User authentication URLs.
 """
 from django.urls import path
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView, TokenVerifyView
-from .views import RegisterView, LoginView, RefreshTokenView, NginxAuthCheckView
+from .views import (
+    ChangePasswordView, LoginView, NginxAuthCheckView, RefreshTokenView, RegisterView,
+)
 
 app_name = 'user'
 
@@ -12,6 +14,7 @@ urlpatterns = [
     path('register/', RegisterView.as_view(), name='register'),
     path('login/', LoginView.as_view(), name='login'),
     path('refresh/', RefreshTokenView.as_view(), name='refresh'),
+    path('change-password/', ChangePasswordView.as_view(), name='change_password'),
     
     # SimpleJWT built-in views (alternative endpoints)
     path('token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),

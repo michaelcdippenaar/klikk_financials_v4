@@ -66,6 +66,10 @@ from apps.receipts.services import SLIP_TZ, SUPPLIER_SQL, TOTAL_SQL
 from apps.xero.xero_data.document_views import xero_document_url
 from apps.xero.xero_data.models import XeroDocument, XeroInvoice, XeroJournals
 
+from apps.activity import models as A
+from apps.activity.services import record_activity
+
+from .comment_events import finding_ref
 from .models import LINK_KINDS, AuditFinding, AuditFindingLink
 
 _BODY_NOT_OBJECT = 'request body must be a JSON object'
@@ -512,6 +516,9 @@ def finding_links_view(request, pk: int):
         existing = AuditFindingLink.objects.get(finding=finding, kind=kind, ref=ref)
         return Response({'created': False, 'link': resolve_links([existing])[0]})
 
+    record_activity(request, A.LINK_ADDED, target_kind='link', target_id=link.pk,
+                    target_ref=finding_ref(finding),
+                    changes={'finding_id': finding.pk, 'kind': kind, 'ref': ref, 'label': label})
     return Response({'created': True, 'link': resolve_links([link])[0]},
                     status=status.HTTP_201_CREATED)
 
@@ -522,5 +529,11 @@ def finding_link_delete_view(request, pk: int):
     link = AuditFindingLink.objects.filter(pk=pk).first()
     if link is None:
         return Response({'detail': 'link not found'}, status=status.HTTP_404_NOT_FOUND)
+    # Captured BEFORE the delete — afterwards there is nothing left to describe.
+    removed = {'finding_id': link.finding_id, 'kind': link.kind, 'ref': link.ref,
+               'label': link.label}
+    removed_ref = finding_ref(link.finding)
     link.delete()
+    record_activity(request, A.LINK_REMOVED, target_kind='link', target_id=pk,
+                    target_ref=removed_ref, changes=removed)
     return Response({'deleted': True, 'id': pk})

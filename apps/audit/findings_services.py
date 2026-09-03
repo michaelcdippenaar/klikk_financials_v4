@@ -147,6 +147,7 @@ def comment_to_dict(c: AuditFindingComment) -> dict:
     return {
         'id': c.id,
         'finding_id': c.finding_id,
+        'parent_id': c.parent_id,
         'text': c.text,
         'author': c.author,
         'created_at': _iso(c.created_at),

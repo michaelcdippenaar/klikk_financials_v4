@@ -43,10 +43,28 @@ class SlipReview(models.Model):
 
 
 class SlipComment(models.Model):
+    """A comment on one receipt. Threaded ONE level deep.
+
+    ``parent`` is a self-FK rather than a thread-id column so a reply cannot
+    reference a comment that does not exist. The view flattens: replying to a
+    reply re-parents onto that reply's root, so the tree is never deeper than
+    parent -> replies. That is a deliberate product choice (the register is
+    triaged in a narrow cell; arbitrarily deep nesting has nowhere to render)
+    and it means the read side never needs recursion.
+
+    CASCADE on delete: nothing in the app deletes comments today, but if a
+    parent ever goes, orphan replies would render as ghost top-level comments.
+    """
+
     sha256 = models.CharField(max_length=64, db_index=True)
+    parent = models.ForeignKey(
+        'self', null=True, blank=True, on_delete=models.CASCADE, related_name='replies',
+    )
     text = models.TextField()
     author = models.CharField(max_length=150, blank=True, default='')
-    created_at = models.DateTimeField(auto_now_add=True)
+    # Indexed because the live-comment feed pages this table by created_at on
+    # every poll, from every open console tab.
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
     class Meta:
         ordering = ['created_at']

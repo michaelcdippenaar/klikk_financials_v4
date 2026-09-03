@@ -6,7 +6,7 @@ import logging
 from rest_framework import status, generics
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.permissions import AllowAny, IsAdminUser
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken, AccessToken
 from rest_framework_simplejwt.exceptions import TokenError
@@ -222,12 +222,74 @@ class LoginView(TokenObtainPairView):
                 "first_name": user.first_name,
                 "last_name": user.last_name,
                 "role": user.role,
+                # The console routes straight to the change-password screen on
+                # this flag, so a temporary password is never a working session.
+                "must_change_password": user.must_change_password,
             },
             "tokens": {
                 "refresh": str(refresh),
                 "access": str(refresh.access_token),
             }
         }, status=status.HTTP_200_OK)
+
+
+class ChangePasswordView(APIView):
+    """
+    Set a new password for the logged-in user.
+
+    POST /api/auth/change-password/   (Authorization: Bearer <JWT>)
+    {
+        "current_password": "the-temporary-one",
+        "new_password": "the-one-they-choose"
+    }
+
+    200 -> {"changed": true}
+    400 -> {"detail": "...", "errors": ["...", ...]}   (validator messages)
+
+    Clearing ``must_change_password`` is the whole point: AuditorGateMiddleware
+    holds a flagged account on this endpoint and nothing else.
+
+    Deliberately does NOT blacklist outstanding tokens. simplejwt tokens are
+    signed, not stored, so rotating the password does not invalidate them, and
+    the alternative (blacklisting mid-request) would log the user out of the
+    very screen they just used. The exposure is one access-token lifetime on a
+    credential the legitimate holder just proved they control.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        data = request.data if isinstance(request.data, dict) else {}
+        current = data.get('current_password') or ''
+        new = data.get('new_password') or ''
+
+        if not current or not new:
+            return Response(
+                {'detail': 'current_password and new_password are required'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = request.user
+        if not user.check_password(current):
+            # The flag stays set — a wrong current password must not be a way
+            # to slip past the gate.
+            return Response(
+                {'detail': 'Current password is incorrect'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            validate_password(new, user=user)
+        except ValidationError as exc:
+            return Response(
+                {'detail': 'The new password was rejected', 'errors': list(exc.messages)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user.set_password(new)
+        user.must_change_password = False
+        user.save(update_fields=['password', 'must_change_password', 'updated_at'])
+        return Response({'changed': True}, status=status.HTTP_200_OK)
 
 
 class NginxAuthCheckView(APIView):

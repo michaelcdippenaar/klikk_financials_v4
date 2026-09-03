@@ -991,7 +991,7 @@ class CommentTests(ExplicitFyMixin):
                                 {'text': '  chase the bookkeeper for the bill  '}, format='json')
         self.assertEqual(resp.status_code, 201, resp.content[:300])
         body = resp.json()
-        self.assertEqual(set(body.keys()), {'id', 'finding_id', 'text', 'author', 'created_at'})
+        self.assertEqual(set(body.keys()), {'id', 'finding_id', 'parent_id', 'text', 'author', 'created_at'})
         self.assertEqual(body['finding_id'], self.f1.pk)
         self.assertEqual(body['author'], 'auditor-mc')
         # comment_count reflected on the finding

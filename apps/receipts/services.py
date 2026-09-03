@@ -478,7 +478,15 @@ def review_to_dict(review: SlipReview | None) -> dict[str, Any]:
 
 
 def comment_to_dict(comment: SlipComment) -> dict[str, Any]:
-    return {'id': comment.id, 'text': comment.text, 'author': comment.author, 'created_at': _iso(comment.created_at)}
+    # parent_id is read off the FK's own column — no extra query, and it is the
+    # only thing the client needs to rebuild the thread (one level deep).
+    return {
+        'id': comment.id,
+        'parent_id': comment.parent_id,
+        'text': comment.text,
+        'author': comment.author,
+        'created_at': _iso(comment.created_at),
+    }
 
 
 def attach_review_state(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

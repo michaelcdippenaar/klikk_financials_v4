@@ -49,6 +49,11 @@ from rest_framework.request import Request as DRFRequest
 from rest_framework.response import Response
 from rest_framework.settings import api_settings
 
+from apps.activity import models as A
+from apps.activity.services import bulk_changes, diff, record_activity
+from apps.audit.comment_events import receipt_ref
+from apps.audit.comment_webhook import notify_comment_created, notify_comments_created
+
 from .models import DECISION_VALUES, SlipComment, SlipReview
 from .services import (
     DEFAULT_PAGE_SIZE, MAX_IDS, MAX_PAGE_SIZE, _bool, attach_review_state, build_filters, comment_to_dict,
@@ -226,8 +231,65 @@ def receipt_review_view(request, sha256):
     if bad_nul is not None:
         return bad_nul
     fields['updated_by'] = _username(request)
+    existing = SlipReview.objects.filter(sha256=sha256).first()
+    watched = [f for f in fields if f not in ('updated_by', 'archived_at', 'archived_by')]
+    before = {f: getattr(existing, f, None) for f in watched}
     review, _created = SlipReview.objects.update_or_create(sha256=sha256, defaults=fields)
+    _record_review_patch(request, sha256, before, review, watched)
     return Response(review_to_dict(review))
+
+
+def _record_review_patch(request, sha256, before, review, watched):
+    """Name the specific action when ONE field moved; otherwise one saved event.
+
+    "archived" and "to_process" are the two things anyone reading the trail is
+    actually looking for, so they get their own verbs rather than being buried
+    inside a generic `receipt.review_saved`.
+    """
+    after = {f: getattr(review, f, None) for f in watched}
+    changed = diff(before, after, watched)
+    if not changed:
+        return
+    ref = receipt_ref(sha256)
+    common = dict(target_kind='receipt', target_id=sha256, target_ref=ref)
+    if set(changed) == {'archived'}:
+        action = A.RECEIPT_ARCHIVED if review.archived else A.RECEIPT_RESTORED
+        record_activity(request, action, changes=changed, **common)
+        return
+    if set(changed) == {'to_process'}:
+        record_activity(request, A.RECEIPT_TO_PROCESS_SET, changes=changed, **common)
+        return
+    record_activity(request, A.RECEIPT_REVIEW_SAVED, changes=changed, **common)
+
+
+_BAD_PARENT = 'parent_id must be the id of an existing comment on this receipt'
+
+
+def _resolve_parent(sha256, raw):
+    """(parent, error_response) for an optional ``parent_id`` on this receipt.
+
+    Absent / null -> a top-level comment. A parent from ANOTHER receipt is
+    rejected rather than silently ignored: accepting it would file the reply
+    under a thread the caller cannot see. Replying to a reply re-parents onto
+    the root, keeping the thread exactly one level deep (see the model).
+    """
+    if raw is None:
+        return None, None
+    # Booleans are ints in Python — True would otherwise resolve comment id 1.
+    if isinstance(raw, bool):
+        return None, Response({'detail': _BAD_PARENT}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        parent_id = int(raw)
+    except (TypeError, ValueError):
+        return None, Response({'detail': _BAD_PARENT}, status=status.HTTP_400_BAD_REQUEST)
+    parent = SlipComment.objects.filter(pk=parent_id, sha256=sha256).first()
+    if parent is None:
+        return None, Response({'detail': _BAD_PARENT}, status=status.HTTP_400_BAD_REQUEST)
+    if parent.parent_id is not None:
+        parent = SlipComment.objects.filter(pk=parent.parent_id, sha256=sha256).first()
+        if parent is None:  # pragma: no cover — CASCADE makes this unreachable
+            return None, Response({'detail': _BAD_PARENT}, status=status.HTTP_400_BAD_REQUEST)
+    return parent, None
 
 
 @api_view(['POST'])
@@ -244,7 +306,23 @@ def receipt_comments_view(request, sha256):
     bad_nul = _nul_error('text', text)
     if bad_nul is not None:
         return bad_nul
-    comment = SlipComment.objects.create(sha256=sha256, text=text, author=_username(request))
+    parent, bad_parent = _resolve_parent(sha256, data.get('parent_id'))
+    if bad_parent is not None:
+        return bad_parent
+    # author comes from the authenticated request, NEVER from the body — an
+    # `author` key in the payload is ignored, which is what makes the thread
+    # usable as an audit trail.
+    with transaction.atomic():
+        comment = SlipComment.objects.create(
+            sha256=sha256, parent=parent, text=text, author=_username(request),
+        )
+        notify_comment_created('receipt', comment)
+    record_activity(
+        request, A.COMMENT_POSTED, target_kind='comment', target_id=comment.id,
+        target_ref=receipt_ref(sha256),
+        changes={'kind': 'receipt', 'sha256': sha256,
+                 'is_reply': comment.parent_id is not None, 'parent_id': comment.parent_id},
+    )
     return Response(comment_to_dict(comment), status=status.HTTP_201_CREATED)
 
 
@@ -339,10 +417,23 @@ def receipts_bulk_view(request):
                 SlipReview.objects.update_or_create(sha256=sha, defaults=defaults)
                 updated += 1
         if comment is not None:
-            SlipComment.objects.bulk_create(
+            # Bulk comments stay TOP-LEVEL (no parent) — a bulk action is a
+            # statement about many receipts, not a reply to any one thread.
+            created = SlipComment.objects.bulk_create(
                 [SlipComment(sha256=sha, text=comment, author=username) for sha in targets]
             )
             commented = len(targets)
+            notify_comments_created('receipt', created)
+    # ONE event per bulk ACTION, never one per receipt — a 500-row bulk archive
+    # would otherwise bury every other event in the trail.
+    if fields and updated:
+        applied = {k: v for k, v in fields.items()
+                   if k not in ('archived_at', 'archived_by', 'updated_by')}
+        record_activity(request, A.RECEIPT_BULK_REVIEW, target_kind='receipt', source='bulk',
+                        changes=bulk_changes(targets, **applied))
+    if comment is not None and commented:
+        record_activity(request, A.RECEIPT_BULK_COMMENT, target_kind='receipt', source='bulk',
+                        changes=bulk_changes(targets, comment=comment))
     return Response({'updated': updated, 'commented': commented, 'unknown': unknown})
 
 

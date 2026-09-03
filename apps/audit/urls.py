@@ -15,7 +15,10 @@ by review).
 """
 from django.urls import path
 
-from . import findings_cube_views, findings_graph_views, findings_links_views, findings_views, views
+from . import (
+    comment_feed_views, findings_cube_views, findings_graph_views, findings_links_views,
+    findings_views, views,
+)
 from .findings_file_view import finding_attachment_file_view
 from .slip_view import slip_file_view
 
@@ -30,6 +33,9 @@ urlpatterns = [
     path('history/<str:code>/', views.history_view, name='history'),
     path('runs/', views.runs_view, name='runs'),
     path('slip/<str:sha256>/', slip_file_view, name='slip_file'),
+
+    # --- live comment feed (polled by the console; see comment_feed_views) ---
+    path('comments/feed/', comment_feed_views.comment_feed_view, name='comment_feed'),
 
     # --- findings register: fixed-segment routes (MUST precede findings/<int:pk>/) ---
     path('findings/summary/', findings_views.findings_summary_view, name='findings_summary'),
