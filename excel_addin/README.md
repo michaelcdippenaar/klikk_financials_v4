@@ -519,6 +519,40 @@ That endpoint is safe to test against because it does **not** apply `dimf` —
 narrow itself as the subset changes. If that ever stops being true, every
 anchor collapses to nothing, and the check must be removed rather than patched.
 
+### The collapse rule is part of comment IDENTITY — do not change it casually
+
+`cell_key` is derived from the collapsed form, so `anchorDimfParam` does not
+just decide how an anchor *reads*. It decides which stored comment a cell **is**.
+
+Change what it collapses and the add-in computes a different key for a cell that
+already carries a comment. That does not raise an error anywhere. It writes a
+SECOND comment on the same figure, while MC's original sits under the old key —
+silent duplication, which is the exact failure the anchor exists to prevent.
+
+`app.cube_comments` was migrated on 2026-09-03 to match **this** implementation:
+per row, under that row's own journal filters, using the same
+`apply_journal_filters` + labeller + `MAX_MEMBERS` truncation refusal that
+`anchorDimfParam` relies on. 56 of 113 rows moved; 0 collisions; backup in
+`app.cube_comments_anchor_norm2_20260903`. The stored register and this function
+therefore agreed as of that date, and this function is the live rule — it runs
+on every Build, so any other implementation must follow it, not the reverse.
+
+That migration's first pass got it wrong in a way worth knowing, because it is
+how this defect will recur: it approximated the rule with a precomputed
+"universe" dict of four dimensions instead of reproducing it, and `report` was
+not one of the four — so 56 rows kept a verbose `report` the add-in collapses.
+The approximation was not the same *kind* of object as the members call, and
+nothing errored. If you must reimplement this rule somewhere else, reproduce it
+against `journals/pivot/members/` rather than modelling it, record the date it
+was checked against this file, and treat any dimension you enumerate by hand as
+a bug waiting to happen.
+
+Known and NOT covered by the above: 15 rows whose `cell_key` does not match
+`_cell_key()` of their own stored filters. They carry `transaction_date` /
+`account_name` / `invoice` / `supplier` keys rather than the pivot's filter
+shape, so they came from the MCP `add_cube_comment` path, which derives identity
+its own way. They are not add-in cells, so they do not duplicate on Build.
+
 ## Checks
 
 There was no automated check on this add-in until 2026-09-03, and everything

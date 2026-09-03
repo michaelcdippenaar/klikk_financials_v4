@@ -89,7 +89,16 @@
      only when we hold its full member list and the subset covers every value
      in it. No entry, a capped list, or an empty one proves nothing, so the
      verbose form survives -- a filter wrongly called "all" would re-point a
-     comment at a figure it was never written about. */
+     comment at a figure it was never written about.
+
+     THIS RULE IS PART OF COMMENT IDENTITY. cell_key is derived from the
+     collapsed form, so changing what this collapses does not change how an
+     anchor reads -- it changes which stored comment a cell IS. Nothing errors:
+     the add-in writes a SECOND comment on a figure MC has already annotated,
+     while the original sits under the old key. app.cube_comments was migrated
+     on 2026-09-03 to match this function; it is the live rule and any other
+     implementation follows it. See README, "The collapse rule is part of
+     comment IDENTITY", before touching this. */
   function anchorDimfParam(spec, totals) {
     var f = spec && spec.filters ? spec.filters : {};
     var live = {};
