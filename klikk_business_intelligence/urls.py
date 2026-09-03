@@ -21,6 +21,13 @@ from rest_framework.authtoken.views import obtain_auth_token
 from django.conf import settings
 from django.conf.urls.static import static
 from django.views.static import serve as static_serve
+from django.http import Http404
+
+# The add-in directory is served whole, so anything dropped into it becomes
+# public. Its checks live there too (test/, package.json, node_modules after an
+# npm install) and none of that is part of what Excel fetches.
+_EXCEL_ADDIN_PRIVATE = ('test/', 'node_modules/', 'package.json',
+                        'package-lock.json', 'eslint.config.mjs', 'Makefile')
 
 
 def _excel_addin_asset(request, path, document_root=None):
@@ -31,6 +38,9 @@ def _excel_addin_asset(request, path, document_root=None):
     leave the pane running new markup against a stale stylesheet -- which looked
     exactly like broken CSS. Every client picks up a redeploy on next open.
     """
+    normalised = path.lstrip('/')
+    if any(normalised == p or normalised.startswith(p) for p in _EXCEL_ADDIN_PRIVATE):
+        raise Http404(path)
     response = static_serve(request, path, document_root=document_root)
     response['Cache-Control'] = 'no-store, no-cache, must-revalidate'
     response['Pragma'] = 'no-cache'
