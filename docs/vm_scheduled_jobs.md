@@ -6,7 +6,7 @@ record every edit here with its reasoning.
 
 | When (VM local, SAST) | Script | What |
 |---|---|---|
-| 02:45 daily (user cron `mc`) | `/srv/klikk-financials/scripts/daily-klikk-financials-update.sh` | Nightly pipeline per tenant, then budgeted invoice + quote store syncs (explicit 7-day `modified_since`, `INVOICE_BUDGET=40` calls), then a 3-day incremental document sync **per tenant** (each tenant's own 1,000/day window; `--headroom 300`). Logs to `/srv/klikk-financials/logs/daily-update.log`. |
+| 02:45 daily (user cron `mc`) | `/srv/klikk-financials/scripts/daily-klikk-financials-update.sh` (copy of `scripts/daily-klikk-financials-update.sh` in this repo) | Nightly pipeline per tenant, then budgeted invoice + quote store syncs (explicit 7-day `modified_since`, `INVOICE_BUDGET=40` calls), then a 3-day incremental document sync **per tenant** (each tenant's own 1,000/day window; `--headroom 300`). Logs to `/srv/klikk-financials/logs/daily-update.log`. |
 | 03:30 daily | `/srv/klikk-financials/scripts/daily-tm1-full-refresh.sh` | TM1 / Planning Analytics refresh from the trail balance. |
 | 20:00 daily | `/srv/klikk-financials/scripts/xero-doc-backfill.sh` (copy of `scripts/xero-doc-backfill.sh` in this repo) | Attachment backfill, **every tenant** (each has its own 1,000/day Xero window). Per-tenant `.xero-doc-backfill.<tenant>.done` marker; a finished tenant is skipped. Logs to `/srv/klikk-financials/logs/xero-doc-backfill.log`. |
 | 06:00 Mondays (`/etc/cron.d/klikk-sync`, root) | `/usr/local/sbin/klikk-sync.sh weekly` | Invoices, quotes, aged AR/AP for the three tenants, Investec bank. Logs to `/var/log/klikk-sync/`. |
@@ -170,3 +170,163 @@ in the same script stay incremental.
 If the store ever looks stale for a deleted invoice, the fix is a manual
 `python manage.py sync_xero_invoices --tenant-id <id> --full`, not a change
 to the default.
+
+### 2026-09-03 — the 02:45 nightly is installed as a copy, not a symlink into the scratch checkout
+
+`/srv/klikk-financials/scripts/daily-klikk-financials-update.sh` was a symlink
+to `/srv/klikk-financials/compose/klikk_financials_v4/scripts/daily-klikk-financials-update.sh`.
+That directory is the scratch checkout — `CLAUDE.md` says it "is a scratch
+checkout, not what serves", because the containers bind-mount per-commit release
+directories (`klikk_financials_v4_releases/<full-sha>`) onto `/app` instead.
+Nobody keeps it at `origin/main`. So cron executed whatever commit that clone
+happened to sit on, and would drift further every merge.
+
+(`CLAUDE.md` is **not** in this repo and not on the VM — it is untracked at the
+root of the local working checkout, and the quote above is from its deploy
+section. That is the only place the citation is checkable.)
+
+The failure mode is the bad kind: the job still succeeds. It just runs old code,
+which surfaces as stale or missing data, never as an error.
+
+It is now a real file with a dated backup, matching how
+`scripts/xero-doc-backfill.sh` was installed earlier the same day (see the entry
+above for that reasoning, which applies unchanged here).
+
+**As installed, 2026-09-03 15:57 UTC.** Installed from `origin/main` at
+`4b955fd` — the tip, deliberately, rather than the equivalent branch SHA, so
+there is only one answer to "what is installed". Repo and VM verified
+byte-identical at md5 `e901c4162c4665d413065cc35750a9b9`. The backup at
+`daily-klikk-financials-update.sh.bak-20260903` is itself a symlink: `cp -a`
+preserved it, so the backup records *that the install was a symlink and where it
+pointed*, which is the fact worth keeping. Its content at that time was md5
+`0c0b575618f68e17dc4b105c64b36363`, recoverable from git at `b763735` or
+`0de76c8`. The scratch checkout was confirmed clean and still at `b763735`
+afterwards — proof the install did not write through the symlink.
+
+**Survey — this was the only instance, and the answer is "one script".** Before
+changing anything, the whole box was swept so nobody needs to repeat it: every
+symlink under `/usr/local`, `/etc` and `/srv/klikk-financials` resolving into
+`klikk_financials_v4` or `klikk_portal`; `/etc/cron.d/`, `/etc/cron*`,
+`/var/spool/cron` and `/etc/systemd` grepped for the scratch paths; all systemd
+timers listed; every user's crontab dumped. Exactly one hit, the one above.
+Nothing under `/usr/local/sbin/` points into either checkout — the scripts there
+(`klikk-sync.sh`, `audit-psql.sh`, `audit-precompute.sh`, `mcp-rebuild`) are all
+real files. The four cron jobs are in `mc`'s user crontab and
+`/etc/cron.d/klikk-sync`, not root's crontab.
+
+**It was latent, not biting.** The clone sat at `b763735`, 12 commits behind
+`origin/main` (`0de76c8`) — but this file was byte-identical at both
+(md5 `0c0b575618f68e17dc4b105c64b36363`). Cron was running correct content by
+luck, not by design. The conversion was therefore behaviourally a no-op on the
+day it was made, which is the cheapest possible moment to make it.
+
+Those two facts together are the whole reason this pattern exists: because the
+clone is never updated, a merge to `origin/main` does **not** reach cron. It
+reaches cron when the install command below is run, and at no other time.
+
+**Fast-forwarding the scratch checkout was considered and rejected.** It would
+have bought nothing on the day (the file already matched the tip) and it would
+make the clone look authoritative, which `CLAUDE.md` explicitly says it is not.
+The next person would then trust it. Pinning the install to a copy refreshed by
+a recorded command keeps the clone as disposable as it is meant to be.
+
+**Trap for anyone reusing the backfill's install command here — verified on the
+VM before installing.** `cp` onto a symlink *follows* it. The naive command
+would have written the new content through the symlink into the scratch
+checkout, dirtied a clone nobody watches, left the symlink in place, converted
+nothing, and exited 0.
+
+The problem is not that the command is wrong; it is that its failure mode is
+**silent success**. Everyone would have believed the hazard was closed while it
+was untouched, and the next person to look would have found a dirty clone with
+no explanation. A command that cannot fail loudly is worse than one that fails.
+That is why the sequence below both removes the symlink first and then *asserts*
+`test ! -L` — the assertion is the durable part, and it is repeated in the
+standing checks so a future "helpful" re-link is caught rather than assumed
+away.
+
+Stated generally, because it will come up again: the backfill's install command
+is correct for **refreshing** a file that is already a copy, and unsafe as a
+template for **converting** a symlink into one.
+
+Install after changing this file — repo and VM must be kept byte-identical:
+
+```bash
+scp scripts/daily-klikk-financials-update.sh \
+  klikk-financials:/tmp/daily-klikk-financials-update.new
+ssh klikk-financials 'D=/srv/klikk-financials/scripts/daily-klikk-financials-update.sh \
+  && cp -a "$D" "$D.bak-$(date +%Y%m%d)" \
+  && rm -f "$D" \
+  && cp /tmp/daily-klikk-financials-update.new "$D" \
+  && chmod +x "$D" \
+  && bash -n "$D" \
+  && test ! -L "$D" && echo "OK: real file, not a symlink"'
+```
+
+**Post-install verification — re-runnable, and worth re-running any time.** Run
+from a checkout at the commit you believe is installed. Byte-identity and
+not-being-a-symlink are the two properties that make a copy trustworthy, so both
+should be verifiable rather than assumed:
+
+```bash
+# 1. it is a real file, not a symlink (catches a re-link)
+# 2. cron's path resolves to the installed file itself
+# 3. it parses
+ssh klikk-financials 'D=/srv/klikk-financials/scripts/daily-klikk-financials-update.sh
+  test ! -L "$D" && echo "1 OK: real file"      || echo "1 FAIL: symlink -> $(readlink "$D")"
+  crontab -l -u mc | grep -q "$D" && echo "2 OK: cron points here" || echo "2 FAIL: cron entry moved"
+  bash -n "$D" && echo "3 OK: parses"
+  md5sum "$D"'
+
+# 4. VM matches this repo, byte for byte
+md5sum scripts/daily-klikk-financials-update.sh   # macOS: md5 -q <file>
+```
+
+If check 1 fails, someone re-linked it and cron is back on the scratch clone.
+If check 4 differs, the VM is running something other than this repo. Either
+way the install command above is the fix.
+
+**This install carries a deadline.** The tenant fix it delivers is what gives
+Dippenaar and Tremly incremental attachment pickup, and the incremental sync's
+`--since 3` window cannot reach back further than three days. Dippenaar's
+coverage gap opens at 2026-09-03 13:09 (the moment it earned its
+`.xero-doc-backfill.<guid>.done` marker and dropped out of the 20:00 backfill's
+queue). The last nightly run whose 3-day window still reaches back past that
+moment is **02:45 on 2026-09-06** — so the install must be live before it for
+there to be no gap at all.
+
+Past that deadline the recovery is NOT to widen `--since`. It is to delete that
+tenant's marker so the 20:00 backfill re-covers it for a night:
+
+```bash
+ssh klikk-financials 'rm /srv/klikk-financials/scripts/.xero-doc-backfill.<guid>.done'
+```
+
+**Smoke check the one genuinely new command, after installing.** Every other
+step in the script already used `sudo docker compose exec` and is proven in
+cron, but the tenant enumeration is a new command in a new place, and it is
+written `2>/dev/null || true` — so if it ever fails it resolves to an empty
+tenant list and the document sync is skipped, logging
+`SKIPPED: no tenants resolved` rather than failing. Confirm it actually returns
+tenants rather than trusting that `bash -n` passed:
+
+```bash
+ssh klikk-financials 'sudo -n true && echo "sudo OK: NOPASSWD, no tty needed (as cron runs)"
+  cd /srv/klikk-financials/compose && sudo -n docker compose exec -T postgres     psql -U klikk_user -d klikk_financials_v4 -tAc     "SELECT tenant_id FROM xero_core_xerotenant WHERE NOT reauth_required ORDER BY tenant_name"'
+```
+
+Verified on 2026-09-03 before installing: `sudo -n` succeeds (`mc` has
+`NOPASSWD: ALL`) and the query returns the 3 expected tenants. Note the DB role
+is `klikk_user`, not `postgres` — `-U postgres` fails with
+`role "postgres" does not exist`.
+
+**Safe window for this kind of edit.** The jobs this touches must not be skipped
+or rescheduled — they carry the nightly Xero sync and the trial-balance rebuild.
+Fires are 02:45, 03:30 and 20:00 daily plus 06:00 Mondays (VM is UTC). This
+change was made mid-afternoon UTC, ~4 h clear of the 20:00 backfill and ~11 h
+clear of the 02:45 nightly, so no run overlapped it.
+
+The pre-existing backups from August (`.bak-20260817`, `.bak.20260817`,
+`.bak.20260819`, `.bak.20260819-preinvoicesync`) were left in place — they are
+the only record of those versions. Note they mix `.bak-` and `.bak.` separators;
+new ones use `.bak-YYYYMMDD`.
