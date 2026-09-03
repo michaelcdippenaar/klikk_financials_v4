@@ -152,8 +152,20 @@ through a catalog or centralized deployment.
 flag) is gone for the same reason — it put a dead pane on every new workbook.
 If a `Book.xltx` is still in
 `~/Library/Group Containers/UBF8T346G9.Office/User Content.localized/Startup.localized/Excel/`,
-delete it. Workbooks saved while the flag was on (e.g. `Audit FY 2026 View.xlsx`)
-still carry it; with the extension point gone Excel ignores it.
+delete it.
+
+**Removing the extension point is NOT enough for a workbook that was saved
+while the flag was on.** Verified 2026-09-03 09:08 UTC with the 1.0.2.0
+manifest (no `AutoOpenTaskpane`) as the only cached manifest: opening
+`Audit FY 2026 View.xlsx` still logged `PrepareShowTaskpaneV2 … AppVersion
+1.0.1.0, Visibility true, AutoOpenCommandPaneTag true` and opened a dead pane.
+The workbook's own `xl/webextensions/webextension1.xml` (`<we:reference
+version="1.0.1.0">` + `Office.AutoShowTaskpaneWithDocument = true`) and
+`taskpanes.xml` (`visibility="1"`) drive it. Clear both in the file — set the
+property to `false` and `visibility="0"` inside the zip, on a closed copy —
+and the same workbook opens with `Visibility false … ShowTaskpane false` and
+no pane. That was done to `Audit FY 2026 View.xlsx`; the pre-edit copy is at
+`~/Library/Application Support/klikk-backups/`.
 
 If the blank-pane symptom ever comes back: the diagnostic is the Excel log
 above, not the served bundle. A pane that rendered `taskpane.html` at all
