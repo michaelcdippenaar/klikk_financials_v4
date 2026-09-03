@@ -175,7 +175,8 @@ class CommentWebhookDelivery(models.Model):
     or hostile endpoint cannot use this table as free storage.
     """
 
-    KIND_CHOICES = (('receipt', 'Receipt'), ('finding', 'Finding'))
+    KIND_CHOICES = (('receipt', 'Receipt'), ('finding', 'Finding'),
+                    ('cube_comment', 'Cube comment'))
     SNIPPET_MAX = 500
 
     comment_kind = models.CharField(max_length=16, choices=KIND_CHOICES, db_index=True)

@@ -93,6 +93,36 @@ DROP INDEX IF EXISTS app.cube_comments_cell_author_uq;
 CREATE UNIQUE INDEX IF NOT EXISTS cube_comments_subject_author_uq
     ON app.cube_comments (subject_type, subject_key, author_key);
 CREATE INDEX IF NOT EXISTS cube_comments_tags_gin ON app.cube_comments USING gin (tags);
+
+-- A comment is a CONVERSATION, not a note.
+--
+-- The register upserts one row per (subject, author): re-posting edits your own
+-- note rather than accumulating duplicates, which is right for "my verdict on
+-- this figure" and useless for "the auditor asked a question and someone
+-- answered it". Replies therefore live in their own table -- append-only, never
+-- upserted -- so a thread reads in the order it was written and nobody's answer
+-- can overwrite anyone else's.
+--
+-- Declared HERE, in the register's own DDL, so the two tables are created in one
+-- place and in the right order: the FK below needs app.cube_comments to exist.
+CREATE TABLE IF NOT EXISTS app.cube_comment_replies (
+    id          bigserial PRIMARY KEY,
+    comment_id  bigint      NOT NULL REFERENCES app.cube_comments(id) ON DELETE CASCADE,
+    -- Self-reference for reply-to-reply. ON DELETE CASCADE so deleting a reply
+    -- takes its sub-thread with it rather than orphaning rows that point at a
+    -- parent that is gone.
+    parent_id   bigint      NULL REFERENCES app.cube_comment_replies(id) ON DELETE CASCADE,
+    author      text        NOT NULL,
+    text        text        NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS cube_comment_replies_comment_idx
+    ON app.cube_comment_replies (comment_id);
+-- The thread read is always "this comment's replies, oldest first", and the
+-- reply_count subquery on the list is "how many for this comment" -- both are
+-- served by the composite, which is why it exists alongside the plain one.
+CREATE INDEX IF NOT EXISTS cube_comment_replies_thread_idx
+    ON app.cube_comment_replies (comment_id, created_at);
 """
 
 _ready = False
@@ -311,7 +341,17 @@ def _row_to_dict(r):
     field, and so on. Names cost nothing and cannot drift out of step with the
     SELECT they came from.
     """
-    d = dict(zip(COL_NAMES, r))
+    return _shape(dict(zip(COL_NAMES, r)))
+
+
+def _shape(d):
+    """The public shape of one register row, from a {column: value} mapping.
+
+    Split out of _row_to_dict because the list query selects EXTRA columns
+    (reply_count) that must not disturb the base shape -- the mapping is built
+    from cursor.description there, and this stays the single definition of what
+    a comment looks like on the wire.
+    """
     return {
         'id': d['id'],
         'cell_key': d['cell_key'],
@@ -337,6 +377,122 @@ def _row_to_dict(r):
     }
 
 
+MAX_LIMIT = 5000
+DEFAULT_LIMIT = 500
+
+# reply_count is a correlated subquery rather than a GROUP BY join: the register
+# list is capped at MAX_LIMIT rows and the (comment_id, created_at) index makes
+# each count an index-only scan, whereas the join would have to aggregate the
+# whole reply table before the LIMIT could be applied.
+REPLY_COUNT_SQL = ('(SELECT count(*) FROM app.cube_comment_replies r '
+                   ' WHERE r.comment_id = app.cube_comments.id) AS reply_count')
+
+
+def _truthy(raw):
+    """Query-string flag. '1', 'true', 'yes', 'on' — anything else is off."""
+    return str(raw or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _like(raw):
+    """A user's search term as a safe ILIKE pattern.
+
+    The term is a bound parameter, so this is not about injection -- it is about
+    a '%' typed into the search box matching the whole register and an '_'
+    matching any character. Both are escaped, and the backslash first so the
+    escape character itself cannot be smuggled in.
+    """
+    term = str(raw or '').replace('\\', '\\\\').replace('%', r'\%').replace('_', r'\_')
+    return '%%%s%%' % term
+
+
+def list_comments(params, *, with_reply_counts=False, with_replies=False):
+    """The comment register list — SHARED by every door onto the register.
+
+    One query, three doors: the console's generic list (/xero/data/comments/),
+    the cube/add-in list (/xero/data/journals/pivot/comments/) and the auditor
+    surface (/audit/cube-comments/). They must show the same rows with the same
+    filters, and the only reliable way to guarantee that is for all of them to
+    run the same SQL: two copies drift the first time a filter is added to one.
+
+    Filters: status (default 'open', 'all' for every status), subject_type,
+    subject_key, author (author_key), tenant (tenant_id), measure, decision,
+    tag / tags (containment -- ALL of them, so a tag filter NARROWS), q (free
+    text over the note, the subject label and the author), limit, offset.
+
+    ``with_reply_counts`` adds ``reply_count``; ``with_replies`` additionally
+    inlines the thread itself (and implies the count).
+    """
+    _ensure_table()
+    with_reply_counts = with_reply_counts or with_replies
+    where, args = [], []
+
+    status_filter = (params.get('status') or 'open').strip()
+    if status_filter != 'all':
+        where.append('status = %s')
+        args.append(status_filter)
+
+    for param, col in (('subject_type', 'subject_type'), ('subject_key', 'subject_key'),
+                       ('author', 'author_key'), ('tenant', 'tenant_id'),
+                       ('measure', 'measure'), ('decision', 'decision')):
+        val = (params.get(param) or '').strip()
+        if val:
+            where.append('%s = %%s' % col)
+            args.append(val)
+
+    # Both spellings, unioned: the pane sends ?tag=, the MCP sends ?tags=a,b, and
+    # the cube endpoint historically accepted them together. Containment (@>)
+    # means ALL of them -- && would WIDEN the queue, which is the opposite of
+    # what someone filtering by tag wants.
+    tags = _norm_tags(params.get('tags')) or []
+    tags += [t for t in (_norm_tags(params.get('tag')) or []) if t not in tags]
+    if tags:
+        where.append('tags @> %s')
+        args.append(tags)
+
+    q = (params.get('q') or '').strip()
+    if q:
+        where.append("(comment ILIKE %s ESCAPE '\\' OR subject_label ILIKE %s ESCAPE '\\' "
+                     "OR author ILIKE %s ESCAPE '\\')")
+        args.extend([_like(q)] * 3)
+
+    try:
+        limit = min(max(int(params.get('limit', DEFAULT_LIMIT)), 1), MAX_LIMIT)
+    except (TypeError, ValueError):
+        limit = DEFAULT_LIMIT
+    try:
+        offset = max(int(params.get('offset', 0)), 0)
+    except (TypeError, ValueError):
+        offset = 0
+
+    cols = COLS + (', ' + REPLY_COUNT_SQL if with_reply_counts else '')
+    sql = 'SELECT %s FROM app.cube_comments' % cols
+    if where:
+        sql += ' WHERE ' + ' AND '.join(where)
+    # id as a tie-break: updated_at alone is not unique (a bulk flag writes many
+    # rows in one statement), and without it paging can repeat or skip a row.
+    sql += ' ORDER BY updated_at DESC, id DESC LIMIT %s OFFSET %s'
+    args.extend([limit, offset])
+
+    with connection.cursor() as c:
+        c.execute(sql, args)
+        names = [d[0] for d in c.description]
+        rows = [dict(zip(names, r)) for r in c.fetchall()]
+
+    out = []
+    for d in rows:
+        item = _shape(d)
+        if with_reply_counts:
+            item['reply_count'] = int(d.get('reply_count') or 0)
+        out.append(item)
+
+    if with_replies:
+        from apps.xero.xero_data import cube_comment_replies as replies
+        threads = replies.replies_for([row['id'] for row in out])
+        for item in out:
+            item['replies'] = threads.get(item['id'], [])
+    return out
+
+
 class XeroCubeCommentsView(APIView):
     """
     GET  /xero/data/journals/pivot/comments/
@@ -352,58 +508,19 @@ class XeroCubeCommentsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        _ensure_table()
-        p = request.query_params
-        where, args = [], []
-
         # This endpoint is the CUBE's view of the register. Now that the same
         # table also holds bank transactions (and will hold more kinds), it has
         # to say so — otherwise the add-in fetches comments it can never place
         # on a sheet, and its counts describe a bigger queue than it shows.
-        where.append('subject_type = %s')
-        args.append('cube_cell')
-
-        st = (p.get('status') or 'open').strip()
-        if st != 'all':
-            where.append('status = %s')
-            args.append(st)
-        author = (p.get('author') or '').strip()
-        if author:
-            where.append('author_key = %s')
-            args.append(author)
-
-        for param, col in (('tenant', 'tenant_id'), ('measure', 'measure')):
-            val = (p.get(param) or '').strip()
-            if val:
-                where.append('%s = %%s' % col)
-                args.append(val)
-
-        # tag=audit           -> has that tag
-        # tags=audit,fy2026   -> has ALL of them (containment, not overlap:
-        #                        narrowing a queue is the point, and && would
-        #                        widen it instead)
-        wanted = _norm_tags(p.get('tags')) or []
-        single = _norm_tags(p.get('tag')) or []
-        wanted = wanted + [t for t in single if t not in wanted]
-        if wanted:
-            where.append('tags @> %s')
-            args.append(list(wanted))
-
-        try:
-            limit = min(max(int(p.get('limit', 500)), 1), 5000)
-        except (TypeError, ValueError):
-            limit = 500
-
-        sql = 'SELECT %s FROM app.cube_comments' % COLS
-        if where:
-            sql += ' WHERE ' + ' AND '.join(where)
-        sql += ' ORDER BY updated_at DESC LIMIT %s'
-        args.append(limit)
-
-        with connection.cursor() as c:
-            c.execute(sql, args)
-            rows = c.fetchall()
-        return Response({'count': len(rows), 'results': [_row_to_dict(r) for r in rows]})
+        params = dict(request.query_params.items())
+        params['subject_type'] = 'cube_cell'
+        # ?include_replies=1 inlines the thread. Off by default: this list is
+        # fetched with limit=2000 by the add-in and by the MCP tools, and most
+        # comments have no replies at all — every caller paying for the join to
+        # serve the few that do is the wrong default. The add-in asks for it.
+        want_replies = _truthy(request.query_params.get('include_replies'))
+        rows = list_comments(params, with_reply_counts=True, with_replies=want_replies)
+        return Response({'count': len(rows), 'results': rows})
 
     def post(self, request):
         _ensure_table()
@@ -627,45 +744,11 @@ class CommentsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        _ensure_table()
-        p = request.query_params
-        where, args = [], []
-
-        st = (p.get('status') or 'open').strip()
-        if st != 'all':
-            where.append('status = %s')
-            args.append(st)
-
-        for param, col in (('subject_type', 'subject_type'), ('subject_key', 'subject_key'),
-                           ('author', 'author_key'), ('measure', 'measure'),
-                           ('decision', 'decision')):
-            val = (p.get(param) or '').strip()
-            if val:
-                where.append('%s = %%s' % col)
-                args.append(val)
-
-        tags = _norm_tags(
-            (p.get('tags') or p.get('tag') or '').split(',')
+        rows = list_comments(
+            dict(request.query_params.items()),
+            with_replies=_truthy(request.query_params.get('include_replies')),
         )
-        if tags:
-            where.append('tags @> %s')
-            args.append(tags)
-
-        try:
-            limit = min(max(int(p.get('limit', 500)), 1), 5000)
-        except (TypeError, ValueError):
-            limit = 500
-
-        sql = 'SELECT %s FROM app.cube_comments' % COLS
-        if where:
-            sql += ' WHERE ' + ' AND '.join(where)
-        sql += ' ORDER BY updated_at DESC LIMIT %s'
-        args.append(limit)
-
-        with connection.cursor() as c:
-            c.execute(sql, args)
-            rows = c.fetchall()
-        return Response({'count': len(rows), 'results': [_row_to_dict(r) for r in rows]})
+        return Response({'count': len(rows), 'results': rows})
 
     def post(self, request):
         _ensure_table()

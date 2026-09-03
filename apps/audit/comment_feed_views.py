@@ -18,8 +18,8 @@ Two things make the cursor safe:
 Mounted under /audit/ on purpose: auditors comment now, so they need to see
 replies. The auditor gate already allows GETs under this prefix.
 
-Both comment tables are read, merged, sorted by created_at and capped at
-``FEED_MAX``. A client that has been away long enough to overflow the cap
+All three comment tables — receipts, findings, and replies on the cube-comment
+register — are read, merged, sorted by created_at and capped at ``FEED_MAX``. A client that has been away long enough to overflow the cap
 gets the OLDEST events in the window and a cursor that advances only to the
 last event returned, so nothing is skipped — it just catches up over several
 polls.
@@ -27,7 +27,9 @@ polls.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 
+from django.db import transaction
 from django.utils.dateparse import parse_datetime
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -35,14 +37,26 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from apps.receipts.models import SlipComment
+from apps.xero.xero_data import cube_comment_replies
 
-from .comment_events import FINDING, RECEIPT, comment_payload, finding_ref, receipt_ref
+from .comment_events import (
+    CUBE_COMMENT, FINDING, RECEIPT, comment_payload, finding_ref, receipt_ref,
+)
 from .models import AuditFindingComment
+
+logger = logging.getLogger(__name__)
 
 FEED_MAX = 200
 # How far back an omitted / unusable `since` looks. Small on purpose: a first
 # poll should prime the cursor, not replay the week.
 DEFAULT_WINDOW = dt.timedelta(minutes=5)
+
+
+def _event_id(comment):
+    """Tie-break for the merge sort. A cube reply is a dict, not a model."""
+    if isinstance(comment, dict):
+        return comment['reply']['id']
+    return comment.id
 
 
 def _parse_since(raw):
@@ -79,9 +93,26 @@ def comment_feed_view(request):
         .order_by('created_at')[: FEED_MAX + 1]
     )
 
+    # Cube-comment replies come off raw SQL rather than a model, already carrying
+    # the parent comment's id and label — the feed must not have to re-resolve
+    # either. A dead register must not take the whole feed down with it: the other
+    # two surfaces are still worth delivering.
+    # The savepoint is load-bearing, not defensive habit: in PostgreSQL a failed
+    # statement aborts the whole transaction, so catching the Python exception
+    # alone would leave every LATER query in this request answering
+    # InFailedSqlTransaction. Rolling back to a savepoint keeps the failure
+    # local to this read, which is what makes the fallback below true.
+    try:
+        with transaction.atomic():
+            cube_replies = cube_comment_replies.replies_since(since, FEED_MAX + 1)
+    except Exception:  # noqa: BLE001
+        logger.exception('comment feed: could not read cube-comment replies')
+        cube_replies = []
+
     merged = [(c.created_at, RECEIPT, c) for c in slip_comments]
     merged += [(c.created_at, FINDING, c) for c in finding_comments]
-    merged.sort(key=lambda row: (row[0], row[1], row[2].id))
+    merged += [(row['created_at'], CUBE_COMMENT, row) for row in cube_replies]
+    merged.sort(key=lambda row: (row[0], row[1], _event_id(row[2])))
 
     truncated = len(merged) > FEED_MAX
     merged = merged[:FEED_MAX]
@@ -91,7 +122,14 @@ def comment_feed_view(request):
     # on one receipt would otherwise hit klikk_slips once each.
     refs: dict[tuple[str, str], str] = {}
     for created_at, kind, comment in merged:
-        if kind == RECEIPT:
+        if kind == CUBE_COMMENT:
+            # The OBJECT is the comment the reply hangs off, not the reply — a
+            # console following object_id must land on the thread.
+            object_id = str(comment['comment_id'])
+            key = (kind, object_id)
+            refs.setdefault(key, comment['ref'])
+            comment = comment['reply']
+        elif kind == RECEIPT:
             object_id = comment.sha256
             key = (kind, object_id)
             if key not in refs:
