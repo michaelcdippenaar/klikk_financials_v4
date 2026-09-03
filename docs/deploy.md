@@ -55,6 +55,42 @@ from the previous one, and confirm afterwards that BOTH `klikk-financials-v4`
 and `klikk-financials-ingest-worker` are up under their proper names — a
 concurrent recreate has renamed the worker before now.
 
+## A console deploy with `--build` REBUILDS AND RETAGS the backend image
+
+The section above says every `compose up` must carry the backend override. That
+is necessary and **not sufficient**. On 2026-09-04, with the override present:
+
+```bash
+sudo docker compose -f docker-compose.yml -f backend-<sha>.override.yml \
+     up -d --build klikk-financials-console          # override IS present
+```
+
+recreated `klikk-financials-v4` as well and left its pinned image tag pointing at
+a build made from `./klikk_financials_v4` — the **scratch checkout**, 12 commits
+behind. The tag name was unchanged, the release-dir bind mount was unchanged, the
+gate was 401x4 and the pages were 200. What silently reverted was everything
+BAKED INTO the image: the entrypoint's schema step vanished from the boot log.
+
+The base `docker-compose.yml` declares `build: ./klikk_financials_v4` for the
+backend, so `--build` rebuilds it from that context and retags whatever the
+override pinned.
+
+**Rules:**
+
+* Pass `--no-build` when starting backend services from a pre-built release
+  image, and never pass `--build` on a command that can touch the backend.
+* Build the backend image yourself from the RELEASE DIR, with `--no-cache`, and
+  verify the image before deploying it (see the section above).
+* After ANY deploy that recreated the backend — even a console one — check the
+  boot log for the schema line, not just the HTTP codes:
+
+```bash
+sudo docker logs klikk-financials-v4 2>&1 | grep -c "register schema ok"   # expect 1
+```
+
+Both times this happened tonight, every HTTP check passed and the image was
+wrong. HTTP codes cannot see inside the image.
+
 ## `docker build` can hand you a cached image without your change
 
 On 2026-09-04 a release was cut correctly and served an image that did **not**
