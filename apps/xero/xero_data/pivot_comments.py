@@ -813,15 +813,12 @@ class XeroCubeCommentsView(APIView):
         if assign_given:
             _record_assignment(request, out, assignee_before, assignee_holder, author_key)
 
-        # The comment is saved and committed by this point. Notification is
-        # strictly best-effort from here on: notify() catches everything and
-        # reports it, so a dead mail server costs an email, never the comment.
-        out['mentions'] = cube_mentions.notify(
-            out,
-            _coords(row_dims, row_path, col_dims, col_path),
-            author_name,
-            cube_mentions.parse_mentions(comment),
-        )
+        # QUEUED, not sent. Notification is no longer a side effect of saving:
+        # MC wrote 68 comments in a day, 33 inside one hour, and per-mention
+        # email would have put 33 messages into one bookkeeper's inbox that
+        # evening. The send is an explicit act -- see XeroCubeCommentNotifyView.
+        out['mentions'] = cube_mentions.queue(
+            out, cube_mentions.parse_mentions(comment))
         return Response(out, status=http.HTTP_200_OK)
 
 
@@ -873,6 +870,61 @@ class XeroCubeCommentStatusView(APIView):
         if not row:
             return Response({'error': 'no such comment'}, status=http.HTTP_404_NOT_FOUND)
         return Response(_row_to_dict(row))
+
+
+class XeroCubeCommentNotifyView(APIView):
+    """GET/POST /xero/data/journals/pivot/comments/<id>/notify/
+
+    "Who is waiting to be told about this?" and "tell them now."
+
+    Split from the comment POST deliberately. An `@bookkeeper` in a note
+    records an INTENT; nothing leaves the building until someone asks for it.
+    That is MC's call and it is the right one -- his words were "I don't want
+    to spam people", and the volume measurement backed him: 68 comments in a
+    day, 33 in one hour, all resolving to one bookkeeper at Moore.
+
+    GET is what the affordance reads ("1 person to notify"); POST is the act.
+    `mention_ids` narrows it, so "her but not him" needs no second endpoint.
+
+    Not reachable by an auditor (everything under /xero/data/ is 403 for that
+    role) and not by the Excel add-in either: SERVICE_READONLY_POST_RE is an
+    anchored allowlist naming comments/<id>/status and not this. Both are
+    deliberate -- outbound mail on someone else's behalf is not a thing a
+    read-only credential or an external auditor should be able to trigger.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _load(self, comment_id):
+        with connection.cursor() as c:
+            c.execute('SELECT ' + COLS + ' FROM app.cube_comments WHERE id = %s',
+                      [comment_id])
+            row = c.fetchone()
+        return _row_to_dict(row) if row else None
+
+    def get(self, request, comment_id):
+        _ensure_table()
+        if self._load(comment_id) is None:
+            return Response({'error': 'no such comment'}, status=http.HTTP_404_NOT_FOUND)
+        pending = cube_mentions.pending_for(comment_id)
+        return Response({'comment_id': comment_id, 'pending': pending,
+                         'count': len(pending)})
+
+    def post(self, request, comment_id):
+        _ensure_table()
+        row = self._load(comment_id)
+        if row is None:
+            return Response({'error': 'no such comment'}, status=http.HTTP_404_NOT_FOUND)
+        ids = (request.data or {}).get('mention_ids')
+        if ids is not None and not isinstance(ids, (list, tuple)):
+            return Response({'error': 'mention_ids must be a list'},
+                            status=http.HTTP_400_BAD_REQUEST)
+        result = cube_mentions.send_pending(
+            row,
+            _coords(row['row_dims'], row['row_path'], row['col_dims'], row['col_path']),
+            row.get('author') or '',
+            only_ids=ids,
+        )
+        return Response({'comment_id': comment_id, **result})
 
 
 MAX_BULK = 1000
