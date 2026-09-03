@@ -1043,6 +1043,90 @@ class CommentPostTests(ReceiptsFixtureMixin, TestCase):
         self.assertEqual(self.anon.get(self.url()).status_code, 401)
         self.assertEqual(self.client.get(self.url()).status_code, 405)
 
+    # ---- threading (parent_id) ----
+
+    def test_top_level_comment_has_null_parent(self):
+        resp = self.client.post(self.url(), {'text': 'top'}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertIsNone(resp.json()['parent_id'])
+        self.assertIsNone(SlipComment.objects.get().parent_id)
+
+    def test_reply_is_linked_to_its_parent(self):
+        parent_id = self.client.post(self.url(), {'text': 'top'}, format='json').json()['id']
+        resp = self.client.post(self.url(), {'text': 'reply', 'parent_id': parent_id}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()['parent_id'], parent_id)
+        reply = SlipComment.objects.get(text='reply')
+        self.assertEqual(reply.parent_id, parent_id)
+        self.assertEqual(list(SlipComment.objects.get(pk=parent_id).replies.all()), [reply])
+
+    def test_reply_to_a_reply_flattens_onto_the_root(self):
+        root = self.client.post(self.url(), {'text': 'top'}, format='json').json()['id']
+        mid = self.client.post(self.url(), {'text': 'r1', 'parent_id': root}, format='json').json()['id']
+        deep = self.client.post(self.url(), {'text': 'r2', 'parent_id': mid}, format='json')
+        self.assertEqual(deep.status_code, 201, deep.content)
+        # One level deep, always — never parented onto `mid`.
+        self.assertEqual(deep.json()['parent_id'], root)
+
+    def test_parent_from_another_receipt_is_400(self):
+        other = self.NAMES['b_fy26_auto']
+        foreign = self.client.post(self.url(other), {'text': 'elsewhere'}, format='json').json()['id']
+        resp = self.client.post(self.url(), {'text': 'reply', 'parent_id': foreign}, format='json')
+        self.assertEqual(resp.status_code, 400, resp.content)
+        # Rejected, not silently filed as a top-level comment on this receipt.
+        self.assertEqual(SlipComment.objects.filter(sha256=self.NAMES['a_fy26']).count(), 0)
+
+    def test_junk_parent_id_is_400_not_500(self):
+        parent_id = self.client.post(self.url(), {'text': 'top'}, format='json').json()['id']
+        for raw in ('abc', '', [], {}, 1.5, True, False, parent_id + 9999, -1):
+            resp = self.client.post(self.url(), {'text': 'reply', 'parent_id': raw}, format='json')
+            self.assertEqual(resp.status_code, 400, f'parent_id={raw!r} -> {resp.status_code}')
+        self.assertEqual(SlipComment.objects.count(), 1)  # only the parent
+
+    def test_null_parent_id_is_treated_as_top_level(self):
+        resp = self.client.post(self.url(), {'text': 'top', 'parent_id': None}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertIsNone(resp.json()['parent_id'])
+
+    def test_author_is_forced_from_request_never_the_body(self):
+        resp = self.client.post(
+            self.url(),
+            {'text': 'spoof attempt', 'author': 'someone-else', 'id': 4242},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 201, resp.content)
+        self.assertEqual(resp.json()['author'], 'reviewer')
+        c = SlipComment.objects.get()
+        self.assertEqual(c.author, 'reviewer')
+        self.assertNotEqual(c.id, 4242)
+
+    def test_detail_thread_exposes_parent_id_for_every_comment(self):
+        root = self.client.post(self.url(), {'text': 'top'}, format='json').json()['id']
+        self.client.post(self.url(), {'text': 'reply', 'parent_id': root}, format='json')
+        detail = self.client.get(reverse('receipts:detail', args=[self.NAMES['a_fy26']])).json()
+        self.assertEqual(
+            [(c['text'], c['parent_id']) for c in detail['comments']],
+            [('top', None), ('reply', root)],
+        )
+        for c in detail['comments']:
+            self.assertEqual(set(c), {'id', 'parent_id', 'text', 'author', 'created_at'})
+            self.assertEqual(c['author'], 'reviewer')
+
+    def test_replies_count_toward_comment_count(self):
+        root = self.client.post(self.url(), {'text': 'top'}, format='json').json()['id']
+        self.client.post(self.url(), {'text': 'reply', 'parent_id': root}, format='json')
+        row = next(r for r in self.list_(page_size=200)['results'] if r['sha256'] == self.NAMES['a_fy26'])
+        self.assertEqual(row['comment_count'], 2)
+
+    def test_bulk_comments_stay_top_level(self):
+        resp = self.client.post(
+            reverse('receipts:bulk'),
+            {'sha256s': [self.NAMES['a_fy26']], 'comment': 'bulk note'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertIsNone(SlipComment.objects.get(text='bulk note').parent_id)
+
 
 # --------------------------------------------------------------------------- #
 # 7. Export

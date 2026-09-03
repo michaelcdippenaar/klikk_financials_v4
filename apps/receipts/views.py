@@ -230,6 +230,36 @@ def receipt_review_view(request, sha256):
     return Response(review_to_dict(review))
 
 
+_BAD_PARENT = 'parent_id must be the id of an existing comment on this receipt'
+
+
+def _resolve_parent(sha256, raw):
+    """(parent, error_response) for an optional ``parent_id`` on this receipt.
+
+    Absent / null -> a top-level comment. A parent from ANOTHER receipt is
+    rejected rather than silently ignored: accepting it would file the reply
+    under a thread the caller cannot see. Replying to a reply re-parents onto
+    the root, keeping the thread exactly one level deep (see the model).
+    """
+    if raw is None:
+        return None, None
+    # Booleans are ints in Python — True would otherwise resolve comment id 1.
+    if isinstance(raw, bool):
+        return None, Response({'detail': _BAD_PARENT}, status=status.HTTP_400_BAD_REQUEST)
+    try:
+        parent_id = int(raw)
+    except (TypeError, ValueError):
+        return None, Response({'detail': _BAD_PARENT}, status=status.HTTP_400_BAD_REQUEST)
+    parent = SlipComment.objects.filter(pk=parent_id, sha256=sha256).first()
+    if parent is None:
+        return None, Response({'detail': _BAD_PARENT}, status=status.HTTP_400_BAD_REQUEST)
+    if parent.parent_id is not None:
+        parent = SlipComment.objects.filter(pk=parent.parent_id, sha256=sha256).first()
+        if parent is None:  # pragma: no cover — CASCADE makes this unreachable
+            return None, Response({'detail': _BAD_PARENT}, status=status.HTTP_400_BAD_REQUEST)
+    return parent, None
+
+
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def receipt_comments_view(request, sha256):
@@ -244,7 +274,15 @@ def receipt_comments_view(request, sha256):
     bad_nul = _nul_error('text', text)
     if bad_nul is not None:
         return bad_nul
-    comment = SlipComment.objects.create(sha256=sha256, text=text, author=_username(request))
+    parent, bad_parent = _resolve_parent(sha256, data.get('parent_id'))
+    if bad_parent is not None:
+        return bad_parent
+    # author comes from the authenticated request, NEVER from the body — an
+    # `author` key in the payload is ignored, which is what makes the thread
+    # usable as an audit trail.
+    comment = SlipComment.objects.create(
+        sha256=sha256, parent=parent, text=text, author=_username(request),
+    )
     return Response(comment_to_dict(comment), status=status.HTTP_201_CREATED)
 
 
