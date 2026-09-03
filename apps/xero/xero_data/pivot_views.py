@@ -757,11 +757,27 @@ class XeroCubeDrillView(APIView):
                 else:
                     qs = qs.filter(**{PUSHDOWN[dim]: val})
             elif dim == 'account':
-                # Label is "code — name"; the code alone identifies it.
-                code = val.split('—')[0].strip() if '—' in val else val.strip()
-                qs = qs.filter(account__code=code) if code else qs
-                if '—' in val:
-                    deferred[dim] = val
+                # The label is "code — name" only when BOTH exist: _label_account
+                # falls back to `code or name or BLANK`. An account with a blank
+                # code therefore labels as its NAME alone, with no separator —
+                # and 24 of them exist here, every bank and investment account.
+                #
+                # Splitting on the bare em dash then treated that whole name as a
+                # CODE, which matched nothing, and the `if '—' in val` guard also
+                # skipped the deferred re-test that would have caught it. The
+                # drill returned zero lines for a cell the cube had just built out
+                # of real rows — the one failure that makes a figure look
+                # unauditable. Names contain em dashes of their own, so split on
+                # the full ' — ' separator, not the character.
+                sep = ' — '
+                if sep in val:
+                    code = val.split(sep)[0].strip()
+                    if code:
+                        qs = qs.filter(account__code=code)
+                # Always re-test the whole label in Python. A code is not unique
+                # either ("260 — Other Revenue" and "260 — Luca Support Wyndam"
+                # are two accounts), so the pushdown narrows but never decides.
+                deferred[dim] = val
             else:
                 deferred[dim] = val
 
