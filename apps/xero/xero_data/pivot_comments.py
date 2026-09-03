@@ -178,6 +178,40 @@ CREATE TABLE IF NOT EXISTS app.cube_comment_context (
     captured_at  timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
+-- WHAT A POINT USED TO SAY.
+--
+-- The register is not a notes field. It is the human->agent work queue, and
+-- agents act on what it says -- which is why the reply module is append-only
+-- with no PATCH and no DELETE anywhere in it. Editing cuts against that, so it
+-- is reconciled explicitly rather than by accident: a comment an agent has
+-- already acted on, silently rewritten, means the trail no longer says what was
+-- actually acted on.
+--
+-- So an edit RECORDS rather than replaces. Shaped after
+-- app.cube_comment_assignments (from/to, who, when) rather than after
+-- cube_comment_mentions (per-attempt with an outcome), because an edit is a
+-- change of state with two sides and not an attempt that can fail. Both texts
+-- are stored so one row reads on its own, without replaying the chain.
+--
+-- Only the TEXT is editable, and that is enforced by this endpoint accepting
+-- nothing else. The anchor is identity -- re-anchoring is a MOVE, not an edit,
+-- and it silently changes which figure the comment is about. `author_key` is
+-- identity too: an admin correcting an agent's note must never re-stamp it, or
+-- the register attributes to `claude:year-end-audit` words it never wrote.
+CREATE TABLE IF NOT EXISTS app.cube_comment_edits (
+    id           bigserial   PRIMARY KEY,
+    comment_id   bigint      NOT NULL REFERENCES app.cube_comments(id) ON DELETE CASCADE,
+    from_text    text        NOT NULL DEFAULT '',
+    to_text      text        NOT NULL DEFAULT '',
+    -- Who wrote the words originally, kept beside who changed them. An admin
+    -- edit of an agent's note is the case this column exists to make legible.
+    author_key   text        NOT NULL DEFAULT '',
+    edited_by    text        NOT NULL DEFAULT '',
+    edited_at    timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+CREATE INDEX IF NOT EXISTS cube_comment_edits_comment_idx
+    ON app.cube_comment_edits (comment_id, edited_at DESC);
+
 -- WHERE A POINT HAS BEEN, and since when.
 --
 -- The comment row knows where a point is NOW and cannot answer "how long has
@@ -973,6 +1007,123 @@ class XeroCubeCommentNotifyView(APIView):
 # starts being a database dump attached to every point -- and it is stored, so
 # the cost is paid on every read forever rather than once.
 MAX_CONTEXT_LINES = 200
+
+MAX_COMMENT_TEXT = 20_000
+
+
+class XeroCubeCommentTextView(APIView):
+    """POST/GET /xero/data/journals/pivot/comments/<id>/text/  {comment}
+
+    Edit what a point SAYS, with a record of what it said before.
+
+    Id-addressed, and that is not a style choice. The register upserts on
+    (subject, author) with the author stamped from the request, so "editing"
+    through the POST door would not touch an agent's comment at all -- it would
+    insert a SECOND row carrying that agent's text under the editor's name.
+    Acting on someone else's row is only expressible by id.
+
+    Text only. The anchor is identity: re-anchoring is a move, not an edit, and
+    it changes which figure the note is about while looking like a typo fix.
+    `author_key` is identity too -- an admin correcting an agent's note must
+    never re-stamp it, or the register attributes words to a workstream that
+    never wrote them. Neither is accepted here, so neither can be sent.
+
+    Who may: role `standard`, which today is MC alone. An auditor cannot reach
+    any of /xero/data/, which is what keeps the external-auditor gate honest --
+    the one thing an auditor may write is a reply, and that stays true.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def _row(self, comment_id):
+        with connection.cursor() as c:
+            c.execute('SELECT ' + COLS + ' FROM app.cube_comments WHERE id = %s', [comment_id])
+            r = c.fetchone()
+        return _row_to_dict(r) if r else None
+
+    def get(self, request, comment_id):
+        """The edit history, newest first. An empty list means never edited."""
+        _ensure_table()
+        if self._row(comment_id) is None:
+            return Response({'error': 'no such comment'}, status=http.HTTP_404_NOT_FOUND)
+        with connection.cursor() as c:
+            c.execute('SELECT id, from_text, to_text, author_key, edited_by, edited_at '
+                      'FROM app.cube_comment_edits WHERE comment_id = %s '
+                      'ORDER BY edited_at DESC, id DESC', [comment_id])
+            rows = c.fetchall()
+        return Response({'comment_id': comment_id, 'count': len(rows), 'edits': [
+            {'id': r[0], 'from': r[1], 'to': r[2], 'author_key': r[3],
+             'edited_by': r[4], 'edited_at': r[5].isoformat() if r[5] else None}
+            for r in rows]})
+
+    def post(self, request, comment_id):
+        _ensure_table()
+        row = self._row(comment_id)
+        if row is None:
+            return Response({'error': 'no such comment'}, status=http.HTTP_404_NOT_FOUND)
+
+        d = request.data if isinstance(request.data, dict) else {}
+        for forbidden in ('author', 'author_key', 'filters', 'row_dims', 'row_path',
+                          'col_dims', 'col_path', 'measure', 'subject_key', 'cell_key'):
+            if forbidden in d:
+                # Refused rather than ignored. Silently dropping a field a caller
+                # sent means they believe they changed something they did not,
+                # and for the anchor that belief is the whole bug.
+                return Response(
+                    {'error': '%s cannot be edited \u2014 it is part of what identifies '
+                              'this comment. Write a new comment instead.' % forbidden},
+                    status=http.HTTP_400_BAD_REQUEST)
+
+        text = str(d.get('comment') or '').strip()
+        if not text:
+            # NOT a retract. Retract-by-empty is coherent when re-saving a note
+            # ON A CELL, where the anchor says which note you mean; on an
+            # id-addressed edit it would delete a specific row that somebody
+            # meant to correct.
+            return Response({'error': 'comment must not be empty \u2014 an edit changes '
+                                      'the text, it does not retract the point'},
+                            status=http.HTTP_400_BAD_REQUEST)
+        if '\x00' in text:
+            return Response({'error': 'comment must not contain NUL (0x00) characters'},
+                            status=http.HTTP_400_BAD_REQUEST)
+        if len(text) > MAX_COMMENT_TEXT:
+            return Response({'error': 'comment must be at most %d characters'
+                                      % MAX_COMMENT_TEXT},
+                            status=http.HTTP_400_BAD_REQUEST)
+
+        before = row['comment']
+        if text == before:
+            # A no-op is not an edit. Logging it would fill the history with
+            # rows that say nothing changed.
+            return Response({**row, 'edited': False})
+
+        editor_key, _n, _v = _author_identity(request, None)
+        with connection.cursor() as c:
+            c.execute(
+                'INSERT INTO app.cube_comment_edits '
+                '(comment_id, from_text, to_text, author_key, edited_by) '
+                'VALUES (%s,%s,%s,%s,%s)',
+                [comment_id, before, text, row['author_key'], editor_key])
+            # updated_at moves; author_key, subject_key, filters and cell_key
+            # are not in this statement at all, so no edit can disturb them.
+            c.execute('UPDATE app.cube_comments SET comment = %s, updated_at = now() '
+                      'WHERE id = %s RETURNING ' + COLS, [text, comment_id])
+            out = _row_to_dict(c.fetchone())
+
+        from apps.activity import models as A
+        from apps.activity.services import record_activity
+        record_activity(
+            request, A.CUBE_COMMENT_EDITED, target_kind='cube_comment',
+            target_id=comment_id, target_ref=out.get('subject_label') or '',
+            # Pointers and lengths, not a second copy of both texts -- the log
+            # is the record, this is the notice, same split as assignment.
+            changes={'chars': {'from': len(before), 'to': len(text)},
+                     'author_key': row['author_key'],
+                     'admin_edit': row['author_key'] != editor_key},
+        )
+        # Newly written text can mention someone who was not mentioned before.
+        out['mentions'] = cube_mentions.queue(out, cube_mentions.parse_mentions(text))
+        out['edited'] = True
+        return Response(out)
 
 
 class XeroCubeCommentContextView(APIView):

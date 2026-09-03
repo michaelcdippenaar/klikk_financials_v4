@@ -19,6 +19,7 @@ urlpatterns = [
     path('journals/pivot/comments/<int:comment_id>/status/', pivot_comments.XeroCubeCommentStatusView.as_view(), name='cube_comment_status'),
     path('journals/pivot/comments/<int:comment_id>/notify/', pivot_comments.XeroCubeCommentNotifyView.as_view(), name='cube_comment_notify'),
     path('journals/pivot/comments/<int:comment_id>/context/', pivot_comments.XeroCubeCommentContextView.as_view(), name='cube_comment_context'),
+    path('journals/pivot/comments/<int:comment_id>/text/', pivot_comments.XeroCubeCommentTextView.as_view(), name='cube_comment_text'),
     path('journals/pivot/people/', cube_mentions.XeroCubePeopleView.as_view(), name='cube_people'),
     path('update/journals/', views.XeroUpdateDataView.as_view(), name='update_data'),
     # Support both with and without trailing slash
