@@ -7,7 +7,11 @@ Pins four things:
    never answers 401/403 for them (endpoint health aside — 200/400/404 all
    prove the gate passed).
 2. An auditor gets 403 on every write anywhere — including writes on the
-   audit surface itself (findings bulk, comments, receipt actions).
+   audit surface itself (findings bulk, receipt review/bulk actions,
+   attachment uploads, every PATCH/DELETE).
+2b. The ONE exception: POST of a comment on a finding or a receipt is
+   allowed, and the stored comment is attributed to the auditor's own
+   username. Nothing else about the role changes.
 3. An auditor gets 403 on every non-audit read (Xero GL, Investec, pricelist,
    dashboards) — the middleware blocks BEFORE view logic, so this holds even
    for endpoints whose own permission is just IsAuthenticated.
@@ -21,6 +25,8 @@ Run:
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
+
+from apps.audit.models import AuditFinding, AuditFindingComment
 
 User = get_user_model()
 
@@ -41,10 +47,13 @@ NON_AUDIT_READS = [
     "/api/pricelist/items/",
 ]
 
+# NOTE: /audit/findings/<pk>/comments/ is deliberately absent — POSTing a
+# comment is the one write auditors may make (see AUDITOR_WRITE_RE and
+# test_auditor_can_post_finding_comment below).
 WRITES_EVERYWHERE = [
     ("/audit/findings/bulk/", "post"),
-    ("/audit/findings/1/comments/", "post"),
     ("/audit/findings/1/", "patch"),
+    ("/audit/findings/1/attachments/", "post"),
     ("/xero/sync/invoices/", "post"),
     ("/api/pricelist/items/", "post"),
 ]
@@ -63,6 +72,11 @@ class AuditorGateTests(TestCase):
     def setUp(self):
         self.auditor = make_user("aud1", User.Role.AUDITOR)
         self.standard = make_user("std1", User.Role.STANDARD)
+        self.finding = AuditFinding.objects.create(
+            fy=2026, ref="FY26-001", title="Gate fixture finding",
+            severity="MEDIUM", status="OPEN", category="OTHER",
+            source="internal-audit run 1", created_by="seed",
+        )
 
     def client_for(self, user):
         client = APIClient()
@@ -106,6 +120,56 @@ class AuditorGateTests(TestCase):
                     res.status_code, 403,
                     f"{method.upper()} {path} was not blocked: {res.status_code}",
                 )
+
+    # ── 2b. The ONE write an auditor may make: a comment ────────────────────
+
+    def test_auditor_can_post_finding_comment(self):
+        client, _ = self.jwt_client("aud1")
+        res = client.post(
+            f"/audit/findings/{self.finding.pk}/comments/",
+            {"text": "Please supply the supporting invoice."},
+            format="json",
+        )
+        self.assertEqual(res.status_code, 201, res.content)
+        comment = AuditFindingComment.objects.get(finding=self.finding)
+        self.assertEqual(comment.text, "Please supply the supporting invoice.")
+        # Attribution is the auditor's own username — in production that is
+        # their email address, which is exactly the wanted audit trail.
+        self.assertEqual(comment.author, self.auditor.get_username())
+        self.assertEqual(res.data["author"], self.auditor.get_username())
+
+    def test_auditor_comment_on_missing_finding_is_404_not_403(self):
+        """The gate lets the request through; the VIEW decides it does not exist."""
+        client, _ = self.jwt_client("aud1")
+        res = client.post("/audit/findings/999999/comments/", {"text": "x"}, format="json")
+        self.assertEqual(res.status_code, 404, res.content)
+
+    def test_auditor_comment_write_does_not_widen_the_role(self):
+        """Neighbouring writes on the SAME finding stay blocked."""
+        client, _ = self.jwt_client("aud1")
+        pk = self.finding.pk
+        for path, method in (
+            (f"/audit/findings/{pk}/", "patch"),
+            (f"/audit/findings/{pk}/attachments/", "post"),
+            (f"/audit/findings/{pk}/links/", "post"),
+            (f"/audit/findings/{pk}/comments/", "delete"),
+            ("/audit/findings/bulk/", "post"),
+        ):
+            with self.subTest(path=path, method=method):
+                res = getattr(client, method)(path, {}, format="json")
+                self.assertEqual(
+                    res.status_code, 403,
+                    f"{method.upper()} {path} was not blocked: {res.status_code}",
+                )
+
+    def test_standard_user_can_still_comment(self):
+        client, _ = self.jwt_client("std1")
+        res = client.post(
+            f"/audit/findings/{self.finding.pk}/comments/",
+            {"text": "noted"}, format="json",
+        )
+        self.assertEqual(res.status_code, 201, res.content)
+        self.assertEqual(res.data["author"], self.standard.get_username())
 
     # ── 3. Auditor non-audit reads are blocked ──────────────────────────────
 
@@ -193,6 +257,37 @@ class AuditorGateUnitTests(TestCase):
         self.assertTrue(self._allowed("POST", "/api/auth/refresh/"))
         self.assertTrue(self._allowed("POST", "/api/auth/token/refresh/"))
         self.assertFalse(self._allowed("POST", "/api/auth/register/"))
+
+    def test_comment_posts_allowed(self):
+        self.assertTrue(self._allowed("POST", "/audit/findings/1/comments/"))
+        self.assertTrue(self._allowed("POST", "/audit/findings/12345/comments/"))
+        # Receipts: covered here rather than live because the receipts views hit
+        # the raw whatsapp.klikk_slips table, absent from the test DB.
+        self.assertTrue(self._allowed("POST", "/audit/receipts/abc123/comments/"))
+        self.assertTrue(self._allowed("POST", "/audit/receipts/" + "a" * 64 + "/comments/"))
+
+    def test_comment_exception_is_narrow(self):
+        # Wrong verb on the allowed path.
+        for method in ("PATCH", "PUT", "DELETE"):
+            self.assertFalse(self._allowed(method, "/audit/findings/1/comments/"), method)
+            self.assertFalse(self._allowed(method, "/audit/receipts/abc123/comments/"), method)
+        # Not-quite-the-path variants.
+        self.assertFalse(self._allowed("POST", "/audit/findings/1/comments"))        # no trailing /
+        self.assertFalse(self._allowed("POST", "/audit/findings/1/comments/1/"))     # deeper
+        self.assertFalse(self._allowed("POST", "/audit/findings/comments/"))         # no pk
+        self.assertFalse(self._allowed("POST", "/audit/findings/abc/comments/"))     # non-numeric pk
+        self.assertFalse(self._allowed("POST", "/audit/receipts/a.b/comments/"))     # dot in key
+        self.assertFalse(self._allowed("POST", "/audit/receipts/a/b/comments/"))     # slash in key
+        self.assertFalse(self._allowed("POST", "/x/audit/findings/1/comments/"))     # not anchored
+        # Neighbouring writes stay shut.
+        self.assertFalse(self._allowed("POST", "/audit/findings/bulk/"))
+        self.assertFalse(self._allowed("POST", "/audit/findings/1/attachments/"))
+        self.assertFalse(self._allowed("POST", "/audit/findings/1/links/"))
+        self.assertFalse(self._allowed("PATCH", "/audit/findings/1/"))
+        self.assertFalse(self._allowed("POST", "/audit/receipts/abc123/review/"))
+        self.assertFalse(self._allowed("PATCH", "/audit/receipts/abc123/review/"))
+        self.assertFalse(self._allowed("POST", "/audit/receipts/bulk/"))
+        self.assertFalse(self._allowed("DELETE", "/audit/findings/attachments/1/"))
 
     def test_options_always_allowed(self):
         self.assertTrue(self._allowed("OPTIONS", "/xero/data/invoices/"))
