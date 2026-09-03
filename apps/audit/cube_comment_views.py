@@ -53,12 +53,19 @@ def cube_comments_view(request):
     """The register, with a reply count on every row.
 
     Same filters and same row shape as ``/xero/data/comments/`` — literally the
-    same query (``pivot_comments.list_comments``), so the auditor's list cannot
-    drift away from the one the console and the add-in see.
+    same query (``pivot_comments.page_comments``), so the auditor's list cannot
+    drift away from the one the console and the add-in see. That includes the
+    paging: ``page_size`` is validated against the same closed set here, so an
+    auditor cannot be served a quietly different window from the one MC sees.
     """
-    rows = pivot_comments.list_comments(
-        dict(request.query_params.items()), with_reply_counts=True)
-    return Response({'count': len(rows), 'results': rows})
+    try:
+        body = pivot_comments.page_comments(
+            dict(request.query_params.items()), with_reply_counts=True)
+    except pivot_comments.PageSizeError as exc:
+        return Response({'detail': str(exc),
+                         'page_sizes': list(pivot_comments.PAGE_SIZES)},
+                        status=status.HTTP_400_BAD_REQUEST)
+    return Response(body)
 
 
 @api_view(['GET', 'POST'])

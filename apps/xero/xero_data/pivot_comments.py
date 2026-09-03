@@ -686,26 +686,14 @@ def _like(raw):
     return '%%%s%%' % term
 
 
-def list_comments(params, *, with_reply_counts=False, with_replies=False):
-    """The comment register list — SHARED by every door onto the register.
+def _build_where(params):
+    """The filter half of the register query, as (where_fragments, args).
 
-    One query, three doors: the console's generic list (/xero/data/comments/),
-    the cube/add-in list (/xero/data/journals/pivot/comments/) and the auditor
-    surface (/audit/cube-comments/). They must show the same rows with the same
-    filters, and the only reliable way to guarantee that is for all of them to
-    run the same SQL: two copies drift the first time a filter is added to one.
-
-    Filters: status (default 'open', 'all' for every status), subject_type,
-    subject_key, author (author_key), assignee (assignee_role), tenant (tenant_id),
-    measure, decision,
-    tag / tags (containment -- ALL of them, so a tag filter NARROWS), q (free
-    text over the note, the subject label and the author), limit, offset.
-
-    ``with_reply_counts`` adds ``reply_count``; ``with_replies`` additionally
-    inlines the thread itself (and implies the count).
+    Split out of ``list_comments`` so the COUNT and the PAGE are guaranteed to
+    filter identically. Two copies of this WHERE is how a total ends up
+    describing a different population from the rows beside it -- the exact
+    failure a "121 of 121" footer exists to prevent.
     """
-    _ensure_table()
-    with_reply_counts = with_reply_counts or with_replies
     where, args = [], []
 
     status_filter = (params.get('status') or 'open').strip()
@@ -739,6 +727,74 @@ def list_comments(params, *, with_reply_counts=False, with_replies=False):
                      "OR author ILIKE %s ESCAPE '\\')")
         args.extend([_like(q)] * 3)
 
+    return where, args
+
+
+# ── paging ────────────────────────────────────────────────────────────────
+#
+# The allowed page sizes are a CLOSED set, and an unknown one is a 400 rather
+# than a silent clamp. A clamp is the dangerous shape here: ?page_size=2000
+# quietly answered with 500 rows looks exactly like "there are only 500", and
+# the caller has no way to tell the difference. Better to refuse and say what
+# is allowed.
+PAGE_SIZES = (50, 100, 200, 500, 1000)
+
+# DEFAULT_PAGE_SIZE is 500 BECAUSE that is what DEFAULT_LIMIT has always been.
+# The row shape of this list is a three-consumer contract -- /audit/cube-comments/
+# (the auditor view), the Vue console and the Excel add-in all read it -- and a
+# default that returns FEWER rows than a consumer expects is a silent
+# truncation: the add-in would sync a partial register onto a sheet and nothing
+# anywhere would say so. There are 121 rows today, so 500 changes nothing for
+# anyone, and it is the one value in PAGE_SIZES that was already the default.
+#
+# `limit` / `offset` are left EXACTLY as they were and are NOT validated against
+# PAGE_SIZES: the add-in sends limit=2000 today. Rejecting that would have been
+# a loud break dressed up as a new feature. Paging is opt-in via `page_size`,
+# and `total` is returned on every response either way, so a UI can render
+# "121 of 121" without anyone changing how they fetch.
+DEFAULT_PAGE_SIZE = 500
+
+
+class PageSizeError(ValueError):
+    """An unusable page_size. Carries the message the door returns verbatim."""
+
+
+def _page_window(params):
+    """(limit, offset, page, page_size) from either paging vocabulary.
+
+    `page_size`/`page` is the new one and is strictly validated; `limit`/`offset`
+    is the old one and keeps its old, forgiving behaviour. Sending both means
+    page_size wins -- it is the explicit request.
+    """
+    raw_size = params.get('page_size')
+    if raw_size not in (None, ''):
+        try:
+            page_size = int(raw_size)
+        except (TypeError, ValueError):
+            page_size = None
+        if page_size not in PAGE_SIZES:
+            raise PageSizeError(
+                'page_size must be one of %s (got %r)'
+                % (', '.join(str(s) for s in PAGE_SIZES), raw_size))
+    else:
+        page_size = None
+
+    raw_page = params.get('page')
+    if raw_page not in (None, ''):
+        try:
+            page = max(int(raw_page), 1)
+        except (TypeError, ValueError):
+            raise PageSizeError('page must be a positive whole number (got %r)' % raw_page)
+        if page_size is None:
+            page_size = DEFAULT_PAGE_SIZE
+    else:
+        page = 1
+
+    if page_size is not None:
+        return page_size, (page - 1) * page_size, page, page_size
+
+    # Neither paging parameter given: the pre-existing limit/offset behaviour,
+    # byte for byte.
     try:
         limit = min(max(int(params.get('limit', DEFAULT_LIMIT)), 1), MAX_LIMIT)
     except (TypeError, ValueError):
@@ -747,6 +803,70 @@ def list_comments(params, *, with_reply_counts=False, with_replies=False):
         offset = max(int(params.get('offset', 0)), 0)
     except (TypeError, ValueError):
         offset = 0
+    return limit, offset, (offset // limit) + 1, limit
+
+
+def count_comments(params):
+    """How many rows match, ignoring the window. The 'of 121'."""
+    _ensure_table()
+    where, args = _build_where(params)
+    sql = 'SELECT count(*) FROM app.cube_comments'
+    if where:
+        sql += ' WHERE ' + ' AND '.join(where)
+    with connection.cursor() as c:
+        c.execute(sql, args)
+        return int(c.fetchone()[0])
+
+
+def page_comments(params, *, with_reply_counts=False, with_replies=False):
+    """One page of the register, plus the total the page came out of.
+
+    Returns the whole response body every door serves:
+    ``{count, total, results, page, page_size, limit, offset, has_more}``.
+
+    ``count`` keeps its original meaning -- how many rows are in THIS response --
+    because three consumers already read it. ``total`` is the new key.
+    """
+    rows = list_comments(params, with_reply_counts=with_reply_counts,
+                         with_replies=with_replies)
+    limit, offset, page, page_size = _page_window(params)
+    total = count_comments(params)
+    return {
+        'count': len(rows),
+        'total': total,
+        'results': rows,
+        'page': page,
+        'page_size': page_size,
+        'limit': limit,
+        'offset': offset,
+        'has_more': offset + len(rows) < total,
+        'page_sizes': list(PAGE_SIZES),
+    }
+
+
+def list_comments(params, *, with_reply_counts=False, with_replies=False):
+    """The comment register list — SHARED by every door onto the register.
+
+    One query, three doors: the console's generic list (/xero/data/comments/),
+    the cube/add-in list (/xero/data/journals/pivot/comments/) and the auditor
+    surface (/audit/cube-comments/). They must show the same rows with the same
+    filters, and the only reliable way to guarantee that is for all of them to
+    run the same SQL: two copies drift the first time a filter is added to one.
+
+    Filters: status (default 'open', 'all' for every status), subject_type,
+    subject_key, author (author_key), assignee (assignee_role), tenant (tenant_id),
+    measure, decision,
+    tag / tags (containment -- ALL of them, so a tag filter NARROWS), q (free
+    text over the note, the subject label and the author), limit, offset --
+    or page / page_size, see _page_window.
+
+    ``with_reply_counts`` adds ``reply_count``; ``with_replies`` additionally
+    inlines the thread itself (and implies the count).
+    """
+    _ensure_table()
+    with_reply_counts = with_reply_counts or with_replies
+    where, args = _build_where(params)
+    limit, offset, _page, _page_size = _page_window(params)
 
     cols = COLS + (', ' + REPLY_COUNT_SQL if with_reply_counts else '')
     sql = 'SELECT %s FROM app.cube_comments' % cols
@@ -803,8 +923,12 @@ class XeroCubeCommentsView(APIView):
         # comments have no replies at all — every caller paying for the join to
         # serve the few that do is the wrong default. The add-in asks for it.
         want_replies = _truthy(request.query_params.get('include_replies'))
-        rows = list_comments(params, with_reply_counts=True, with_replies=want_replies)
-        return Response({'count': len(rows), 'results': rows})
+        try:
+            body = page_comments(params, with_reply_counts=True, with_replies=want_replies)
+        except PageSizeError as exc:
+            return Response({'error': str(exc), 'page_sizes': list(PAGE_SIZES)},
+                            status=http.HTTP_400_BAD_REQUEST)
+        return Response(body)
 
     def post(self, request):
         _ensure_table()
@@ -842,9 +966,18 @@ class XeroCubeCommentsView(APIView):
         except (TypeError, ValueError):
             val = None
 
+        # ABSENT tags mean "leave the stored ones alone", exactly as _norm_tags
+        # documents and exactly as the generic door already behaved. This door
+        # did `if tags is None: tags = []`, which BLANKED a user's tags on every
+        # re-post that carried no `tags` key -- and the add-in re-posts a note
+        # whenever the cell is re-saved. Same class of data loss as the receipts
+        # bug in tests_archive.py ("a decision-less PATCH blanked the decision"):
+        # a client that does not know a field exists must not be able to empty
+        # it. Present-and-empty is still the explicit "clear my tags".
         tags = _norm_tags(d.get('tags'))
+        tags_set = '  tags = EXCLUDED.tags, ' if tags is not None else ''
         if tags is None:
-            tags = []
+            tags = []          # the INSERT half; the column is NOT NULL
 
         assign_given = 'assignee' in d
         try:
@@ -875,8 +1008,8 @@ class XeroCubeCommentsView(APIView):
                 'ON CONFLICT (subject_type, subject_key, author_key) DO UPDATE SET '
                 '  comment = EXCLUDED.comment, cell_value = EXCLUDED.cell_value, '
                 '  author = EXCLUDED.author, status = EXCLUDED.status, ' +
-                assign_set +
-                '  tags = EXCLUDED.tags, updated_at = now() '
+                assign_set + tags_set +
+                '  updated_at = now() '
                 'RETURNING ' + COLS,
                 [key, 'cube_cell', key, tenant, measure, list(row_dims), list(row_path), list(col_dims),
                  col_path, json.dumps(filters), val, comment,
@@ -1011,6 +1144,40 @@ MAX_CONTEXT_LINES = 200
 MAX_COMMENT_TEXT = 20_000
 
 
+def _may_edit(request, row, editor_key):
+    """May this caller rewrite THIS comment's text?
+
+    Two ways in, and no third:
+
+    * an ADMIN (is_superuser or is_staff) may edit any note, including an
+      agent-authored one -- correcting a wrong note in the register is exactly
+      what MC needs to be able to do, and `author_key` is left untouched by the
+      UPDATE, so the correction never re-attributes the words;
+    * the AUTHOR may edit their own, matched on the SAME `author_key` the write
+      doors stamp, so "my note" means here what it means everywhere else.
+
+    Everyone else is refused. The endpoint originally checked nothing beyond
+    IsAuthenticated, on the reasoning that the only account with the role that
+    reaches /xero/data/ is MC's -- true today, and a property of the user table
+    rather than of this code. The second standard account created (a bookkeeper
+    with a console login is the obvious one) would have inherited the ability
+    to silently rewrite MC's notes and every agent's, with the trail recording
+    it as an ordinary edit. The check is added before the endpoint ships rather
+    than after, which is the only cheap time to add it.
+
+    Consciously accepted: the MCP service token resolves to `unattributed`
+    unless the caller declares a name, and `author` is refused on this door --
+    so an AGENT cannot yet edit its own note through here. It can still re-post
+    through the upsert door, which is how it writes today. Widening this needs a
+    way for a caller to prove an identity rather than assert one, and that is a
+    bigger decision than an edit endpoint.
+    """
+    user = getattr(request, 'user', None)
+    if getattr(user, 'is_superuser', False) or getattr(user, 'is_staff', False):
+        return True
+    return bool(editor_key) and editor_key == (row.get('author_key') or '')
+
+
 class XeroCubeCommentTextView(APIView):
     """POST/GET /xero/data/journals/pivot/comments/<id>/text/  {comment}
 
@@ -1028,9 +1195,18 @@ class XeroCubeCommentTextView(APIView):
     never re-stamp it, or the register attributes words to a workstream that
     never wrote them. Neither is accepted here, so neither can be sent.
 
-    Who may: role `standard`, which today is MC alone. An auditor cannot reach
-    any of /xero/data/, which is what keeps the external-auditor gate honest --
-    the one thing an auditor may write is a reply, and that stays true.
+    Who may: the AUTHOR of a note, on their own note; and a superuser/staff on
+    anyone's, including an agent's. Anyone else is 403 -- "role standard, which
+    today is MC alone" is true today and is a property of the current user
+    table, not of this endpoint; the second standard account added would have
+    silently inherited the ability to rewrite MC's and every agent's notes.
+
+    Two gates ABOVE this one still do the work they always did, and neither is
+    touched: an auditor cannot reach any of /xero/data/ (so the one thing an
+    auditor may write is still a reply), and the add-in's `service_readonly`
+    identity is on an anchored POST allowlist that names comments/, bulk/,
+    <id>/status/, subsets/ and views/ -- and not <id>/text/. Editing somebody
+    else's words is not a read-only act.
     """
     permission_classes = [IsAuthenticated]
 
@@ -1060,6 +1236,13 @@ class XeroCubeCommentTextView(APIView):
         row = self._row(comment_id)
         if row is None:
             return Response({'error': 'no such comment'}, status=http.HTTP_404_NOT_FOUND)
+
+        editor_key, _n, _v = _author_identity(request, None)
+        if not _may_edit(request, row, editor_key):
+            return Response(
+                {'error': 'you can edit your own comments; editing someone else’s '
+                          'needs an admin account'},
+                status=http.HTTP_403_FORBIDDEN)
 
         d = request.data if isinstance(request.data, dict) else {}
         for forbidden in ('author', 'author_key', 'filters', 'row_dims', 'row_path',
@@ -1096,7 +1279,6 @@ class XeroCubeCommentTextView(APIView):
             # rows that say nothing changed.
             return Response({**row, 'edited': False})
 
-        editor_key, _n, _v = _author_identity(request, None)
         with connection.cursor() as c:
             c.execute(
                 'INSERT INTO app.cube_comment_edits '
@@ -1286,12 +1468,18 @@ class XeroCubeCommentsBulkView(APIView):
                 col_path = (cell.get('col_path') or '').strip()
                 filters = cell.get('filters') or d.get('filters') or {}
                 tenant = (filters.get('tenant') or '').strip()
-                # `or []` because absent-means-leave-as-is gives None all the way
-                # down (no per-cell tags, no shared tags), and the column is NOT
-                # NULL -- a bulk flag that named no tags at all raised
-                # NotNullViolation. The pane always sends a list, which is why it
-                # took an MCP-shaped payload to find.
-                tags = _norm_tags(cell.get('tags')) or shared_tags or []
+                # Absent means LEAVE AS IS, all the way down: no per-cell tags
+                # and no shared tags is a bulk flag that says nothing about
+                # tags, and it must not empty the tags of a cell somebody
+                # already tagged by hand. `tags_given` is what drives that; the
+                # `or []` remains for the INSERT half, where the column is NOT
+                # NULL (a bulk flag that named no tags at all once raised
+                # NotNullViolation -- the pane always sends a list, which is why
+                # it took an MCP-shaped payload to find).
+                cell_tags = _norm_tags(cell.get('tags'))
+                tags_given = cell_tags is not None or shared_tags is not None
+                tags = cell_tags or shared_tags or []
+                tags_set = '  tags = EXCLUDED.tags, ' if tags_given else ''
 
                 val = cell.get('cell_value')
                 try:
@@ -1316,7 +1504,8 @@ class XeroCubeCommentsBulkView(APIView):
                     'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
                     'ON CONFLICT (subject_type, subject_key, author_key) DO UPDATE SET '
                     '  comment = EXCLUDED.comment, cell_value = EXCLUDED.cell_value, '
-                    '  tags = EXCLUDED.tags, status = EXCLUDED.status, updated_at = now() '
+                    + tags_set +
+                    '  status = EXCLUDED.status, updated_at = now() '
                     'RETURNING id',
                     [key, 'cube_cell', key, tenant, measure, list(row_dims), list(row_path),
                      list(col_dims), col_path, json.dumps(filters), val, comment,
@@ -1359,11 +1548,15 @@ class CommentsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        rows = list_comments(
-            dict(request.query_params.items()),
-            with_replies=_truthy(request.query_params.get('include_replies')),
-        )
-        return Response({'count': len(rows), 'results': rows})
+        try:
+            body = page_comments(
+                dict(request.query_params.items()),
+                with_replies=_truthy(request.query_params.get('include_replies')),
+            )
+        except PageSizeError as exc:
+            return Response({'error': str(exc), 'page_sizes': list(PAGE_SIZES)},
+                            status=http.HTTP_400_BAD_REQUEST)
+        return Response(body)
 
     def post(self, request):
         _ensure_table()
