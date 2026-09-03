@@ -173,7 +173,7 @@
     }
     [
       'app', 'boot', 'connLabel', 'btnSettings', 'settingsPanel', 'baseUrl', 'token',
-      'btnConnect', 'btnForget', 'settingsMsg', 'autoOpen', 'autoOpenMsg', 'queryPanel', 'tenant', 'journalType',
+      'btnConnect', 'btnForget', 'settingsMsg', 'queryPanel', 'tenant', 'journalType',
       'typeHint', 'dateFrom', 'dateTo', 'account', 'accountList', 'contact', 'reference',
       'contactList', 'description', 'amount', 'q', 'maxRows', 'countLine', 'btnLoad', 'btnCount',
       'detailPanel', 'btnPivot', 'cubePanel', 'measure', 'btnResetComments',
@@ -227,65 +227,12 @@
   });
 
 
-  // ── Auto-open with the workbook ───────────────────────────
-  // Office re-opens a task pane on file open only when the workbook itself
-  // carries this flag; there is no global "open in every workbook" setting.
-  // Deliberately document.settings and NOT the token: a boolean that leaks to
-  // whoever opens a shared copy is harmless, a credential is not.
-  var AUTO_OPEN_KEY = 'Office.AutoShowTaskpaneWithDocument';
-
-  function readAutoOpen() {
-    try {
-      if (!el.autoOpen || !window.Office || !Office.context || !Office.context.document) return;
-      var settings = Office.context.document.settings;
-      if (!settings) return;
-      el.autoOpen.checked = settings.get(AUTO_OPEN_KEY) === true;
-    } catch (e) {
-      // A host without document settings must not break startup.
-      if (el.autoOpen) el.autoOpen.disabled = true;
-    }
-  }
-
-  function setAutoOpen() {
-    var on = !!el.autoOpen.checked;
-    function say(text, cls) {
-      el.autoOpenMsg.textContent = text;
-      el.autoOpenMsg.className = 'msg' + (cls ? ' ' + cls : '');
-    }
-    try {
-      var settings = Office.context.document.settings;
-      settings.set(AUTO_OPEN_KEY, on);
-      settings.saveAsync(function (res) {
-        if (res.status === Office.AsyncResultStatus.Failed) {
-          el.autoOpen.checked = !on;
-          say('Could not save that to the workbook: ' + res.error.message, 'msg--err');
-          return;
-        }
-        say(on
-          ? 'On. Save the workbook — the flag is stored in the file, so it only sticks once saved.'
-          : 'Off for this workbook.', on ? 'msg--ok' : '');
-      });
-    } catch (e) {
-      el.autoOpen.checked = !on;
-      say(e.message, 'msg--err');
-    }
-  }
-
   function wireEvents() {
     el.btnSettings.addEventListener('click', function () {
       el.settingsPanel.hidden = !el.settingsPanel.hidden;
     });
     el.btnConnect.addEventListener('click', function () { connect(false); });
     el.btnForget.addEventListener('click', forget);
-    /* Guarded because this element is NEWER than the rest of the pane. If a
-       host ever serves a cached taskpane.html from before the checkbox
-       existed alongside a fresh app.js, an unguarded addEventListener here
-       throws and takes the WHOLE pane down — every section, not just this
-       control. A missing optional control must degrade, never abort boot. */
-    if (el.autoOpen) {
-      el.autoOpen.addEventListener('change', setAutoOpen);
-      readAutoOpen();
-    }
     el.btnLoad.addEventListener('click', function () { run(loadToNewSheet); });
     el.btnCount.addEventListener('click', function () { run(showCount); });
     el.btnCube.addEventListener('click', function () { run(buildCube); });

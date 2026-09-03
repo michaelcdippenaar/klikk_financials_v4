@@ -7,7 +7,7 @@
   xsi:type="TaskPaneApp">
 
   <Id>5b4e7ec6-3634-49f0-a1a9-a90223523e68</Id>
-  <Version>1.0.1.0</Version>
+  <Version>1.0.2.0</Version>
   <ProviderName>Klikk Financials</ProviderName>
   <DefaultLocale>en-ZA</DefaultLocale>
   <DisplayName DefaultValue="Klikk Journals"/>
@@ -180,18 +180,14 @@
             </CustomTab>
           </ExtensionPoint>
 
-          <!-- Re-open the pane by itself when a workbook that asked for it is
-               opened. Office gates this on a per-workbook flag the add-in sets
-               (Office.AutoShowTaskpaneWithDocument in document settings), so it
-               is opt-in per file rather than a global "always on" — Office has
-               no supported way to pin a task pane open in every workbook.
-               The flag is a boolean and lives in the workbook, so it travels
-               with a shared file; the API token does NOT (that stays in this
-               machine's localStorage — see README, Credentials). -->
-          <ExtensionPoint xsi:type="AutoOpenTaskpane">
-            <TaskpaneId>Office.AutoShowTaskpaneWithDocument</TaskpaneId>
-            <SourceLocation resid="Klikk.TaskpaneUrl"/>
-          </ExtensionPoint>
+          <!-- No AutoOpenTaskpane extension point, deliberately. Excel for Mac
+               (16.112, 2026-09-03) treats a sideloaded (developer/Registry)
+               add-in as untrusted for document persistence: on opening a
+               workbook that carries Office.AutoShowTaskpaneWithDocument it logs
+               UntrustedAddinSkippedFromPersistence, opens the pane chrome, and
+               never navigates the webview to SourceLocation. The result is a
+               permanently blank "Klikk Journals" pane next to the working one
+               the ribbon opens. See README, "Auto-open does not work". -->
         </DesktopFormFactor>
       </Host>
     </Hosts>
@@ -227,7 +223,6 @@
         <bt:Url id="Klikk.Url.Sheet" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#sheet"/>
         <bt:Url id="Klikk.Url.Comments" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#comments"/>
         <bt:Url id="Klikk.Url.Settings" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html#settings"/>
-        <bt:Url id="Klikk.TaskpaneUrl" DefaultValue="https://console.8-bit.space/backend/excel-addin/taskpane.html"/>
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://console.8-bit.space/"/>
       </bt:Urls>
       <bt:ShortStrings>

@@ -123,17 +123,42 @@ Compare the two files by size when a manifest change appears to have no effect.
 **A sideloaded add-in does not put its ribbon tab up on its own.** On a fresh
 Excel start the **Klikk** tab is absent until the add-in is activated once from
 **Add-ins → Developer Add-ins → Klikk Journals**; after that it stays for the
-session. `AutoOpenTaskpane` does not change this — it re-opens the *task pane*
-for a workbook carrying the `Office.AutoShowTaskpaneWithDocument` flag, and a
-brand-new blank workbook carries no flag. To get the pane on every new
-workbook, set the flag in a workbook and save it as the default template.
+session.
 
-`scripts/make_excel_autoopen_template.py --install` builds that template and
-drops it in Excel for Mac's startup folder as `Book.xltx`. Its webextension
-parts mirror what Excel itself writes — `store="developer" storeType="Registry"`,
-and the taskpanes relationship in the package-level `_rels/.rels` rather than
-`xl/_rels/workbook.xml.rels`. Both were read off a real workbook; guessing
-either gives a template Excel silently repairs. Undo by deleting `Book.xltx`.
+## Auto-open does not work for a sideloaded add-in — do not re-add it
+
+There is no `AutoOpenTaskpane` extension point in the manifest, and no
+`Office.AutoShowTaskpaneWithDocument` checkbox in the pane, on purpose. Both
+existed for a few hours on 2026-09-03 and produced a **permanently blank
+"Klikk Journals" pane** — Office's pane chrome with nothing inside, not even
+the "Loading…" line — stacked next to the working pane the ribbon opens.
+
+What Excel for Mac 16.112 actually does, from
+`~/Library/Containers/com.microsoft.Excel/Data/Library/Logs/Diagnostics/EXCEL/Primary*.log`:
+on opening a workbook whose webextension part carries the flag it logs
+`Office.Extensibility.UX.UntrustedAddinSkippedFromPersistence` (`StoreType: 5`
+= developer/Registry, i.e. sideloaded), then `PrepareShowTaskpaneV2` with
+`AutoOpenCommandPaneTag: true`, then `Opened Task Pane`, then
+`Sandbox.Activation` goes straight to `DetachedActivity_Leaked`. It never logs
+`URL Navigation` or `Sandbox.PageLoad`, and the server never receives a request
+for `taskpane.html` from that pane. Every auto-open instance that day behaved
+this way (07:53, 08:13, 08:26, 08:51, 08:53 UTC); every ribbon-opened pane
+navigated and worked. The sideloaded add-in is simply not trusted for
+document persistence on this platform, and the "pane" it opens is an empty
+webview. That is not fixable from our side short of publishing the add-in
+through a catalog or centralized deployment.
+
+`scripts/make_excel_autoopen_template.py` (a default `Book.xltx` carrying the
+flag) is gone for the same reason — it put a dead pane on every new workbook.
+If a `Book.xltx` is still in
+`~/Library/Group Containers/UBF8T346G9.Office/User Content.localized/Startup.localized/Excel/`,
+delete it. Workbooks saved while the flag was on (e.g. `Audit FY 2026 View.xlsx`)
+still carry it; with the extension point gone Excel ignores it.
+
+If the blank-pane symptom ever comes back: the diagnostic is the Excel log
+above, not the served bundle. A pane that rendered `taskpane.html` at all
+shows `URL Navigation` in that log and a `GET /excel-addin/taskpane.html`
+in the backend container log; a blank one shows neither.
 
 ## An empty subset means ALL members, never none
 
