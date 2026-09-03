@@ -277,8 +277,15 @@
     });
     el.btnConnect.addEventListener('click', function () { connect(false); });
     el.btnForget.addEventListener('click', forget);
-    el.autoOpen.addEventListener('change', setAutoOpen);
-    readAutoOpen();
+    /* Guarded because this element is NEWER than the rest of the pane. If a
+       host ever serves a cached taskpane.html from before the checkbox
+       existed alongside a fresh app.js, an unguarded addEventListener here
+       throws and takes the WHOLE pane down — every section, not just this
+       control. A missing optional control must degrade, never abort boot. */
+    if (el.autoOpen) {
+      el.autoOpen.addEventListener('change', setAutoOpen);
+      readAutoOpen();
+    }
     el.btnLoad.addEventListener('click', function () { run(loadToNewSheet); });
     el.btnCount.addEventListener('click', function () { run(showCount); });
     el.btnCube.addEventListener('click', function () { run(buildCube); });
