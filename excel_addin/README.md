@@ -120,10 +120,44 @@ looks applied on disk and does nothing, with no error anywhere. This cost a
 debugging round on 2026-09-03 when `AutoOpenTaskpane` silently never loaded.
 Compare the two files by size when a manifest change appears to have no effect.
 
-**A sideloaded add-in does not put its ribbon tab up on its own.** On a fresh
-Excel start the **Klikk** tab is absent until the add-in is activated once from
-**Add-ins → Developer Add-ins → Klikk Journals**; after that it stays for the
-session.
+**A sideloaded add-in does not put its ribbon tab up on its own, and that is
+not fixable from this side.** On a fresh Excel start the **Klikk** tab is
+absent until the add-in is activated once from **Add-ins → Developer Add-ins →
+Klikk Journals**; after that it stays for the session. Proven 2026-09-03 on
+Excel 16.112.3 by a controlled restart: activated at the stable 1.0.2.0
+manifest (tab up, pane rendering), saved, quit, relaunched — tab gone. The
+mechanism, from `Wef/AppCommands/18.0/` and the diagnostic log:
+
+- Startup ribbon comes only from `Excel.RibbonCache.en-GB`, keyed per identity
+  (`<cid>_LiveId`). It listed the four Store add-ins (`wa2000…`) before the
+  activation, after it, after quit, and after relaunch. Nothing for
+  `5b4e7ec6…` is ever written — there is no `AppCommands/18.0/<hash>/` folder
+  for the Registry (developer) catalog at all, only the Omex (Store) one.
+- The startup refresh `AppCommands.GetRibbonUpdatesForUserId` reports only
+  `OmexIncluded` / `ExCatalogIncluded`; no developer/registry provider takes
+  part. `osf.framework` has a `TestGate.RegistryManifestRefresh` — a test gate,
+  not something a user can set.
+- The manifest bump (1.0.0.0 → 1.0.2.0) is not the cause: the cached manifest
+  `Manifests/5b4e7ec6…_1.0.2.0` is re-read at every start (its mtime equals
+  the session start), and the test above was at one stable version.
+- `Office.Extensibility.UX.UntrustedAddinSkippedFromPersistence` is NOT the
+  ribbon signal. Its parent activity is `Office.Excel.Command.FileOpen →
+  FileLoad.OpenLoadFile → Coauth.OpenFile`: it fires when a workbook that
+  carries an embedded `xl/webextensions/webextension1.xml` reference is
+  opened, and it fires identically for the Store Claude add-in
+  (`93533c7f…`, StoreType 10). It is about document taskpane persistence.
+- Microsoft's own Mac sideload page (learn.microsoft.com, 2026-05) ends with
+  "Select Home > Add-ins, and then select your add-in" — it never claims the
+  ribbon is restored at start.
+
+The only supported way to have the ribbon tab present at startup is admin
+deployment (Integrated Apps / Centralized Deployment in the Microsoft 365
+admin center, custom-manifest upload, Mac supported, "automatically appears
+in the ribbon"). That needs a work/school tenant with Exchange Online
+(Business Basic/Standard/Premium, E1/E3/E5, …) and an Exchange admin. This
+Mac's Excel is licensed to a **consumer** account (`IdentityProvider: LiveId`,
+`FederationTenantId` all zeros, licence id `CWW_…`, `IsConsumerCopilotUser`),
+so that route is closed unless MC signs Excel in to a qualifying tenant.
 
 ## Auto-open does not work for a sideloaded add-in — do not re-add it
 
