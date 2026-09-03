@@ -532,10 +532,21 @@ silent duplication, which is the exact failure the anchor exists to prevent.
 `app.cube_comments` was migrated on 2026-09-03 to match **this** implementation:
 per row, under that row's own journal filters, using the same
 `apply_journal_filters` + labeller + `MAX_MEMBERS` truncation refusal that
-`anchorDimfParam` relies on. 56 of 113 rows moved; 0 collisions; backup in
-`app.cube_comments_anchor_norm2_20260903`. The stored register and this function
-therefore agreed as of that date, and this function is the live rule — it runs
-on every Build, so any other implementation must follow it, not the reverse.
+`anchorDimfParam` relies on. The stored register and this function therefore
+agreed as of that date, and this function is the live rule — it runs on every
+Build, so any other implementation must follow it, not the reverse.
+
+It ran in **two passes, and both moved 56 rows**. That repetition is real, not a
+transcription slip — check it before "correcting" it:
+
+| Pass | Collapsed | Rows | Backup |
+|---|---|---|---|
+| 1 | `account`, `month`, `quarter`, `year` | 56 of 113 | `app.cube_comments_anchor_norm_20260903` |
+| 2 | `report` — the dimension pass 1 omitted | 56 of 113 | `app.cube_comments_anchor_norm2_20260903` |
+
+Pass 2 is the one that brought the register into agreement with this function,
+with 0 collisions. **Both backup tables must survive**: neither alone reverses
+the migration.
 
 That migration's first pass got it wrong in a way worth knowing, because it is
 how this defect will recur: it approximated the rule with a precomputed
@@ -546,6 +557,15 @@ nothing errored. If you must reimplement this rule somewhere else, reproduce it
 against `journals/pivot/members/` rather than modelling it, record the date it
 was checked against this file, and treat any dimension you enumerate by hand as
 a bug waiting to happen.
+
+The same pass computed its member universe **globally**, with no tenant and no
+date filter, where `journals/pivot/members/` applies `apply_journal_filters`.
+That did not diverge, but only because no stored anchor currently carries a
+tenant — the two populations coincide by accident of the data, not by the logic
+agreeing. **The first tenant-scoped comment reopens it**, and that is a
+plausible near-term event: the console has a tenant filter and the add-in passes
+the query straight through to the anchor. A universe computed for the whole
+ledger is not the universe this function tests against.
 
 Known and NOT covered by the above: 15 rows whose `cell_key` does not match
 `_cell_key()` of their own stored filters. They carry `transaction_date` /
