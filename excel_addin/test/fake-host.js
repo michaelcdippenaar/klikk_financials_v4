@@ -11,6 +11,10 @@
  * on them; ranges and formats are a Proxy that swallows every call, because
  * "did .format.font.bold get set" is not a bug this harness is for. If a test
  * ever needs a range property, model that property — do not deepen the Proxy.
+ *
+ * Two are modelled, under that rule: `format.columnWidth` and the used range,
+ * for the 2026-09-03 rebuild that reset MC's hand-sized columns. Everything
+ * else a range can be asked still goes to the Proxy.
  */
 'use strict';
 
@@ -42,9 +46,82 @@ function chainable(rec, label) {
   });
 }
 
+/* Column widths, and the used range, are modelled for real.
+ *
+ * They are the two range properties a test asserts on, because preserving a
+ * hand-sized column across a rebuild is exactly a "did the format get set"
+ * question -- and the whole bug was that the answer was "yes, to the default".
+ * Everything else about a range stays the swallowing Proxy.
+ *
+ * Widths live on the SHEET, not the cells: Range.clear() does not reset them
+ * in Excel either, so the only thing that can change a width here is writing
+ * columnWidth -- which is what the fix has to stop doing to columns MC sized. */
+function rangeFormat(rec, s, col, cols, label) {
+  return new Proxy({}, {
+    get(_t, prop) {
+      if (prop === 'load') return function () {};
+      if (prop === 'columnWidth') {
+        // Excel reports null for a multi-column range whose widths differ.
+        const seen = [];
+        for (let i = 0; i < cols; i++) seen.push(s.colWidths[col + i]);
+        const same = seen.every(function (w) { return w === seen[0]; });
+        return same && seen[0] !== undefined ? seen[0] : null;
+      }
+      if (prop === 'then' || prop === 'catch' || prop === 'finally') return undefined;
+      if (typeof prop === 'symbol') return undefined;
+      return chainable(rec, label + '.' + String(prop));
+    },
+    set(_t, prop, value) {
+      rec.rangeWrites.push({ path: label + '.' + String(prop), value: value });
+      if (prop === 'columnWidth') {
+        rec.widthWrites.push({ sheet: s.id, col: col, cols: cols, width: value });
+        for (let i = 0; i < cols; i++) s.colWidths[col + i] = value;
+      }
+      return true;
+    }
+  });
+}
+
+function rangeApi(rec, s, row, col, rows, cols) {
+  const label = 'range[' + row + ',' + col + ']';
+  const fmt = rangeFormat(rec, s, col, cols, label + '.format');
+  return new Proxy(function () {}, {
+    get(_t, prop) {
+      if (prop === 'format') return fmt;
+      if (prop === 'then' || prop === 'catch' || prop === 'finally') return undefined;
+      if (typeof prop === 'symbol') return undefined;
+      if (prop === 'items') return [];
+      return chainable(rec, label + '.' + String(prop));
+    },
+    set(_t, prop, value) {
+      rec.rangeWrites.push({ path: label + '.' + String(prop), value: value });
+      // The used range is the extent of what has been written into cells.
+      if (prop === 'values') {
+        s.usedRows = Math.max(s.usedRows, row + rows);
+        s.usedCols = Math.max(s.usedCols, col + cols);
+      }
+      return true;
+    },
+    apply() { return chainable(rec, label + '()'); }
+  });
+}
+
+function usedRangeApi(s) {
+  return {
+    load() {},
+    get isNullObject() { return s.usedRows === 0 && s.usedCols === 0; },
+    get rowCount() { return s.usedRows; },
+    get columnCount() { return s.usedCols; }
+  };
+}
+
 function makeExcel(rec) {
+  function newSheet(id, name) {
+    return { id: id, name: name, colWidths: {}, usedRows: 0, usedCols: 0 };
+  }
+
   const wb = {
-    sheets: [{ id: 'sheet-1', name: 'Sheet1' }],
+    sheets: [newSheet('sheet-1', 'Sheet1')],
     activeId: 'sheet-1',
     seq: 1
   };
@@ -62,10 +139,11 @@ function makeExcel(rec) {
       comments: { load() {}, items: [], add() {} },
       freezePanes: chainable(rec, 'freezePanes'),
       getRange() { return chainable(rec, 'range'); },
-      getUsedRange() { return chainable(rec, 'usedRange'); },
+      getUsedRange() { return usedRangeApi(s); },
+      getUsedRangeOrNullObject() { return usedRangeApi(s); },
       getRangeByIndexes(row, col, rows, cols) {
         rec.ranges.push({ sheet: s.id, row: row, col: col, rows: rows, cols: cols });
-        return chainable(rec, 'range[' + row + ',' + col + ']');
+        return rangeApi(rec, s, row, col, rows, cols);
       }
     };
   }
@@ -77,7 +155,7 @@ function makeExcel(rec) {
     add(name) {
       rec.sheetsAdded.push(name);
       wb.seq += 1;
-      const s = { id: 'sheet-' + wb.seq, name: name || ('Sheet' + wb.seq) };
+      const s = newSheet('sheet-' + wb.seq, name || ('Sheet' + wb.seq));
       wb.sheets.push(s);
       return sheetApi(s);
     },
@@ -165,6 +243,7 @@ async function loadPane(options) {
     sheetsAdded: [],
     ranges: [],
     rangeWrites: [],
+    widthWrites: [],   // every columnWidth set: {sheet, col, cols, width}
     requests: [],
     listeners: [],      // {id, event} for every addEventListener on an element
     pageErrors: [],

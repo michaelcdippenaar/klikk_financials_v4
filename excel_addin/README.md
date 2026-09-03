@@ -380,6 +380,50 @@ Boot order matters for this: `inspectActiveSheet()` must finish before
 `connect()` reaches `populateCube()`, or the wells come up as defaults on top
 of a cube the pane should have recognised. `Office.onReady` sequences them.
 
+### A rebuild keeps the column widths; only a new column is sized for it
+
+Rewriting the sheet in place used to re-apply the default widths afterwards
+(130 per outer row-label column, 330 for the innermost, 104 per value column),
+so hand-sizing the columns — narrow ones with the last one wide, which is how
+the row-label hierarchy reads — survived only until the next Build. Manual
+sizing is intent, not noise. So `renderCube` reads the widths off the sheet
+before it clears it and re-applies those; a column takes a default only when it
+is genuinely NEW. `renderRows` does the same for a detail-sheet refresh.
+
+`Range.clear` does not reset column widths, but the widths are read and
+restored explicitly rather than left alone, so the behaviour does not depend on
+that.
+
+Position alone is not identity, because the layout changes between rebuilds, so
+columns are matched by ROLE (`LIB.cubeWidths`):
+
+- row-label columns keep their width only while there are as many of them. Drop
+  a row dimension and old column 0 held a class code where new column 0 holds
+  an account name — carrying 60 across would clip it — so they re-default.
+- the k-th value column inherits the k-th old value column, so adding months
+  appends columns instead of shifting every width one to the left.
+- the grand total inherits the old grand total: last column to last column, at
+  different indices.
+- anything with no counterpart (the new months) takes the default. So does
+  everything, on a sheet whose used range is too narrow to have been a cube we
+  rendered — someone edited it and there is no honest mapping.
+
+Both halves are batched, because per-column Office round trips are what make a
+wide cube appear to hang. The read is one `load()` per column — unavoidable,
+since Excel reports `columnWidth` as null for a multi-column range whose
+columns differ, which is exactly the case being preserved — but all of them are
+queued and settled by a single `sync()`. The write goes through
+`LIB.widthRuns`: adjacent equal widths collapse into one call, so the defaults
+on a fresh sheet still cost the three calls they did as three literals.
+
+**Frozen panes are deliberately NOT preserved.** The rebuild unfreezes, then
+re-freezes at the context + header block and the row-dimension columns. That
+split is DERIVED from the layout being written (`firstDataRow`, `nRowDims`),
+and both move between rebuilds — restoring the previous split after a rebuild
+with one fewer header level would freeze data rows. Widths are positional user
+intent; the freeze is a computed consequence. If MC wants his own split kept,
+it needs storing with the binding, not reading off the sheet.
+
 Bindings for deleted sheets are never pruned — the settings API has no key
 enumeration — so a much-edited workbook carries a few dead entries. Harmless.
 
@@ -411,7 +455,8 @@ npm ci          # once, to get eslint + jsdom. No bundler, no build step.
 | `npm run lint` — ESLint 9 `no-undef`, browser + Office globals | a handler calling a function that no longer exists | `reloadThisSheet` was deleted on 2026-08-20 (`d0efa8f`) with its click handler left calling it: a live `ReferenceError` that shipped for two weeks |
 | `test/boot.test.js` — jsdom loads `taskpane.html` with an `Office`/`Excel` stub | the pane not booting; a missing control killing the listeners *after* it; a dead handler, by clicking every button | `wireEvents()` registered 40+ listeners with bare `addEventListener`; one missing id threw and every later listener never attached, while the pane still rendered |
 | `test/cube.test.js` — clicks Build five times against a fake workbook | a Build that adds a sheet instead of rewriting the bound one | `Cube, Cube 2 … Cube 5` in eleven seconds of dragging the wells |
-| `test/lib.test.js` — pure functions, no DOM | run merging, `dimf`, `rtotals`/`ctotals`, date serials, the Build-target rule | rows keyed on `Math.min(depth, 2)` merged a depth-3 row into a depth-2 run, so the first child of every parent lost its indent |
+| `test/lib.test.js` — pure functions, no DOM | run merging, `dimf`, `rtotals`/`ctotals`, date serials, the Build-target rule, the width mapping | rows keyed on `Math.min(depth, 2)` merged a depth-3 row into a depth-2 run, so the first child of every parent lost its indent |
+| `test/widths.test.js` — builds, drags the column edges, rebuilds | a rebuild that re-applies the default widths over hand-sizing | "when I rebuild the cube it resets my column spacing" — the in-place rebuild of 2026-09-03 |
 | `test/exposure.test.js` — cross-checks this folder against `urls.py` | a new file silently published on the public origin | `assets/src/build.py` and the SVG masters, readable at `console.8-bit.space` until 2026-09-03 |
 
 **`make prove` is the point.** A test that has never failed has proved
@@ -425,7 +470,10 @@ The Excel stub in `test/fake-host.js` is deliberately shallow: worksheets,
 tables and document settings are modelled because the tests assert on them;
 ranges and formats are a Proxy that swallows every call. "Did `.format.font.bold`
 get set" is not a bug class this harness is for. If a test needs a range
-property, model that property — do not deepen the Proxy.
+property, model that property — do not deepen the Proxy. Two are modelled under
+that rule — `format.columnWidth` and the used range — because a width that
+survives a rebuild is precisely a "did the format get set" question, and the
+bug was that the answer was "yes, to the default".
 
 ### Known gap, found by this harness and not yet fixed
 
