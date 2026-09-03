@@ -1080,6 +1080,58 @@ class XeroCubeCommentStatusView(APIView):
         return Response(_row_to_dict(row))
 
 
+class XeroCubeCommentAssignView(APIView):
+    """POST /xero/data/journals/pivot/comments/<id>/assign/  {assignee}
+
+    Hand a point to a seat, ADDRESSED BY ID.
+
+    The upsert doors also accept `assignee`, and they are the right way to set
+    one while WRITING a comment. They are the wrong way to reassign somebody
+    else's: they conflict on (subject_type, subject_key, author_key) and
+    `_author_identity` stamps the REQUESTER, ignoring any `author` in the
+    payload. So re-posting another author's row with an assignee does not
+    reassign it -- it inserts a SECOND row carrying their text under the
+    caller's name. Every author in the live register (`MC`, `MC (To Review)`,
+    `codex:fy2026-bank-review`, `claude:year-end-audit`) is a name no console
+    account holds, so a picker built on that door would fork every row it
+    touched rather than a few.
+
+    Hence by id, like status/ and text/ next door: nothing is re-derived, no
+    anchor is recomputed, and `author_key` is never written.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, comment_id):
+        _ensure_table()
+        d = request.data or {}
+        if 'assignee' not in d:
+            return Response({'error': 'assignee is required (empty string unassigns)'},
+                            status=http.HTTP_400_BAD_REQUEST)
+        try:
+            assignee, holder = _resolve_assignee(
+                d.get('assignee'), requester_email=getattr(request.user, 'email', '') or '')
+        except ValueError as exc:
+            return Response({'error': str(exc)}, status=http.HTTP_400_BAD_REQUEST)
+
+        actor_key, _name, _verified = _author_identity(request, None)
+        with connection.cursor() as c:
+            c.execute('SELECT assignee_role FROM app.cube_comments WHERE id = %s', [comment_id])
+            found = c.fetchone()
+            if not found:
+                return Response({'error': 'no such comment'}, status=http.HTTP_404_NOT_FOUND)
+            before = found[0] or ''
+            c.execute('UPDATE app.cube_comments SET assignee_role = %s, updated_at = now() '
+                      'WHERE id = %s RETURNING ' + COLS, [assignee, comment_id])
+            out = _row_to_dict(c.fetchone())
+
+        # No trail row for a no-op: reassigning a seat to itself must not reset
+        # the ageing clock that is the whole point of the log.
+        if before != assignee:
+            _record_assignment(request, out, before, holder, actor_key)
+        out['reassigned'] = before != assignee
+        return Response(out)
+
+
 class XeroCubeCommentNotifyView(APIView):
     """GET/POST /xero/data/journals/pivot/comments/<id>/notify/
 
