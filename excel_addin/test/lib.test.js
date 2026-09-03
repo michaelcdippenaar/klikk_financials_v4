@@ -90,6 +90,84 @@ test('dimf does not alias the caller\'s arrays', () => {
   assert.deepStrictEqual(filters.fin_year, ['FY2026']);
 });
 
+/* ── the anchor's dimf ─────────────────────────────────────────────────
+   A subset naming EVERY member narrows nothing, so the anchor writes it the
+   way it writes "no filter": omitted. This is what stopped a comment made in
+   the add-in from carrying twelve years and a hundred and forty-four months
+   into the console. It collapses only what it can PROVE is all-members --
+   a wrong collapse re-points a comment at a figure it never described. */
+
+test('an all-members subset is omitted from the anchor', () => {
+  const spec = { filters: { year: ['2025', '2026'] } };
+  const totals = { year: { members: ['2025', '2026'], truncated: false } };
+  assert.deepStrictEqual(lib.anchorDimfParam(spec, totals), {},
+    'every member selected is the same cut as no filter');
+});
+
+test('a genuinely narrowed subset survives in the anchor', () => {
+  const spec = { filters: { year: ['2026'] } };
+  const totals = { year: { members: ['2025', '2026'], truncated: false } };
+  assert.strictEqual(lib.anchorDimfParam(spec, totals).dimf, '{"year":["2026"]}');
+});
+
+test('the anchor collapses each dimension independently', () => {
+  const spec = { filters: { year: ['2025', '2026'], entity: ['Klikk'] } };
+  const totals = {
+    year: { members: ['2025', '2026'], truncated: false },
+    entity: { members: ['Klikk', 'Tremly'], truncated: false },
+  };
+  assert.strictEqual(lib.anchorDimfParam(spec, totals).dimf, '{"entity":["Klikk"]}');
+});
+
+test('no member list, an empty one, or a capped one never collapses', () => {
+  const spec = { filters: { year: ['2025', '2026'] } };
+  const full = '{"year":["2025","2026"]}';
+  assert.strictEqual(lib.anchorDimfParam(spec, {}).dimf, full,
+    'a members fetch that failed must not read as "all"');
+  assert.strictEqual(lib.anchorDimfParam(spec, undefined).dimf, full);
+  assert.strictEqual(
+    lib.anchorDimfParam(spec, { year: { members: [], truncated: false } }).dimf, full,
+    'an empty member list proves nothing');
+  assert.strictEqual(
+    lib.anchorDimfParam(spec, { year: { members: ['2025', '2026'], truncated: true } }).dimf,
+    full, 'a capped list cannot prove the subset covers every member');
+});
+
+test('the anchor tests set coverage, not list length', () => {
+  // A subset can hold a value no longer in the member list because the journal
+  // filters moved under it -- equal lengths, different sets.
+  const spec = { filters: { year: ['2026', '2099'] } };
+  const totals = { year: { members: ['2025', '2026'], truncated: false } };
+  assert.strictEqual(lib.anchorDimfParam(spec, totals).dimf, '{"year":["2026","2099"]}',
+    '2025 is unselected, so this narrows and must be kept');
+});
+
+test('an empty subset stays omitted, and the anchor keeps subset order', () => {
+  assert.deepStrictEqual(lib.anchorDimfParam({ filters: { year: [] } }, {}), {});
+  assert.deepStrictEqual(lib.anchorDimfParam({}, {}), {});
+  assert.deepStrictEqual(lib.anchorDimfParam(undefined, undefined), {});
+  const out = lib.anchorDimfParam(
+    { filters: { fin_year: ['FY2026', 'FY2024'] } },
+    { fin_year: { members: ['FY2024', 'FY2025', 'FY2026'], truncated: false } });
+  assert.strictEqual(out.dimf, '{"fin_year":["FY2026","FY2024"]}');
+});
+
+test('the anchor does not alias the caller\'s arrays', () => {
+  const filters = { fin_year: ['FY2026'] };
+  lib.anchorDimfParam({ filters: filters }, {});
+  assert.deepStrictEqual(filters.fin_year, ['FY2026']);
+});
+
+test('the QUERY dimf never collapses, so a hand-made layout survives', () => {
+  // dimfParam is the layout order. An all-members subset arranged by hand must
+  // still reach the server in that arrangement -- this is why there are two
+  // functions, and the reason they must not be merged.
+  const spec = { filters: { year: ['2026', '2025'] } };
+  const totals = { year: { members: ['2025', '2026'], truncated: false } };
+  assert.strictEqual(lib.dimfParam(spec).dimf, '{"year":["2026","2025"]}');
+  assert.deepStrictEqual(lib.anchorDimfParam(spec, totals), {});
+});
+
 /* ── rtotals / ctotals ─────────────────────────────────────────────────
    Sent only when they differ from the server's default, so an untouched cube
    makes the request it always made. */

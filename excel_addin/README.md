@@ -436,6 +436,43 @@ subset editor therefore widens back to all — a cube filtered to nothing is not
 reachable, deliberately. Keep that: it is the difference between a new field
 showing the whole ledger and showing an empty sheet.
 
+A subset that names *every* member is the same cut as an empty one — both mean
+"all" — so the comment anchor writes them the same way: omitted. Without that,
+the picker's "add all shown" produced anchors enumerating twelve years and one
+hundred and forty-four months, which rendered verbatim on the console's
+comments page and buried the comment MC had actually written. An agent posting
+through `add_cube_comment` never had the problem, because it sends only the
+dimensions it genuinely narrowed; the add-in now matches that.
+
+## Two dimf forms, and why they must not be merged
+
+`dimfParam` is the QUERY. `anchorDimfParam` is the COMMENT ANCHOR. They differ
+in exactly one way — the anchor drops a dimension whose subset covers every
+member — and the split lives in `buildCube`, where `fetchCube` overrides
+`qy.dimf` with `LIB.dimfParam(spec)` and `qy.dimf` goes on to reach nothing but
+the anchor.
+
+Merging them would be a silent data loss. The query's list order **is** the
+layout order: the server lays rows and columns out in exactly the sequence the
+subset gives, so a subset naming all twelve years still encodes an arrangement
+someone built by hand in the picker. Collapsing it there throws that away. The
+anchor is only ever asked *which cut of the ledger is this figure from*, and
+order cannot change that answer — so collapsing there costs nothing.
+
+Collapsing is prove-it-or-keep-it. `anchorDimfParam` drops a dimension only
+when it holds the full member list from `journals/pivot/members/?dim=<key>`
+(note `?dim=`, **not** `?dimension=`) and the subset covers every value in it —
+set coverage, not list length, because a subset can hold a value that has since
+left the member list. A failed fetch, an empty list, or a `truncated` one
+(capped at 2000) proves nothing and keeps the verbose form. That direction
+matters: a filter wrongly called "all" re-points a comment at a figure it was
+never written about, which is worse than a noisy anchor.
+
+That endpoint is safe to test against because it does **not** apply `dimf` —
+`parse_dim_filters` is used only by the cube view — so the member list does not
+narrow itself as the subset changes. If that ever stops being true, every
+anchor collapses to nothing, and the check must be removed rather than patched.
+
 ## Checks
 
 There was no automated check on this add-in until 2026-09-03, and everything
