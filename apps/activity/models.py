@@ -55,6 +55,10 @@ CUBE_COMMENT_REPLIED = 'cube_comment.replied'
 # fact is kept: it records the handle AND who held it at that moment, and being
 # append-only it stays true after the handover.
 CUBE_COMMENT_ASSIGNED = 'cube_comment.assigned'
+# An edit RECORDS rather than replaces: the register is a work queue agents act
+# on, so a note rewritten with no trace means the trail no longer says what was
+# acted on. app.cube_comment_edits holds both texts; this is the notice.
+CUBE_COMMENT_EDITED = 'cube_comment.edited'
 CUBE_COMMENT_VIEWED = 'cube_comment.viewed'
 ATTACHMENT_UPLOADED = 'attachment.uploaded'
 ATTACHMENT_DELETED = 'attachment.deleted'
@@ -71,6 +75,7 @@ ACTIONS = (
     RECEIPT_TO_PROCESS_SET, RECEIPT_ARCHIVED, RECEIPT_RESTORED, RECEIPT_REVIEW_SAVED,
     RECEIPT_BULK_REVIEW, RECEIPT_BULK_COMMENT,
     COMMENT_POSTED, CUBE_COMMENT_REPLIED, CUBE_COMMENT_VIEWED, CUBE_COMMENT_ASSIGNED,
+    CUBE_COMMENT_EDITED,
     ATTACHMENT_UPLOADED, ATTACHMENT_DELETED, ATTACHMENT_VIEWED,
     LINK_ADDED, LINK_REMOVED, SLIP_VIEWED,
 )

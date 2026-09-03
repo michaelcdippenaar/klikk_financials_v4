@@ -16,6 +16,37 @@ logger = logging.getLogger(__name__)
 _io_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix='bigquery_io')
 
 
+BIGQUERY_DISABLED_MESSAGE = (
+    'BigQuery export is DISABLED (settings.BIGQUERY_EXPORT_ENABLED is off). '
+    'Skipping; nothing else is affected. '
+    'Set BIGQUERY_EXPORT_ENABLED=1 in the environment to re-enable it.'
+)
+
+
+def bigquery_export_enabled():
+    """The one place that answers "should we export at all".
+
+    Read off settings rather than os.environ directly so a test can flip it with
+    ``override_settings`` and so there is a single spelling of the flag. Default
+    is OFF -- see the comment beside BIGQUERY_EXPORT_ENABLED in settings/base.py
+    for why that is a decision and not an accident.
+    """
+    return bool(getattr(settings, 'BIGQUERY_EXPORT_ENABLED', False))
+
+
+def skip_bigquery(where=''):
+    """True when the export must be skipped, having said so ONCE and clearly.
+
+    One line, naming the flag and how to turn it back on -- so the log says
+    "switched off" rather than the stack trace of a credential lookup that was
+    never going to succeed.
+    """
+    if bigquery_export_enabled():
+        return False
+    logger.info('%s%s', ('[%s] ' % where) if where else '', BIGQUERY_DISABLED_MESSAGE)
+    return True
+
+
 def has_google_credentials():
     """True when a Google service-account file can be located, without raising.
 
@@ -79,7 +110,17 @@ def get_google_credentials():
 
 
 def update_google_big_query(df, table_id):
-    """Synchronous BigQuery export function."""
+    """Synchronous BigQuery export function.
+
+    The flag is checked HERE as well as at the callers, deliberately: this is
+    the single function every export path (sync, async, batch, and the fallback
+    the async paths drop into) ends up in, so a call site added later cannot
+    reach BigQuery by forgetting the guard. Returns without raising when off --
+    the callers already treat an exception as "export failed", and "switched
+    off" is not a failure.
+    """
+    if skip_bigquery(table_id):
+        return
     project_id = 'klick-financials01'
     try:
         GS_CREDENTIALS = get_google_credentials()
@@ -160,6 +201,11 @@ def export_accounts(tenant_id):
     """
     from apps.xero.xero_core.models import XeroTenant
     from apps.xero.xero_metadata.models import XeroAccount
+
+    # Checked before anything is loaded: this function builds three dataframes
+    # and concatenates them purely to hand them to an export that is off.
+    if skip_bigquery('export_accounts'):
+        return
 
     print('start export_accounts')
 
