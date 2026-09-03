@@ -55,6 +55,36 @@ from the previous one, and confirm afterwards that BOTH `klikk-financials-v4`
 and `klikk-financials-ingest-worker` are up under their proper names — a
 concurrent recreate has renamed the worker before now.
 
+## `docker build` can hand you a cached image without your change
+
+On 2026-09-04 a release was cut correctly and served an image that did **not**
+contain the committed entrypoint change. Everything passed:
+
+```
+release dir   has the change (grep -c => 2)
+build         exited 0
+container     Up, pages 200, gate 401 x4
+image         DOES NOT HAVE IT (grep -c => 0), layers 34 minutes old
+```
+
+The `COPY scripts/docker-entrypoint.sh` layer was reused from the previous
+release even though the file differed. This is precisely the "correctly-installed
+WRONG version" this runbook warns about one section down — it is not
+hypothetical, it has happened.
+
+**Check the IMAGE, not the release dir**, for anything that is baked in rather
+than bind-mounted. `/app` comes from the release dir so code changes are always
+live; everything else — the entrypoint, installed packages, static assets built
+at image time — comes from the image:
+
+```bash
+sudo docker run --rm --entrypoint sh klikk-financials-v4:<tag> \
+  -c 'grep -c "<something you just added>" /docker-entrypoint.sh'
+```
+
+If it comes back 0, rebuild with `--no-cache` and check again before deploying.
+A boot-log line is the cheapest proof for entrypoint changes specifically.
+
 ## A healthy container is not evidence the schema applied
 
 The register's DDL lives in `_ensure_table()` and runs on the FIRST AUTHENTICATED
