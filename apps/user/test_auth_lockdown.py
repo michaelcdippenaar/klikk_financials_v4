@@ -51,7 +51,7 @@ GATED = [
     ("/xero/data/journals/filters/", "get"),
     ("/xero/data/journals/pivot/?rows=account_type&measure=amount", "get"),
     ("/xero/data/journals/pivot/dimensions/", "get"),
-    ("/xero/data/journals/pivot/members/?dimension=account", "get"),
+    ("/xero/data/journals/pivot/members/?dim=entity", "get"),
     ("/xero/data/journals/pivot/drill/", "get"),
     ("/xero/data/journals/pivot/subsets/", "get"),
     ("/xero/data/journals/pivot/views/", "get"),

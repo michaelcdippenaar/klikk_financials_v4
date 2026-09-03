@@ -46,7 +46,7 @@ ADDIN_READS = [
     "/xero/data/journals/filters/",
     "/xero/data/journals/pivot/?rows=account_type&measure=amount",
     "/xero/data/journals/pivot/dimensions/",
-    "/xero/data/journals/pivot/members/?dimension=account",
+    "/xero/data/journals/pivot/members/?dim=entity",
     "/xero/data/journals/pivot/subsets/",
     "/xero/data/journals/pivot/views/",
     "/xero/data/journals/pivot/comments/?status=all",
