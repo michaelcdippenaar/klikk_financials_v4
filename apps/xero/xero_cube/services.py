@@ -131,10 +131,17 @@ def create_trail_balance(tenant_id, incremental=False, rebuild=False, exclude_ma
         print(f'[TRAIL BALANCE] ERROR: {e}')
         raise
 
-    # BigQuery export. Check for credentials BEFORE loading the whole table
-    # into a dataframe: without them the export is known to fail (not a
-    # regression — see CLAUDE.md) and the ~120k-row dataframe was pure waste.
-    from apps.xero.xero_integration.services import has_google_credentials
+    # BigQuery export. Checked BEFORE loading the whole table into a dataframe:
+    # the ~120k-row dataframe is pure waste when nothing is going to consume it.
+    #
+    # Two gates, in this order. The FLAG is the decision -- the export is
+    # switched off (see settings.BIGQUERY_EXPORT_ENABLED) -- and credentials are
+    # the capability. The trail balance itself is already written and counted by
+    # this point either way; skipping returns the same shape it always did, so
+    # nothing downstream can tell the difference.
+    from apps.xero.xero_integration.services import has_google_credentials, skip_bigquery
+    if skip_bigquery('trail_balance'):
+        return {'skipped': False, 'records': tb_count, 'affected_periods': selected_periods}
     if not has_google_credentials():
         print('BigQuery export skipped: no Google credentials configured')
         return {'skipped': False, 'records': tb_count, 'affected_periods': selected_periods}
@@ -390,6 +397,12 @@ def create_balance_sheet(tenant_id):
     """Create balance sheet from trail balance."""
     organisation = XeroTenant.objects.get(tenant_id=tenant_id)
     XeroBalanceSheet.objects.consolidate_balance_sheet(organisation)
+    # The balance sheet is CONSOLIDATED above regardless -- that is the local
+    # work this function exists for. Only the export below is switched off, and
+    # the dataframe is not built for an export that will not run.
+    from apps.xero.xero_integration.services import skip_bigquery
+    if skip_bigquery('balance_sheet'):
+        return
     tb = XeroBalanceSheet.objects.filter(organisation=organisation).select_related(
         'account', 'account__business_unit', 'contact', 'organisation'
     )

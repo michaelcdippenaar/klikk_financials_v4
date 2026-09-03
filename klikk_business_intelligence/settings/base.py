@@ -174,6 +174,26 @@ AUTH_USER_MODEL = 'user.User'
 # Public base for signed slip-viewer links (apps.audit.slip_view.slip_url / receipts view_url)
 SLIP_VIEW_BASE_URL = os.environ.get('SLIP_VIEW_BASE_URL', 'https://console.8-bit.space/backend')
 
+# --- BigQuery export (apps.xero.xero_integration.services) ------------------
+#
+# OFF by default, and that is the DECISION rather than a default nobody chose.
+# There are no Google credentials on the VM, so every export attempt has failed
+# for months -- documented in CLAUDE.md as known-not-a-regression, which is a
+# sentence that has to be re-learned by every reader of the logs. A flag turns
+# "it always fails and that is fine" into "it is switched off", which is a thing
+# the log can state once and be believed.
+#
+# The export CODE is untouched and still exercised the moment this is set: the
+# pipeline is expected to come back when credentials exist. Nothing about the
+# trail balance depends on it -- the export runs after the balance is written
+# and its failure was already swallowed.
+#
+#   BIGQUERY_EXPORT_ENABLED=1   in the environment re-enables it.
+BIGQUERY_EXPORT_ENABLED = (
+    (os.environ.get('BIGQUERY_EXPORT_ENABLED') or '').strip().lower()
+    in ('1', 'true', 'yes', 'on')
+)
+
 # --- Comment webhook (apps.audit.comment_webhook) ---------------------------
 # Empty URL = disabled, which is the default: nothing is POSTed anywhere unless
 # an operator opts in. Every attempt is logged to audit.CommentWebhookDelivery
