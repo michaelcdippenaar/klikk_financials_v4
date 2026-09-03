@@ -21,6 +21,20 @@ from rest_framework.authtoken.views import obtain_auth_token
 from django.conf import settings
 from django.conf.urls.static import static
 from django.views.static import serve as static_serve
+from django.http import Http404
+
+# The add-in directory is served whole, so anything dropped into it becomes
+# public by default. What Excel actually fetches is small and known:
+# manifest.xml, taskpane.html, lib.js, app.js, styles.css and assets/*.png.
+# Everything else in the folder is working material -- the checks (test/,
+# package.json, node_modules after an npm install) and the icon masters
+# (assets/src/: the SVG sources plus build.py and contact_sheet.py, which were
+# publicly readable until 2026-09-03). None of it is secret; none of it belongs
+# on a public origin either.
+#
+# ADDING A FILE TO excel_addin/ THAT EXCEL DOES NOT FETCH? Add it here.
+_EXCEL_ADDIN_PRIVATE = ('test/', 'node_modules/', 'assets/src/', 'package.json',
+                        'package-lock.json', 'eslint.config.mjs', 'Makefile')
 
 
 def _excel_addin_asset(request, path, document_root=None):
@@ -31,6 +45,17 @@ def _excel_addin_asset(request, path, document_root=None):
     leave the pane running new markup against a stale stylesheet -- which looked
     exactly like broken CSS. Every client picks up a redeploy on next open.
     """
+    normalised = path.lstrip('/')
+    # Denied by KIND, wherever in the folder they are put and whatever they are
+    # named: Office fetches no Python, no Markdown and no dotfiles. The dotfile
+    # rule is the one that matters most -- an .env dropped in here would be a
+    # real breach, not the untidiness assets/src/ was.
+    segments = normalised.split('/')
+    if (normalised.endswith(('.py', '.md'))
+            or any(seg.startswith('.') for seg in segments if seg)
+            or any(normalised == p or normalised.startswith(p)
+                   for p in _EXCEL_ADDIN_PRIVATE)):
+        raise Http404(path)
     response = static_serve(request, path, document_root=document_root)
     response['Cache-Control'] = 'no-store, no-cache, must-revalidate'
     response['Pragma'] = 'no-cache'

@@ -1,0 +1,16 @@
+{
+  "name": "klikk-journals-addin",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Klikk Journals Excel task pane — static bundle plus its checks.",
+  "scripts": {
+    "lint": "eslint -c eslint.config.mjs app.js lib.js",
+    "test": "node --test test/*.test.js",
+    "check": "npm run lint && npm test",
+    "prove": "node test/prove-regressions.js"
+  },
+  "devDependencies": {
+    "eslint": "9.39.1",
+    "jsdom": "30.0.1"
+  }
+}

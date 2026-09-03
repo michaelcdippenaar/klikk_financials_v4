@@ -9,6 +9,24 @@
 
   window.__klikkAppLoaded = true;
 
+  /* The pure half of this add-in (run merging, spec/params serialisation,
+     date serials, the Build target rule) lives in lib.js so node can require
+     it without a DOM, an Office host or a bundler. lib.js is a plain <script>
+     ahead of this one in taskpane.html; HTML and JS are cached independently,
+     so an old taskpane.html can reach a new app.js with no lib.js at all.
+     Say so on the boot panel instead of dying on `LIB is undefined`. */
+  var LIB = window.KlikkLib;
+  if (!LIB) {
+    var bootEl = document.getElementById('boot');
+    window.__klikkAppReportedError = true;
+    if (bootEl) {
+      bootEl.textContent = 'Klikk Journals is missing lib.js. The pane loaded a '
+        + 'newer app.js than its page. Close and reopen the pane; if it persists, '
+        + 'the server is serving a partial release.';
+    }
+    return;
+  }
+
   var DEFAULT_BASE = 'https://console.8-bit.space/backend';
   var PAGE_SIZE = 1000;
   var WRITE_CHUNK = 2000;
@@ -269,7 +287,6 @@
       else el.settingsPanel.hidden = false;
     });
   });
-
 
   /* Listener registration that cannot take its neighbours down.
 
@@ -615,45 +632,6 @@
     };
   }
 
-  /* rtotals / ctotals — which fields carry a total.
-
-     Each is sent ONLY when it differs from the server's default, so an
-     unchanged cube produces the same request it always did. rtotals is
-     omitted while every row level still shows its subtotal; ctotals is
-     omitted while no column field asks for one. */
-  function totalsParams(spec) {
-    var t = (spec && spec.totals) || {};
-    var rows = spec.rows || [], cols = spec.cols || [];
-    function on(k, zone) {
-      return Object.prototype.hasOwnProperty.call(t, k) ? !!t[k] : zone === 'rows';
-    }
-    var out = {};
-    var parents = rows.slice(0, -1);
-    if (parents.some(function (k) { return !on(k, 'rows'); })) {
-      var keep = parents.filter(function (k) { return on(k, 'rows'); });
-      // An empty value is meaningful here: "no row subtotals at all".
-      out.rtotals = keep.length ? keep.join(',') : '__none__';
-    }
-    var ct = cols.slice(0, -1).filter(function (k) { return on(k, 'cols'); });
-    if (ct.length) out.ctotals = ct.join(',');
-    return out;
-  }
-
-  /* {dimf: '{"fin_year":["FY2026"]}'} — omitted entirely when nothing is
-     narrowed, so an unfiltered cube's URL and comment anchors stay as they
-     were before filters existed. */
-  function dimfParam(spec) {
-    var f = spec && spec.filters ? spec.filters : {};
-    var live = {};
-    Object.keys(f).forEach(function (k) {
-      // NOT sorted. The subset's order is the layout order -- the server lays
-      // rows and columns out in exactly this sequence -- so sorting here would
-      // silently throw away the arrangement the user made.
-      if (f[k] && f[k].length) live[k] = f[k].slice();
-    });
-    return Object.keys(live).length ? { dimf: JSON.stringify(live) } : {};
-  }
-
   function describe(qy) {
     var bits = [];
     if (qy.tenant) {
@@ -702,13 +680,6 @@
 
   /* ── Excel rendering ───────────────────────────────────── */
 
-  function toSerial(iso) {
-    if (!iso) return '';
-    var p = iso.split('-');
-    if (p.length !== 3) return iso;
-    return Date.UTC(+p[0], +p[1] - 1, +p[2]) / 86400000 + 25569;
-  }
-
   function toNum(v) {
     if (v === '' || v == null) return '';
     var n = Number(v);
@@ -719,7 +690,7 @@
     return rows.map(function (r) {
       return COLUMNS.map(function (c) {
         var v = r[c.key];
-        if (c.fmt === 'date') return toSerial(v);
+        if (c.fmt === 'date') return LIB.toSerial(v);
         if (c.fmt === 'money' || c.fmt === 'int') return toNum(v);
         /* A clickable link without a per-cell Range.hyperlink call, which would
            be one Office round trip per row and make a large drill crawl.
@@ -919,8 +890,7 @@
      refreshes, rather than sprouting "Cube 2", "Cube 3", ... on every change
      -- so the button must say which of the two it is about to do. */
   function cubeTargetId() {
-    var b = activeSheet.binding;
-    return (b && b.kind === 'cube' && b.spec && activeSheet.id) ? activeSheet.id : null;
+    return LIB.cubeTarget(activeSheet);
   }
 
   function paintCubeTarget() {
@@ -1033,7 +1003,6 @@
     await inspectActiveSheet();
     el.countLine.innerHTML = 'Refreshed — <strong>' + fmtNum(got.rows.length) + '</strong> rows.';
   }
-
 
   /* ── cube view ─────────────────────────────────────────── */
 
@@ -1666,7 +1635,6 @@
     if (wells.rows.length) await buildCube();
   }
 
-
   /* Rebuild the selected view from its SAVED definition.
 
      Open applies whatever definition was cached when the list was last
@@ -1864,14 +1832,14 @@
   }
 
   async function fetchCube(qy, spec) {
-    // dimfParam(spec) is the authority; toParams(qy) only carries dimf so it
+    // LIB.dimfParam(spec) is the authority; toParams(qy) only carries dimf so it
     // reaches the comment anchor. Spec wins if they ever disagree.
     var params = Object.assign({}, toParams(qy), {
       rows: spec.rows.join(','),
       cols: spec.cols.join(','),
       measure: spec.measure,
       suppress: spec.suppress ? '1' : '0'
-    }, dimfParam(spec), totalsParams(spec));
+    }, LIB.dimfParam(spec), LIB.totalsParams(spec));
     return apiGet('/xero/data/journals/pivot/', params);
   }
 
@@ -1929,11 +1897,11 @@
         // Write a parent only where its run STARTS; the cells it spans stay
         // blank and are merged under it.
         var prev = ci > 0 ? (colPaths[ci - 1] || []) : null;
-        var sameRun = prev !== null && samePrefix(colPaths[ci] || [], prev, lv);
+        var sameRun = prev !== null && LIB.samePrefix(colPaths[ci] || [], prev, lv);
         row.push(sameRun ? '' : label);
         if (!sameRun && !isLast) {
           var span = 1;
-          while (ci + span < nCols && samePrefix(colPaths[ci + span] || [], colPaths[ci] || [], lv)) span++;
+          while (ci + span < nCols && LIB.samePrefix(colPaths[ci + span] || [], colPaths[ci] || [], lv)) span++;
           if (span > 1) merges.push({ row: 3 + lv, col: nRowDims + ci, span: span });
         }
       }
@@ -2071,25 +2039,10 @@
          row. A cube can be thousands of rows and one range call per row is the
          difference between a sheet that renders and one that appears to hang. */
       var TOTAL_FILL = [SHEET.total0, SHEET.total1, SHEET.total2];
-      var run = null;
-      var runs = [];
-      cube.rows.forEach(function (r, i) {
-        /* Key on the REAL depth. Clamping it here (it was Math.min(depth, 2))
-           made a depth-3 row look identical to a depth-2 one, so the first
-           supplier under an account joined the ACCOUNT's run and was indented
-           with the account's depth -- into column C, leaving its own column D
-           flush left. The second supplier onwards began a fresh run and
-           indented correctly, which is why only the first child of each parent
-           looked wrong. Shading still clamps, below, so the colours are
-           unchanged; only the run boundaries move. */
-        var kind = (r.is_total ? 'T' : 'L') + r.depth;
-        if (run && run.kind === kind && run.to === i - 1) {
-          run.to = i;
-        } else {
-          run = { kind: kind, from: i, to: i, isTotal: r.is_total, depth: r.depth };
-          runs.push(run);
-        }
-      });
+      /* Runs are keyed on the REAL depth -- see LIB.depthRuns in lib.js for
+         why clamping there cost the first child of every parent its indent.
+         Shading still clamps, below, so the colours are unchanged. */
+      var runs = LIB.depthRuns(cube.rows);
 
       runs.forEach(function (g) {
         var n = g.to - g.from + 1;
@@ -2197,15 +2150,6 @@
     return { sheetId: sheetId, sheetName: sheetName };
   }
 
-  /* Do two column paths agree on every level ABOVE the given one?
-     That is what makes them part of the same parent's span. */
-  function samePrefix(a, b, level) {
-    for (var i = 0; i <= level; i++) {
-      if ((a[i] === undefined ? '' : a[i]) !== (b[i] === undefined ? '' : b[i])) return false;
-    }
-    return true;
-  }
-
   function blanks(n) {
     var a = [];
     for (var i = 0; i < n; i++) a.push('');
@@ -2229,7 +2173,7 @@
        comment anchor is built from the query. Without this, the same row under
        "FY2026 only" and under no filter would share an anchor -- two different
        figures, one comment. */
-    var df = dimfParam(spec);
+    var df = LIB.dimfParam(spec);
     qy.dimf = df.dimf || '';
 
     progress(0, 1, 'Aggregating in Postgres…');

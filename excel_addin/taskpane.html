@@ -369,6 +369,8 @@
 
   <div id="boot" class="boot">Loading&hellip;</div>
 
+  <!-- lib.js first: app.js reads window.KlikkLib at load. -->
+  <script src="lib.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
