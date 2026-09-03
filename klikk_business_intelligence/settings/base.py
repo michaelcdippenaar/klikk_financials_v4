@@ -204,23 +204,42 @@ KLIKK_API_TOKEN = (os.environ.get('KLIKK_API_TOKEN') or '').strip()
 # token cannot claim to be someone else, it can only be the operator its
 # account is mapped to.
 #
-# Format: "service-username=operator-username,other=someone-else". The operator
-# must name a real, active Django user or the mapping is refused at use time
-# (see apps.user.identity) — a typo here must not invent an identity.
+# Format: "service-username=operator-username[:label]". The operator must name a
+# real, active Django user or the mapping is refused at use time (see
+# apps.user.identity) -- a typo here must not invent an identity.
 #
-# A SECOND person with the pane gets their OWN service user and their own row
+# The LABEL is what gets stamped, and it is separate from the operator on
+# purpose. The operator answers "which real account is accountable for this
+# credential"; the label answers "what should the register call them". MC's
+# login is mc@tremly.com and his 27 existing pane comments are authored `MC`,
+# so stamping the username would split him across two authors in the console's
+# author filter -- the exact split he spent an evening removing. Omit the label
+# and the operator's username is used.
+#
+# It is deliberately NOT derived from the user record (first_name / a profile
+# name): those are editable from the Django admin, and a register's author
+# vocabulary must not change because somebody tidied a profile. This is
+# configuration -- explicit, reviewed, and deployed on purpose.
+#
+# A SECOND person with the pane gets their OWN service user and their own entry
 # here, never a share of this one. See excel_addin/README.md § Credentials.
 def _parse_operators(raw):
+    """{'service-username': (operator_username, stamped_label)}."""
     out = {}
     for pair in (raw or '').split(','):
-        service, sep, operator = pair.partition('=')
-        if sep and service.strip() and operator.strip():
-            out[service.strip()] = operator.strip()
+        service, sep, rest = pair.partition('=')
+        if not sep or not service.strip() or not rest.strip():
+            continue
+        operator, _, label = rest.partition(':')
+        operator = operator.strip()
+        if not operator:
+            continue
+        out[service.strip()] = (operator, label.strip() or operator)
     return out
 
 
 SERVICE_ACCOUNT_OPERATORS = _parse_operators(
-    os.environ.get('SERVICE_ACCOUNT_OPERATORS') or 'excel-addin=mc@tremly.com'
+    os.environ.get('SERVICE_ACCOUNT_OPERATORS') or 'excel-addin=mc@tremly.com:MC'
 )
 
 # Web GraphQL transport limits. Variables and document contents must never be

@@ -732,7 +732,12 @@ class XeroCubeCommentsBulkView(APIView):
                 col_path = (cell.get('col_path') or '').strip()
                 filters = cell.get('filters') or d.get('filters') or {}
                 tenant = (filters.get('tenant') or '').strip()
-                tags = _norm_tags(cell.get('tags')) or shared_tags
+                # `or []` because absent-means-leave-as-is gives None all the way
+                # down (no per-cell tags, no shared tags), and the column is NOT
+                # NULL -- a bulk flag that named no tags at all raised
+                # NotNullViolation. The pane always sends a list, which is why it
+                # took an MCP-shaped payload to find.
+                tags = _norm_tags(cell.get('tags')) or shared_tags or []
 
                 val = cell.get('cell_value')
                 try:
@@ -743,16 +748,24 @@ class XeroCubeCommentsBulkView(APIView):
                 key = _cell_key(tenant, measure, row_dims, row_path,
                                 col_dims, col_path, filters)
                 c.execute(
+                    # Same identity columns and the same conflict target as the
+                    # single-comment path above. This clause said
+                    # (cell_key, author_key) -- an index _ensure_table DROPS --
+                    # and left subject_key at its '' default, so every bulk flag
+                    # raised ProgrammingError ("no unique or exclusion
+                    # constraint matching") and, had it not, would have keyed
+                    # every cell in the selection to the same ('cube_cell', '')
+                    # subject and collapsed them into one row.
                     'INSERT INTO app.cube_comments '
-                    '(cell_key, tenant_id, measure, row_dims, row_path, col_dims, col_path, '
-                    ' filters, cell_value, comment, author, author_key, status, tags) '
-                    'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
-                    'ON CONFLICT (cell_key, author_key) DO UPDATE SET '
+                    '(cell_key, subject_type, subject_key, tenant_id, measure, row_dims, row_path, '
+                    ' col_dims, col_path, filters, cell_value, comment, author, author_key, status, tags) '
+                    'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                    'ON CONFLICT (subject_type, subject_key, author_key) DO UPDATE SET '
                     '  comment = EXCLUDED.comment, cell_value = EXCLUDED.cell_value, '
                     '  tags = EXCLUDED.tags, status = EXCLUDED.status, updated_at = now() '
                     'RETURNING id',
-                    [key, tenant, measure, list(row_dims), list(row_path), list(col_dims),
-                     col_path, json.dumps(filters), val, comment,
+                    [key, 'cube_cell', key, tenant, measure, list(row_dims), list(row_path),
+                     list(col_dims), col_path, json.dumps(filters), val, comment,
                      author_name, author_key, status_val, tags],
                 )
                 results.append({'id': c.fetchone()[0], 'cell_key': key})

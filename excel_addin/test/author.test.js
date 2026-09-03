@@ -29,11 +29,13 @@ const IDENTITY = '/journals/pivot/comments/identity/';
 
 /* The identity endpoint answers as the server would for MC's token: the
    operator behind the shared `excel-addin` credential, stamped, not declared.
+   `MC` and not `mc@tremly.com`: the register records the label configured for
+   that credential, which is the name his existing comments already carry.
 
    Listed FIRST because makeFetch takes the first route whose fragment appears
    in the URL, and '/journals/pivot/' (the cube) is a prefix of this path. */
 const ROUTES_WITH_IDENTITY = Object.assign(
-  { [IDENTITY]: { author: 'mc@tremly.com', author_key: 'mc@tremly.com', verified: true, stamped: true } },
+  { [IDENTITY]: { author: 'MC', author_key: 'MC', verified: true, stamped: true } },
   ROUTES
 );
 
@@ -92,7 +94,7 @@ test('nothing the pane POSTs carries an author', async () => {
 test('the pane reports whose name it will sign with, from the server', async () => {
   const pane = await connectedPane();
   try {
-    assert.match(pane.$('commentIdentity').textContent, /mc@tremly\.com/,
+    assert.match(pane.$('commentIdentity').textContent, /Signed as MC\b/,
       'the pane never showed the stamped author');
     assert.match(pane.$('commentIdentity').textContent, /not typed/,
       'a stamped identity must say so — that is the whole change');

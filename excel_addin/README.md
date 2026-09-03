@@ -129,10 +129,26 @@ the request body is ignored.
 
 `excel-addin` names the tool, not the person, so the person behind it is
 declared on the server in `settings.SERVICE_ACCOUNT_OPERATORS`
-(`"excel-addin=mc@tremly.com"`, overridable by an env var of the same name).
-The operator must be a real, active Django user or the mapping is refused at
-use time — a typo in configuration must not be able to invent an author. The
-pane reads `GET .../comments/identity/` on connect and shows the answer, so
+(`"excel-addin=mc@tremly.com:MC"`, overridable by an env var of the same name).
+
+Two halves, and the split is deliberate:
+
+* the **operator** (`mc@tremly.com`) is the real account accountable for the
+  credential. It must be an existing, **active** Django user or the mapping is
+  refused at use time — a typo in configuration must not be able to invent an
+  author.
+* the **label** (`MC`) is what the register actually records, in both `author`
+  and `author_key`. It exists because MC's login is `mc@tremly.com` while his
+  27 existing pane comments are authored `MC`; stamping the username would put
+  his new comments in a different bucket of the console's author filter (which
+  groups by `author_key`) from his old ones. Omit the `:label` and the
+  operator's username is stamped.
+
+The label is **not** derived from the user record (`first_name`, a profile
+name): those are editable from the Django admin, and the register's author
+vocabulary must not change because somebody tidied a profile.
+
+The pane reads `GET .../comments/identity/` on connect and shows the answer, so
 what it displays and what the register records come from one resolver.
 
 A **second** person with the pane gets their **own** service user, their own

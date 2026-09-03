@@ -44,23 +44,44 @@ def _warn_once(key, *args):
     logger.error(*args)
 
 
+MAX_LABEL = 150
+
+
 def service_operator(user):
-    """The person behind a shared service credential, or None.
+    """What to stamp for a shared service credential, or None.
 
-    None for every caller that is not a mapped service account — a real person,
-    an anonymous request, the MCP ``ServiceAccount`` — so callers keep whatever
-    behaviour they had before this module existed.
+    Two different questions live in one mapping entry and it matters which is
+    which:
 
-    The configured operator must name a real, ACTIVE user. A mapping that names
-    a deleted or disabled account returns None (with a logged error) rather
-    than stamping a name nobody can log in as: a typo in configuration must not
-    be able to invent an identity in the register.
+      * the OPERATOR is the real account accountable for the credential. It is
+        validated — it must name an existing, ACTIVE user — because a mapping
+        that names nobody must not be able to invent an identity in the
+        register.
+      * the LABEL is what the register actually records. It defaults to the
+        operator's username and is configured separately because the two answer
+        different questions: MC signs in as `mc@tremly.com` and his existing
+        pane comments are authored `MC`, so stamping the username would file
+        his new notes in a different bucket of the console's author filter from
+        his old ones — the split this whole change exists to remove.
+
+    Returns the label. None for every caller that is not a mapped service
+    account — a real person, an anonymous request, the MCP ``ServiceAccount`` —
+    so those keep whatever behaviour they had before this module existed.
     """
     username = getattr(user, 'username', '') or ''
     if not username:
         return None
-    mapping = getattr(settings, 'SERVICE_ACCOUNT_OPERATORS', None) or {}
-    operator = (mapping.get(username) or '').strip()
+    entry = (getattr(settings, 'SERVICE_ACCOUNT_OPERATORS', None) or {}).get(username)
+    if not entry:
+        return None
+    # A bare string is accepted so an entry written without a label still
+    # works; it means "stamp the operator's own username".
+    if isinstance(entry, str):
+        operator, label = entry, entry
+    else:
+        operator, label = (list(entry) + [None])[:2]
+    operator = (operator or '').strip()
+    label = (label or operator).strip()
     if not operator:
         return None
     # Only now does this touch the database: an unmapped caller — which is
@@ -75,4 +96,8 @@ def service_operator(user):
             username, operator,
         )
         return None
-    return operator
+    # The label lands in a text column that is also an index key. Bounded and
+    # NUL-free for the same reason every other client-facing string here is,
+    # even though this one comes from configuration rather than a request.
+    label = label.replace('\x00', '')[:MAX_LABEL].strip()
+    return label or None
