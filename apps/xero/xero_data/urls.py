@@ -15,6 +15,7 @@ urlpatterns = [
     path('comments/', pivot_comments.CommentsView.as_view(), name='comments'),
     path('journals/pivot/comments/', pivot_comments.XeroCubeCommentsView.as_view(), name='cube_comments'),
     path('journals/pivot/comments/bulk/', pivot_comments.XeroCubeCommentsBulkView.as_view(), name='cube_comments_bulk'),
+    path('journals/pivot/comments/identity/', pivot_comments.XeroCubeCommentIdentityView.as_view(), name='cube_comment_identity'),
     path('journals/pivot/comments/<int:comment_id>/status/', pivot_comments.XeroCubeCommentStatusView.as_view(), name='cube_comment_status'),
     path('journals/pivot/people/', cube_mentions.XeroCubePeopleView.as_view(), name='cube_people'),
     path('update/journals/', views.XeroUpdateDataView.as_view(), name='update_data'),

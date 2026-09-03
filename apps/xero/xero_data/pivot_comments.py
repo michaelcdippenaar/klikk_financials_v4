@@ -21,6 +21,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
+from apps.user import identity
 from apps.xero.xero_data import cube_mentions
 
 logger = logging.getLogger(__name__)
@@ -229,27 +230,47 @@ def _norm_tags(raw):
     return out
 
 
+# Credentials that name a TOOL rather than a person: the shared MCP service
+# token and the Excel add-in's login. Neither may be stamped on a comment as-is
+# -- a register where half the notes are authored by 'service-token' cannot be
+# filtered by who wrote them.
+SHARED_CREDENTIALS = {'excel-addin', 'service-token', ''}
+
+
 def _author_identity(request, declared):
-    """Who wrote this comment.
+    """Who wrote this comment. Returns (author_key, author_name, verified).
 
-    The authenticated user is the authority. The add-in currently signs in as
-    the shared `excel-addin` service account, so that name identifies the TOOL,
-    not the person -- when that is who we are, fall back to the name typed in
-    the pane and mark it self-declared, rather than filing everyone's notes
-    under one identity.
+    Three kinds of caller, three answers, in this order:
 
-    Give each person their own login and this collapses to the real username
-    with verified=True, and nothing else has to change.
+    1. A SHARED CREDENTIAL WITH A KNOWN OPERATOR -- the Excel add-in. The
+       account is mapped to a person in settings.SERVICE_ACCOUNT_OPERATORS, so
+       the server stamps that person and IGNORES whatever the client sent. This
+       is the case MC's complaint is about: the pane used to make him type his
+       name, and a free-text author box is a field that can disagree with the
+       credential. app.cube_comments carries the receipts -- `ewffew` x12,
+       `test`, `test2`, MC's own notes split across author_key 'MC' and '', and
+       55 rows authored by nobody at all.
+
+    2. A REAL PERSON signed in as themselves (the console JWT, an auditor's
+       session). Their username is the answer, as it always was.
+
+    3. A SHARED CREDENTIAL WITH NO OPERATOR -- the MCP service token. One
+       credential, many agents, so the caller must say which workstream it is:
+       'claude:year-end-audit' and 'codex:fy2026-account-allocation' are how MC
+       tells them apart, and they keep working exactly as before. Marked
+       verified=False, because a self-declared name is a claim, not a fact.
+
+    The distinction that matters is (1) vs (3): an identity the SERVER knows is
+    stamped; an identity only the CLIENT knows is accepted and labelled as
+    such. Nothing here lets a caller of kind (1) opt back into kind (3).
     """
     user = getattr(request, 'user', None)
     username = getattr(user, 'username', '') or ''
     declared = (declared or '').strip()
-    # 'service-token' is the shared MCP credential and 'excel-addin' the shared
-    # add-in login: both name a TOOL, not a person. An agent writing a comment
-    # must say who it is, or the queue fills with notes from 'service-token'
-    # and nobody can tell the auditor's from the sync job's.
-    SHARED = {'excel-addin', 'service-token', ''}
-    if username and username not in SHARED:
+    operator = identity.service_operator(user)
+    if operator:
+        return operator, operator, True
+    if username and username not in SHARED_CREDENTIALS:
         return username, username, True
     return (declared or 'unattributed'), declared, False
 
@@ -597,6 +618,33 @@ class XeroCubeCommentsView(APIView):
             cube_mentions.parse_mentions(comment),
         )
         return Response(out, status=http.HTTP_200_OK)
+
+
+class XeroCubeCommentIdentityView(APIView):
+    """GET /xero/data/journals/pivot/comments/identity/
+
+    "Who will this comment be signed as?" — asked BEFORE anything is written.
+
+    The task pane no longer has a name box, so without this it could not say
+    whose name is going on the note until after the note was saved. It reads
+    the same _author_identity the POST paths use, so the pane cannot show one
+    answer while the register records another.
+
+    Safe method under /xero/data/journals/, so the service_readonly gate
+    already allows it and no middleware change was needed to add it.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        author_key, author_name, verified = _author_identity(request, None)
+        return Response({
+            'author': author_name,
+            'author_key': author_key,
+            # False means "this caller has to declare its own name" — the MCP
+            # service token. The pane never sees it; agents already do.
+            'verified': verified,
+            'stamped': verified,
+        })
 
 
 class XeroCubeCommentStatusView(APIView):

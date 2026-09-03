@@ -28,6 +28,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 
+from apps.xero.xero_data import pivot_comments
+
 logger = logging.getLogger(__name__)
 
 DDL = """
@@ -76,6 +78,17 @@ def _jsonb(v):
         return json.loads(v) if v else {}
     except (TypeError, ValueError):
         return {}
+
+
+def _saved_by(request, declared):
+    """Who saved this subset or view.
+
+    The SAME answer pivot_comments gives for a comment author -- the pane fed
+    both from one "Your name" box, and that box is gone. Sharing the resolver
+    rather than re-deriving it here is the point: two answers to "who is this"
+    is how one surface ends up stamped with a name the other would not accept.
+    """
+    return pivot_comments._author_identity(request, declared)[1]
 
 
 class XeroCubeSubsetsView(APIView):
@@ -127,7 +140,7 @@ class XeroCubeSubsetsView(APIView):
                 '  members = EXCLUDED.members, author = EXCLUDED.author, '
                 '  updated_at = now() '
                 'RETURNING id, dimension, name, members, author',
-                [dim, name, members, (d.get('author') or '').strip()])
+                [dim, name, members, _saved_by(request, d.get('author'))])
             r = c.fetchone()
         return Response({'id': r[0], 'dimension': r[1], 'name': r[2],
                          'members': list(r[3] or []), 'author': r[4]})
@@ -189,7 +202,7 @@ class XeroCubeViewsView(APIView):
                 'ON CONFLICT (name) DO UPDATE SET spec = EXCLUDED.spec, '
                 '  query = EXCLUDED.query, author = EXCLUDED.author, updated_at = now() '
                 'RETURNING id, name',
-                [name, json.dumps(spec), json.dumps(query), (d.get('author') or '').strip()])
+                [name, json.dumps(spec), json.dumps(query), _saved_by(request, d.get('author'))])
             r = c.fetchone()
         return Response({'id': r[0], 'name': r[1]})
 

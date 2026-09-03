@@ -80,6 +80,22 @@ const REGRESSIONS = [
     check: ['test', 'test/widths.test.js']
   },
   {
+    name: 'typed-author',
+    story: 'the pane carried a free-text "Your name" box and put it on every '
+         + 'comment, subset and view — which is how `ewffew` (x12), `test`, '
+         + '`test2` and 55 comments authored by nobody got into the register '
+         + '("I should not have to type in my user in excel plugin")',
+    file: 'app.js',
+    find: `      cell_value: typeof sel.value === 'number' ? sel.value : null,
+      comment: text
+    });`,
+    replace: `      cell_value: typeof sel.value === 'number' ? sel.value : null,
+      comment: text,
+      author: (el.commentAuthor.value || '').trim()
+    });`,
+    check: ['test', 'test/author.test.js']
+  },
+  {
     name: 'dead-handler',
     story: 'reloadThisSheet was deleted on 2026-08-20 (d0efa8f) while its click '
          + 'handler kept calling it — a live ReferenceError that shipped for two weeks',

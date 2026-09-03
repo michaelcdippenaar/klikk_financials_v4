@@ -241,7 +241,7 @@
       'btnPickUp', 'btnPickDown', 'btnPickSortAz',
       'subsetPick', 'subsetName', 'btnSubsetLoad', 'btnSubsetSave', 'btnSubsetDelete',
       'viewPick', 'viewName', 'btnViewLoad', 'btnViewRebuild', 'btnViewSave', 'btnViewDelete',
-      'commentPanel', 'commentAuthor', 'btnSyncComments', 'commentMsg',
+      'commentPanel', 'commentIdentity', 'btnSyncComments', 'commentMsg',
       'btnFullPivot', 'selNone', 'selHas', 'selPath', 'selVal', 'selComment',
       'btnSaveComment', 'btnDeleteComment', 'selBox', 'markCells', 'btnPushComments',
       'bulkTags', 'bulkNote', 'btnBulkFlag', 'bulkCount',
@@ -441,6 +441,9 @@
       var cat = await apiGet('/xero/data/journals/pivot/dimensions/', {});
       populateCube(cat);
       setConnected(true);
+      // Who the server will sign comments as. Non-fatal by construction --
+      // see loadIdentity(); a connection must not fail over a caption.
+      loadIdentity();
       el.settingsMsg.textContent = 'Connected.';
       el.settingsMsg.className = 'msg msg--ok';
       if (silent) el.settingsPanel.hidden = true;
@@ -454,6 +457,28 @@
       el.settingsMsg.textContent = e.message;
       el.settingsMsg.className = 'msg msg--err';
     }
+  }
+
+  /* Show whose name goes on a comment, BEFORE one is written.
+
+     The pane no longer asks for a name -- the server stamps the author from
+     the token that posted, and ignores any author a client sends. That is the
+     right place for it (a text box is a field that can disagree with the
+     credential), but it leaves the operator with no way to see what will be
+     recorded until after they record it. Hence this: one GET, same resolver as
+     the save path, so the caption and the register cannot say different things.
+
+     Deliberately fire-and-forget and never thrown from: an older backend
+     without the endpoint answers 404, and the pane keeps the neutral caption
+     already in the HTML rather than refusing to connect over a label. */
+  function loadIdentity() {
+    apiGet(COMMENT_API + 'identity/', {}).then(function (me) {
+      var who = (me && me.author || '').trim();
+      if (!who) return;
+      el.commentIdentity.textContent = me.stamped
+        ? 'Signed as ' + who + ' — taken from your login, not typed.'
+        : 'Signed as ' + who + '.';
+    }).catch(function () { /* keep the neutral caption */ });
   }
 
   function setConnected(ok) {
@@ -1659,9 +1684,9 @@
     if (bad) throw new Error(bad);
     // The journal filters travel with it. A view that renders different numbers
     // depending on what the pane happened to be filtered to is not a saved view.
+    // No author: the server stamps it from the token. See loadIdentity().
     await apiPost('/xero/data/journals/pivot/views/', {
-      name: name, spec: spec, query: readQuery(),
-      author: (el.commentAuthor.value || '').trim()
+      name: name, spec: spec, query: readQuery()
     });
     el.viewName.value = '';
     await loadViewList();
@@ -1766,8 +1791,7 @@
         if (!n) throw new Error('Name the subset first.');
         if (!working.length) throw new Error('An empty subset is the same as no subset.');
         await apiPost('/xero/data/journals/pivot/subsets/', {
-          dimension: pickerKey, name: n, members: working.slice(),
-          author: (el.commentAuthor.value || '').trim()
+          dimension: pickerKey, name: n, members: working.slice()
         });
         await loadSubsetList();
         el.subsetPick.value = n;
@@ -2873,8 +2897,7 @@
         var o = {}; for (var k in c) if (k.charAt(0) !== '_') o[k] = c[k];
         return o;
       }),
-      comment: note, tags: tags,
-      author: (el.commentAuthor.value || '').trim()
+      comment: note, tags: tags
     });
     commentCache = null;
 
@@ -2936,8 +2959,7 @@
       col_dims: sel.col_dims, col_path: sel.col_path,
       filters: toParams(sel.query),
       cell_value: typeof sel.value === 'number' ? sel.value : null,
-      comment: text,
-      author: (el.commentAuthor.value || '').trim()
+      comment: text
     });
     commentCache = null;                      // force a refresh on next lookup
   }

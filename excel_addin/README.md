@@ -120,6 +120,36 @@ print(u.username, u.role)
 "'
 ```
 
+### Who a comment is signed as
+
+The add-in does **not** ask the operator to type their name, and does not send
+one. `POST .../comments/` (and `comments/bulk/`, `subsets/`, `views/`) is
+stamped **server-side** from the credential that posted it, and an `author` in
+the request body is ignored.
+
+`excel-addin` names the tool, not the person, so the person behind it is
+declared on the server in `settings.SERVICE_ACCOUNT_OPERATORS`
+(`"excel-addin=mc@tremly.com"`, overridable by an env var of the same name).
+The operator must be a real, active Django user or the mapping is refused at
+use time — a typo in configuration must not be able to invent an author. The
+pane reads `GET .../comments/identity/` on connect and shows the answer, so
+what it displays and what the register records come from one resolver.
+
+A **second** person with the pane gets their **own** service user, their own
+token, and their own row in the mapping — never a share of this one. The token
+is the identity; two people behind one token is two people with one name.
+
+Agents on the shared MCP service token are unaffected: they still declare their
+own author (`claude:year-end-audit`, `codex:fy2026-account-allocation`), and
+those comments are marked `author_verified: false` because a self-declared name
+is a claim, not a fact. See `apps/user/identity.py` and
+`apps/xero/xero_data/tests/test_comment_author_stamping.py`.
+
+Why this exists: the pane used to carry a free-text "Your name" box, and
+`app.cube_comments` still shows what a client-controlled author field costs —
+`ewffew` ×12, `test`, `test2`, MC's own notes split across `author_key` `'MC'`
+and `''`, and 55 rows authored by nobody at all.
+
 Do **not** move it to `Office.context.document.settings` — that persists inside
 the workbook, so the credential would travel to anyone the file is shared with.
 And not `Office.context.roamingSettings` either: that is part of the

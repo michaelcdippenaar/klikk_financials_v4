@@ -188,6 +188,41 @@ CONSOLE_BASE_URL = (os.environ.get('CONSOLE_BASE_URL') or 'https://console.8-bit
 # Unset => service-token writes are denied (a warning is logged once).
 KLIKK_API_TOKEN = (os.environ.get('KLIKK_API_TOKEN') or '').strip()
 
+# ── Who is behind a shared service credential ───────────────────────────────
+#
+# The Excel add-in signs in as the Django user `excel-addin` (role
+# service_readonly). That name identifies the TOOL, not the person, so stamping
+# it on a comment would file every note MC writes under "excel-addin" — true,
+# and useless in an author filter. Until 2026-09-03 the pane worked around that
+# by asking the operator to TYPE their name into the task pane, which is how
+# `ewffew` became a durable author in app.cube_comments.
+#
+# So the operator behind a service credential is declared HERE, on the server,
+# and the client's claim is ignored. The token is the credential and the token
+# lives on one person's laptop, so the mapping is a property of the account,
+# not of the request — which is exactly what makes it unspoofable: a copied
+# token cannot claim to be someone else, it can only be the operator its
+# account is mapped to.
+#
+# Format: "service-username=operator-username,other=someone-else". The operator
+# must name a real, active Django user or the mapping is refused at use time
+# (see apps.user.identity) — a typo here must not invent an identity.
+#
+# A SECOND person with the pane gets their OWN service user and their own row
+# here, never a share of this one. See excel_addin/README.md § Credentials.
+def _parse_operators(raw):
+    out = {}
+    for pair in (raw or '').split(','):
+        service, sep, operator = pair.partition('=')
+        if sep and service.strip() and operator.strip():
+            out[service.strip()] = operator.strip()
+    return out
+
+
+SERVICE_ACCOUNT_OPERATORS = _parse_operators(
+    os.environ.get('SERVICE_ACCOUNT_OPERATORS') or 'excel-addin=mc@tremly.com'
+)
+
 # Web GraphQL transport limits. Variables and document contents must never be
 # written to application logs.
 WEB_API_V2_MAX_REQUEST_BYTES = int(os.environ.get('WEB_API_V2_MAX_REQUEST_BYTES', str(256 * 1024)))

@@ -335,8 +335,14 @@
         </div>
       </div>
 
-      <label for="commentAuthor">Your name</label>
-      <input type="text" id="commentAuthor" spellcheck="false" placeholder="e.g. MC">
+      <!-- No "Your name" box. It used to be here, and a free-text author field
+           is a field that disagrees with the credential: the register still
+           carries `ewffew` x12, `test`, `test2`, MC's own notes split across
+           two spellings of himself, and 55 comments authored by nobody. The
+           server now stamps the author from the token that posted the comment
+           and ignores anything the client claims; this line only REPORTS what
+           it will be, read from the same resolver the save path uses. -->
+      <p class="hint" id="commentIdentity">Comments are signed with the account this add-in is connected as.</p>
       <label class="chk"><input type="checkbox" id="markCells" checked>
         Also write it as an Excel comment on the cell</label>
       <div class="row">
