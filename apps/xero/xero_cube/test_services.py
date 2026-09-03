@@ -38,9 +38,13 @@ class ProcessXeroDataServiceTest(TestCase):
         # process_xero_data forwards the full rebuild contract, not just
         # `incremental`. Pin every argument so a silent default change here
         # (e.g. rebuild flipping to True) still fails the test.
+        # A tenant with no previous build stamp derives a FULL scope, so the
+        # journals were fully regenerated and the trail balance must be fully
+        # rebuilt too (incremental=False) — never left to the date-window
+        # fallback, which rebuilt one month of a full reprocess on 2026-09-03.
         mock_create_trail_balance.assert_called_once_with(
             self.tenant.tenant_id,
-            incremental=True,
+            incremental=False,
             rebuild=False,
             exclude_manual_journals=False,
             affected_periods=None,

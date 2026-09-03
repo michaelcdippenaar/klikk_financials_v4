@@ -628,9 +628,15 @@ def process_xero_data(tenant_id, rebuild_trail_balance=False, exclude_manual_jou
         if periods is not None:
             print(f"[PROCESS] Trail balance scope: {len(periods)} month(s) {periods}")
             stats['affected_periods'] = [f'{y:04d}-{m:02d}' for y, m in periods]
+        # A derived "full" scope (no build stamp yet, most of the ledger
+        # touched, an unbounded exclusion change) means the journals were
+        # fully regenerated above, so the trail balance must be fully
+        # rebuilt too — NOT handed to create_trail_balance's date-window
+        # fallback, which on 2026-09-03 rebuilt one month of a full
+        # reprocess and inserted nothing.
         tb_result = create_trail_balance(
             tenant_id,
-            incremental=not rebuild_trail_balance,
+            incremental=scope is not None,
             rebuild=rebuild_trail_balance,
             exclude_manual_journals=exclude_manual_journals,
             affected_periods=periods,

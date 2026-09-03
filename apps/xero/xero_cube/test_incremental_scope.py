@@ -224,6 +224,31 @@ class ProcessXeroDataScopeForwardingTests(_Fixture):
         self.assertEqual(mock_ytd.call_args.kwargs['affected_periods'], [(2025, 9)])
         self.assertEqual(result['stats']['affected_periods'], ['2025-09'])
         self.assertIn('trail_balance', result['stats']['step_seconds'])
+        self.assertTrue(mock_tb.call_args.kwargs['incremental'])
+
+    @patch('apps.xero.xero_cube.services.calculate_balance_sheet_balance_to_date')
+    @patch('apps.xero.xero_cube.services.create_trail_balance')
+    @patch('apps.xero.xero_data.transaction_processor.process_transactions_to_journals')
+    def test_a_derived_full_scope_forces_a_full_trail_balance_rebuild(self, mock_txn, mock_tb, mock_ytd):
+        # Production 2026-09-03: the synced_at backfill made every transaction
+        # "touched", the journals were fully regenerated (7.9 s), and then the
+        # trail balance step fell into the date-window fallback, rebuilt ONE
+        # month and inserted nothing. A full reprocess needs a full rebuild.
+        last_run = timezone.now() - dt.timedelta(hours=1)
+        self._stamp('process_journals', last_run)
+        self._stamp('trail_balance', last_run)
+        for i in range(4):
+            self._source(f'tx-{i}', synced_at=timezone.now())
+        mock_txn.return_value = {'journal_entries_created': 4}
+        mock_tb.return_value = {'skipped': False, 'records': 4}
+
+        result = process_xero_data(self.tenant.tenant_id)
+
+        self.assertEqual(result['stats']['scope'], 'full')
+        self.assertIsNone(mock_txn.call_args.kwargs['touched_transaction_ids'])
+        self.assertFalse(mock_tb.call_args.kwargs['incremental'])
+        self.assertIsNone(mock_tb.call_args.kwargs['affected_periods'])
+        self.assertIsNone(mock_ytd.call_args.kwargs['affected_periods'])
 
     @patch('apps.xero.xero_cube.services.calculate_balance_sheet_balance_to_date')
     @patch('apps.xero.xero_cube.services.create_trail_balance')
