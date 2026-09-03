@@ -29,6 +29,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 
+from django.db import transaction
 from django.utils.dateparse import parse_datetime
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -96,8 +97,14 @@ def comment_feed_view(request):
     # the parent comment's id and label — the feed must not have to re-resolve
     # either. A dead register must not take the whole feed down with it: the other
     # two surfaces are still worth delivering.
+    # The savepoint is load-bearing, not defensive habit: in PostgreSQL a failed
+    # statement aborts the whole transaction, so catching the Python exception
+    # alone would leave every LATER query in this request answering
+    # InFailedSqlTransaction. Rolling back to a savepoint keeps the failure
+    # local to this read, which is what makes the fallback below true.
     try:
-        cube_replies = cube_comment_replies.replies_since(since, FEED_MAX + 1)
+        with transaction.atomic():
+            cube_replies = cube_comment_replies.replies_since(since, FEED_MAX + 1)
     except Exception:  # noqa: BLE001
         logger.exception('comment feed: could not read cube-comment replies')
         cube_replies = []

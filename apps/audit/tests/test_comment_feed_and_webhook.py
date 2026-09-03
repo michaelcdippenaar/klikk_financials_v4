@@ -340,3 +340,45 @@ class CommentWebhookTests(FeedBase):
         self.assertEqual(payload['object_id'], 'b' * 64)
         self.assertEqual(payload['comment']['text'], 'hello')
         self.assertIn('b' * 64, payload['url'])
+
+
+class CommentFeedResilienceTests(TestCase):
+    """The cube-reply read must never be able to break the rest of the feed.
+
+    Regression for a real failure: `replies_since` relied on a process-level
+    memo flag guarding transactional DDL, so once any test rolled back the
+    creating transaction the table was gone while the flag still said
+    "created". The read then raised UndefinedTable, and because PostgreSQL
+    aborts the entire transaction on a failed statement, every later query in
+    the request answered InFailedSqlTransaction — a missing side table took
+    the whole live feed down for receipts and findings too.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username='feed-resilience', password='pass12345!'
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def test_a_dropped_replies_table_still_serves_the_rest_of_the_feed(self):
+        from django.db import connection
+        with connection.cursor() as c:
+            c.execute('DROP TABLE IF EXISTS app.cube_comment_replies')
+        # A receipt/finding comment must still come back, and the request must
+        # not die on a poisoned transaction.
+        res = self.client.get('/audit/comments/feed/')
+        self.assertEqual(res.status_code, 200, res.content)
+        self.assertIn('events', res.data)
+
+    def test_ensure_table_recreates_what_the_memo_flag_claims_exists(self):
+        from django.db import connection
+        from apps.xero.xero_data import cube_comment_replies as ccr
+        with connection.cursor() as c:
+            c.execute('DROP TABLE IF EXISTS app.cube_comment_replies')
+        # The memo flag is still set from earlier use; ensure_table must probe
+        # and rebuild rather than trust it.
+        ccr.ensure_table()
+        with connection.cursor() as c:
+            c.execute("SELECT to_regclass('app.cube_comment_replies')")
+            self.assertIsNotNone(c.fetchone()[0])

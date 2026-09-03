@@ -37,8 +37,23 @@ MAX_TEXT = 20_000
 
 
 def ensure_table():
-    """Both tables, in one call. See pivot_comments.DDL."""
+    """Both tables, in one call. See pivot_comments.DDL.
+
+    Existence is PROBED, not trusted to the memo flag in pivot_comments.
+    That flag is process-level while the DDL it guards is transactional, so
+    anything that rolls back the creating transaction — every Django TestCase
+    does — leaves the flag saying "created" and the table gone. The probe is
+    one catalog lookup and cannot fail, which matters because the alternative
+    failure mode is a missing relation aborting the caller's transaction.
+    """
     pivot_comments._ensure_table()
+    with connection.cursor() as c:
+        c.execute("SELECT to_regclass('app.cube_comment_replies')")
+        if c.fetchone()[0] is not None:
+            return
+        # The memo lied. Run the DDL for real; it is CREATE ... IF NOT EXISTS
+        # throughout, so this is safe to repeat.
+        c.execute(pivot_comments.DDL)
 
 
 def _reply(row):
