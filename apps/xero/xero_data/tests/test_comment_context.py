@@ -150,7 +150,7 @@ class CaptureTests(_Base):
         # without anyone typing either number.
         cid = self._raise_point()
         r = self.client.post(CONTEXT % cid, {}, format='json')
-        self.assertEqual(r.data['cell_value_at_capture'], 2000.0)
+        self.assertEqual(r.data['cell_value_as_noted'], 2000.0)
 
     def test_recapturing_replaces_rather_than_accumulating(self):
         cid = self._raise_point()

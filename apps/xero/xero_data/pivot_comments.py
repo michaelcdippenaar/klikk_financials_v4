@@ -154,7 +154,7 @@ CREATE INDEX IF NOT EXISTS cube_comments_assignee_idx ON app.cube_comments (assi
 -- copy is the correct thing to hold. The live drill re-resolves from the anchor
 -- because the lines behind a figure change when Xero is re-synced -- right for
 -- "what is this figure now", wrong for "what was I looking at when I raised
--- this". `cell_value_at_capture` is the same idea: it is what makes
+-- this". `cell_value_as_noted` is the same idea: it is what makes
 -- "it was -535,301.79, it is now -498,112.40" answerable later without anyone
 -- typing either number.
 --
@@ -170,13 +170,29 @@ CREATE TABLE IF NOT EXISTS app.cube_comment_context (
     line_total   numeric(30,2),
     truncated    boolean     NOT NULL DEFAULT false,
     receipt_count integer    NOT NULL DEFAULT 0,
-    cell_value_at_capture numeric(30,2),
+    cell_value_as_noted numeric(30,2),
     captured_by  text        NOT NULL DEFAULT '',
     -- clock_timestamp(), not now(): now() is TRANSACTION start time, so two
     -- captures in one transaction would carry the same stamp and "when did I
     -- last look at this" would be answered with a time that is not when.
     captured_at  timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+
+-- Renamed 2026-09-04. It was `cell_value_at_capture`, which is not what it
+-- holds: the value stored is the figure carried on the COMMENT (its last save),
+-- while the capture-time figure is `line_total`. Under the old name a reader
+-- comparing the two saw a discrepancy inside a "frozen" snapshot with nothing
+-- saying one number is older than the other -- and the reader is a bookkeeper
+-- who cannot open the ledger to check. Metadata-only; nothing to migrate.
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='app'
+             AND table_name='cube_comment_context' AND column_name='cell_value_at_capture')
+     AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema='app'
+             AND table_name='cube_comment_context' AND column_name='cell_value_as_noted') THEN
+    ALTER TABLE app.cube_comment_context RENAME COLUMN cell_value_at_capture TO cell_value_as_noted;
+  END IF; END $$;
+ALTER TABLE app.cube_comment_context
+    ADD COLUMN IF NOT EXISTS cell_value_as_noted numeric(30,2);
 
 -- WHAT A POINT USED TO SAY.
 --
@@ -1103,6 +1119,13 @@ class XeroCubeCommentAssignView(APIView):
 
     def post(self, request, comment_id):
         _ensure_table()
+        if not _is_a_person(request):
+            return Response(
+                {'error': 'a shared credential cannot hand a point to a seat: the '
+                          'trail would record "unattributed" for a change of hands. '
+                          'Set an assignee when writing the comment instead, where '
+                          'the caller names itself'},
+                status=http.HTTP_403_FORBIDDEN)
         d = request.data or {}
         if 'assignee' not in d:
             return Response({'error': 'assignee is required (empty string unassigns)'},
@@ -1130,6 +1153,23 @@ class XeroCubeCommentAssignView(APIView):
             _record_assignment(request, out, before, holder, actor_key)
         out['reassigned'] = before != assignee
         return Response(out)
+
+
+def _is_a_person(request):
+    """Is this caller a named human, or a credential several things share?
+
+    Sending mail to a third party is the one act in this register that leaves
+    the building and cannot be taken back. `IsAuthenticated` is not the bar:
+    the MCP service token resolves to a non-persisted ServiceAccount with
+    is_authenticated True and no pk, and the add-in credential lives on a
+    laptop -- both satisfy "authenticated" while naming nobody. The queue
+    exists so a person decides; a shared token deciding is the thing it was
+    built to prevent.
+    """
+    user = getattr(request, 'user', None)
+    if getattr(user, 'pk', None) is None:
+        return False
+    return (getattr(user, 'username', '') or '') not in SHARED_CREDENTIALS
 
 
 class XeroCubeCommentNotifyView(APIView):
@@ -1171,6 +1211,12 @@ class XeroCubeCommentNotifyView(APIView):
 
     def post(self, request, comment_id):
         _ensure_table()
+        # A shared credential must not be able to mail Anzelle or George.
+        if not _is_a_person(request):
+            return Response(
+                {'error': 'sending is a human act: this credential is shared or '
+                          'names nobody, so it may queue a mention but not send one'},
+                status=http.HTTP_403_FORBIDDEN)
         row = self._load(comment_id)
         if row is None:
             return Response({'error': 'no such comment'}, status=http.HTTP_404_NOT_FOUND)
@@ -1391,6 +1437,12 @@ class XeroCubeCommentContextView(APIView):
 
     def post(self, request, comment_id):
         _ensure_table()
+        if not _is_a_person(request):
+            return Response(
+                {'error': 'a shared credential cannot capture the evidence on a point: '
+                          'captured_by would name nobody, and the capture is what '
+                          'an outside bookkeeper reads'},
+                status=http.HTTP_403_FORBIDDEN)
         row = self._comment(comment_id)
         if row is None:
             return Response({'error': 'no such comment'}, status=http.HTTP_404_NOT_FOUND)
@@ -1422,14 +1474,14 @@ class XeroCubeCommentContextView(APIView):
             c.execute(
                 'INSERT INTO app.cube_comment_context '
                 '(comment_id, coords, measure, lines, line_count, line_total, truncated, '
-                ' receipt_count, cell_value_at_capture, captured_by) '
+                ' receipt_count, cell_value_as_noted, captured_by) '
                 'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
                 'ON CONFLICT (comment_id) DO UPDATE SET '
                 '  coords = EXCLUDED.coords, measure = EXCLUDED.measure, '
                 '  lines = EXCLUDED.lines, line_count = EXCLUDED.line_count, '
                 '  line_total = EXCLUDED.line_total, truncated = EXCLUDED.truncated, '
                 '  receipt_count = EXCLUDED.receipt_count, '
-                '  cell_value_at_capture = EXCLUDED.cell_value_at_capture, '
+                '  cell_value_as_noted = EXCLUDED.cell_value_as_noted, '
                 '  captured_by = EXCLUDED.captured_by, captured_at = clock_timestamp()',
                 [comment_id, json.dumps(coords), data.get('measure') or '',
                  json.dumps(lines), len(lines), data.get('line_total'),
@@ -1442,7 +1494,7 @@ def fetch_context(comment_id):
     _ensure_table()
     with connection.cursor() as c:
         c.execute('SELECT comment_id, coords, measure, lines, line_count, line_total, '
-                  '       truncated, receipt_count, cell_value_at_capture, captured_by, '
+                  '       truncated, receipt_count, cell_value_as_noted, captured_by, '
                   '       captured_at '
                   'FROM app.cube_comment_context WHERE comment_id = %s', [comment_id])
         r = c.fetchone()
@@ -1453,7 +1505,7 @@ def fetch_context(comment_id):
         'lines': _jsonb(r[3]), 'line_count': r[4],
         'line_total': float(r[5]) if r[5] is not None else None,
         'truncated': r[6], 'receipt_count': r[7],
-        'cell_value_at_capture': float(r[8]) if r[8] is not None else None,
+        'cell_value_as_noted': float(r[8]) if r[8] is not None else None,
         'captured_by': r[9], 'captured_at': r[10].isoformat() if r[10] else None,
     }
 
