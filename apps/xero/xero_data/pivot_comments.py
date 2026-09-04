@@ -483,6 +483,22 @@ DECISIONS = {
 }
 
 
+def _norm_status(raw, *, absent):
+    """Normalise a status, keeping ABSENT distinct from EMPTY.
+
+    Same rule as `_norm_tags`, and it exists for the same reason: the add-in
+    re-posts a sheet note whenever the cell is re-saved, and it does not know
+    this field exists. Without the distinction, MC marks a point `actioned` in
+    the console, the next Build re-saves the note without a status, and the
+    point is `open` again -- a workflow flag silently reset by a client that
+    never meant to touch it. Returns None for "leave whatever is stored".
+    """
+    if absent:
+        return None
+    st = str(raw or '').strip().lower()
+    return st or 'open'
+
+
 def _norm_decision(raw):
     """Accept the vocabulary, and the obvious spellings of it.
 
@@ -992,6 +1008,9 @@ class XeroCubeCommentsView(APIView):
         # it. Present-and-empty is still the explicit "clear my tags".
         tags = _norm_tags(d.get('tags'))
         tags_set = '  tags = EXCLUDED.tags, ' if tags is not None else ''
+        status = _norm_status(d.get('status'), absent='status' not in d)
+        status_set = '  status = EXCLUDED.status, ' if status is not None else ''
+        status_val = status if status is not None else 'open'
         if tags is None:
             tags = []          # the INSERT half; the column is NOT NULL
 
@@ -1023,13 +1042,13 @@ class XeroCubeCommentsView(APIView):
                 'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
                 'ON CONFLICT (subject_type, subject_key, author_key) DO UPDATE SET '
                 '  comment = EXCLUDED.comment, cell_value = EXCLUDED.cell_value, '
-                '  author = EXCLUDED.author, status = EXCLUDED.status, ' +
+                '  author = EXCLUDED.author, ' + status_set +
                 assign_set + tags_set +
                 '  updated_at = now() '
                 'RETURNING ' + COLS,
                 [key, 'cube_cell', key, tenant, measure, list(row_dims), list(row_path), list(col_dims),
                  col_path, json.dumps(filters), val, comment,
-                 author_name, author_key, assignee, (d.get('status') or 'open').strip(), tags],
+                 author_name, author_key, assignee, status_val, tags],
             )
             row = c.fetchone()
         out = _row_to_dict(row)
@@ -1550,7 +1569,7 @@ class XeroCubeCommentsBulkView(APIView):
         shared_comment = (d.get('comment') or '').strip()
         shared_tags = _norm_tags(d.get('tags'))
         author_key, author_name, verified = _author_identity(request, d.get('author'))
-        status_val = (d.get('status') or 'open').strip()
+        shared_status = _norm_status(d.get('status'), absent='status' not in d)
 
         saved, skipped, results = 0, [], []
         with connection.cursor() as c:
@@ -1584,6 +1603,17 @@ class XeroCubeCommentsBulkView(APIView):
                 tags_given = cell_tags is not None or shared_tags is not None
                 tags = cell_tags or shared_tags or []
                 tags_set = '  tags = EXCLUDED.tags, ' if tags_given else ''
+                # Precedence, stated plainly rather than as a compound condition:
+                # the cell's own status wins; else a status sent for the whole
+                # batch; else leave whatever is stored alone.
+                if 'status' in cell:
+                    status = _norm_status(cell.get('status'), absent=False)
+                elif shared_status is not None:
+                    status = shared_status
+                else:
+                    status = None
+                status_set = '  status = EXCLUDED.status, ' if status is not None else ''
+                status_val = status if status is not None else 'open'
 
                 val = cell.get('cell_value')
                 try:
@@ -1608,8 +1638,7 @@ class XeroCubeCommentsBulkView(APIView):
                     'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
                     'ON CONFLICT (subject_type, subject_key, author_key) DO UPDATE SET '
                     '  comment = EXCLUDED.comment, cell_value = EXCLUDED.cell_value, '
-                    + tags_set +
-                    '  status = EXCLUDED.status, updated_at = now() '
+                    + tags_set + status_set + ' updated_at = now() '
                     'RETURNING id',
                     [key, 'cube_cell', key, tenant, measure, list(row_dims), list(row_path),
                      list(col_dims), col_path, json.dumps(filters), val, comment,
@@ -1709,6 +1738,16 @@ class CommentsView(APIView):
         # means: [] on insert, stored tags untouched on conflict.
         tags = _norm_tags(d.get('tags'))
         tags_set = '  tags = EXCLUDED.tags, ' if tags is not None else ''
+        status = _norm_status(d.get('status'), absent='status' not in d)
+        status_set = '  status = EXCLUDED.status, ' if status is not None else ''
+        status_val = status if status is not None else 'open'
+        # `decision` gets the same guard. It is empty on every row today, so this
+        # changes nothing now -- and it is the door an agent posts through, which
+        # is exactly how a verdict would have been cleared by a caller that never
+        # sent one, on the day the first verdict is set.
+        decision_given = 'decision' in d
+        decision_set = '  decision = EXCLUDED.decision, ' if decision_given else ''
+        decision_val = decision if decision_given else ''
         if tags is None:
             tags = []
 
@@ -1737,9 +1776,8 @@ class CommentsView(APIView):
                 'ON CONFLICT (subject_type, subject_key, author_key) DO UPDATE SET '
                 '  comment = EXCLUDED.comment, subject_label = EXCLUDED.subject_label, '
                 '  cell_value = EXCLUDED.cell_value, '
-                '  filters = EXCLUDED.filters, status = EXCLUDED.status, ' +
-                tags_set + assign_set +
-                '  decision = EXCLUDED.decision, updated_at = now() '
+                '  filters = EXCLUDED.filters, ' + status_set +
+                tags_set + assign_set + decision_set + ' updated_at = now() '
                 'RETURNING ' + COLS,
                 [
                     # cell_key stays UNIQUE-shaped for the legacy column; for a
@@ -1749,7 +1787,7 @@ class CommentsView(APIView):
                     (context.get('tenant') or '').strip(), (d.get('measure') or '').strip(),
                     [], [], [], '', json.dumps(context), val,
                     comment, author_name, author_key, assignee,
-                    (d.get('status') or 'open').strip(), decision, tags,
+                    status_val, decision_val, tags,
                 ],
             )
             row = c.fetchone()
