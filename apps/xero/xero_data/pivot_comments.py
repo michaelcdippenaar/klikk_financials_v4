@@ -697,6 +697,20 @@ DEFAULT_LIMIT = 500
 # list is capped at MAX_LIMIT rows and the (comment_id, created_at) index makes
 # each count an index-only scan, whereas the join would have to aggregate the
 # whole reply table before the LIMIT could be applied.
+# Whether a comment's TEXT has ever been rewritten. An EXISTS rather than a
+# count: the register only needs "was this edited", the history endpoint serves
+# the detail, and EXISTS stops at the first row. Same shape and the same reason
+# as REPLY_COUNT_SQL below -- a correlated subquery the planner runs per
+# returned row, after the LIMIT, instead of aggregating the whole edit table.
+#
+# It exists because the trail was invisible: cube_comment_edits recorded every
+# rewrite and nothing in the list said a row had one, so an agent's comment
+# rewritten by MC read exactly like one the agent wrote. A trail nobody can see
+# from the register is half a trail.
+EDITED_SQL = ('EXISTS (SELECT 1 FROM app.cube_comment_edits e '
+              ' WHERE e.comment_id = app.cube_comments.id) AS edited')
+
+
 REPLY_COUNT_SQL = ('(SELECT count(*) FROM app.cube_comment_replies r '
                    ' WHERE r.comment_id = app.cube_comments.id) AS reply_count')
 
@@ -900,7 +914,7 @@ def list_comments(params, *, with_reply_counts=False, with_replies=False):
     where, args = _build_where(params)
     limit, offset, _page, _page_size = _page_window(params)
 
-    cols = COLS + (', ' + REPLY_COUNT_SQL if with_reply_counts else '')
+    cols = COLS + ', ' + EDITED_SQL + (', ' + REPLY_COUNT_SQL if with_reply_counts else '')
     sql = 'SELECT %s FROM app.cube_comments' % cols
     if where:
         sql += ' WHERE ' + ' AND '.join(where)
@@ -917,6 +931,7 @@ def list_comments(params, *, with_reply_counts=False, with_replies=False):
     out = []
     for d in rows:
         item = _shape(d)
+        item['edited'] = bool(d.get('edited'))
         if with_reply_counts:
             item['reply_count'] = int(d.get('reply_count') or 0)
         out.append(item)

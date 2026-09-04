@@ -25,6 +25,7 @@ AuditorGateMiddleware -- the gate resolves nobody and passes the request
 through, so a 403 test written that way asserts nothing at all. The role gates
 are only observable over a credential the middleware can actually see.
 """
+import json
 from django.contrib.auth import get_user_model
 from django.db import connection
 from django.test import TestCase
@@ -370,3 +371,74 @@ class RoleGateTests(_Base):
         client.credentials(HTTP_AUTHORIZATION='Token %s' % token.key)
         self.assertEqual(
             client.post(CUBE, _payload(), format='json').status_code, 200)
+
+
+class EditedFlagOnTheListTests(TestCase):
+    """The register must SAY a comment was rewritten.
+
+    app.cube_comment_edits recorded every rewrite and nothing in the list
+    response mentioned it, so an agent's comment that MC had rewritten read
+    exactly like one the agent wrote. The console guessed at a field name that
+    did not exist, which is how this was found.
+    """
+
+    def setUp(self):
+        cube_mentions._ready = False
+        pivot_comments._ready = False
+        pivot_comments._ensure_table()
+        cube_mentions.ensure_tables()
+        self.mc = User.objects.create_user(username='mc-editflag', email='mc-editflag@x.test',
+                                        password='pass12345!')
+        self.mc.is_superuser = True
+        self.mc.is_staff = True
+        self.mc.must_change_password = False
+        if hasattr(self.mc, 'role'):
+            self.mc.role = 'standard'
+        self.mc.save()
+        with connection.cursor() as c:
+            c.execute("INSERT INTO app.cube_comments "
+                      "(cell_key, subject_type, subject_key, tenant_id, measure, row_dims, "
+                      " row_path, col_dims, col_path, filters, comment, author, author_key, status, tags) "
+                      "VALUES ('k-editflag','cube_cell','k-editflag','ef-t','amount','{}','{}','{}','', "
+                      "'{}'::jsonb,'agent wrote this','codex','codex:ef','open','{}') RETURNING id")
+            self.cid = c.fetchone()[0]
+
+    def tearDown(self):
+        with connection.cursor() as c:
+            c.execute("DELETE FROM app.cube_comment_edits WHERE comment_id = %s", [self.cid])
+            c.execute("DELETE FROM app.cube_comments WHERE cell_key = 'k-editflag'")
+
+    def bearer(self):
+        return 'Bearer ' + str(RefreshToken.for_user(self.mc).access_token)
+
+    def listed(self):
+        r = self.client.get('/xero/data/journals/pivot/comments/?status=all&page_size=1000',
+                            HTTP_AUTHORIZATION=self.bearer())
+        self.assertEqual(r.status_code, 200, r.content[:200])
+        for row in r.json()['results']:
+            if row['id'] == self.cid:
+                return row
+        self.fail('the seeded comment was not in the register')
+
+    def test_an_untouched_comment_is_not_marked_edited(self):
+        self.assertIs(self.listed()['edited'], False)
+
+    def test_the_list_says_edited_after_a_rewrite(self):
+        r = self.client.post('/xero/data/journals/pivot/comments/%s/text/' % self.cid,
+                             data=json.dumps({'comment': 'MC rewrote it'}),
+                             content_type='application/json',
+                             HTTP_AUTHORIZATION=self.bearer())
+        self.assertEqual(r.status_code, 200, r.content[:200])
+        row = self.listed()
+        self.assertIs(row['edited'], True)
+        self.assertEqual(row['comment'], 'MC rewrote it')
+        # the words changed hands; the authorship did not
+        self.assertEqual(row['author_key'], 'codex:ef')
+
+    def test_a_no_op_edit_does_not_mark_it(self):
+        self.client.post('/xero/data/journals/pivot/comments/%s/text/' % self.cid,
+                         data=json.dumps({'comment': 'agent wrote this'}),
+                         content_type='application/json',
+                         HTTP_AUTHORIZATION=self.bearer())
+        self.assertIs(self.listed()['edited'], False,
+                      'a no-op edit marked the comment as rewritten')
