@@ -1406,6 +1406,31 @@ class XeroCubeCommentTextView(APIView):
                             status=http.HTTP_400_BAD_REQUEST)
 
         before = row['comment']
+
+        # LOST UPDATE. Two people can hold the same comment open -- MC in the
+        # console and an agent through the MCP door is the ordinary case, not a
+        # race to engineer around. Without this, the second save silently
+        # discards the first, and the only trace is a history row nobody was
+        # told to read.
+        #
+        # `base_text` is what the caller believes it is editing. If the stored
+        # text has moved on since, refuse and hand back what is there now, so
+        # the caller can show both and let a person decide. Optional on purpose:
+        # a caller that does not send it keeps today's last-write-wins, so no
+        # existing client breaks -- but the console always sends it.
+        if 'base_text' in d:
+            base = str(d.get('base_text') or '')
+            if base != before:
+                return Response(
+                    {'error': 'this comment was changed by someone else while you '
+                              'were editing it \u2014 your text has not been saved',
+                     'code': 'stale_base_text',
+                     'current_text': before,
+                     'your_text': text,
+                     'last_edited_by': row.get('author_key') or '',
+                     'updated_at': row.get('updated_at')},
+                    status=http.HTTP_409_CONFLICT)
+
         if text == before:
             # A no-op is not an edit. Logging it would fill the history with
             # rows that say nothing changed.

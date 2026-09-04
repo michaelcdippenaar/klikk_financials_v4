@@ -442,3 +442,107 @@ class EditedFlagOnTheListTests(TestCase):
                          HTTP_AUTHORIZATION=self.bearer())
         self.assertIs(self.listed()['edited'], False,
                       'a no-op edit marked the comment as rewritten')
+
+
+class ConcurrentRewriteTests(TestCase):
+    """Two people holding the same comment open must not silently overwrite.
+
+    MC in the console and an agent through the MCP door is the ordinary case
+    here, not a race to engineer around. Before this guard the second save
+    discarded the first with no warning, and the only trace was a history row
+    nobody had been told to read.
+    """
+
+    def setUp(self):
+        cube_mentions._ready = False
+        pivot_comments._ready = False
+        pivot_comments._ensure_table()
+        cube_mentions.ensure_tables()
+        self.mc = User.objects.create_user(username='mc-conflict', email='mc-conflict@x.test',
+                                           password='pass12345!')
+        self.mc.is_superuser = True
+        self.mc.is_staff = True
+        self.mc.must_change_password = False
+        if hasattr(self.mc, 'role'):
+            self.mc.role = 'standard'
+        self.mc.save()
+        with connection.cursor() as c:
+            c.execute("INSERT INTO app.cube_comments "
+                      "(cell_key, subject_type, subject_key, tenant_id, measure, row_dims, "
+                      " row_path, col_dims, col_path, filters, comment, author, author_key, status, tags) "
+                      "VALUES ('k-conflict','cube_cell','k-conflict','cf-t','amount','{}','{}','{}','', "
+                      "'{}'::jsonb,'the original wording','codex','codex:cf','open','{}') RETURNING id")
+            self.cid = c.fetchone()[0]
+
+    def tearDown(self):
+        with connection.cursor() as c:
+            c.execute("DELETE FROM app.cube_comment_edits WHERE comment_id = %s", [self.cid])
+            c.execute("DELETE FROM app.cube_comments WHERE cell_key = 'k-conflict'")
+
+    def bearer(self):
+        return 'Bearer ' + str(RefreshToken.for_user(self.mc).access_token)
+
+    def post(self, body):
+        return self.client.post(TEXT % self.cid, data=json.dumps(body),
+                                content_type='application/json',
+                                HTTP_AUTHORIZATION=self.bearer())
+
+    def stored(self):
+        with connection.cursor() as c:
+            c.execute("SELECT comment FROM app.cube_comments WHERE id = %s", [self.cid])
+            return c.fetchone()[0]
+
+    def test_a_matching_base_saves(self):
+        r = self.post({'comment': 'MC reworded it', 'base_text': 'the original wording'})
+        self.assertEqual(r.status_code, 200, r.content[:200])
+        self.assertEqual(self.stored(), 'MC reworded it')
+
+    def test_a_stale_base_is_refused_and_nothing_is_written(self):
+        # somebody else got there first
+        self.post({'comment': 'the agent got there first',
+                   'base_text': 'the original wording'})
+        # MC saves from the wording he opened
+        r = self.post({'comment': 'MC rewrote the ORIGINAL',
+                       'base_text': 'the original wording'})
+        self.assertEqual(r.status_code, 409, r.content[:200])
+        self.assertEqual(self.stored(), 'the agent got there first',
+                         'the stale save overwrote the newer text')
+
+    def test_the_refusal_hands_back_BOTH_texts_so_a_person_can_decide(self):
+        self.post({'comment': 'the agent got there first', 'base_text': 'the original wording'})
+        body = self.post({'comment': 'mine', 'base_text': 'the original wording'}).json()
+        self.assertEqual(body['code'], 'stale_base_text')
+        self.assertEqual(body['current_text'], 'the agent got there first')
+        self.assertEqual(body['your_text'], 'mine')
+
+    def test_a_stale_save_writes_no_history_row(self):
+        self.post({'comment': 'the agent got there first', 'base_text': 'the original wording'})
+        self.post({'comment': 'mine', 'base_text': 'the original wording'})
+        with connection.cursor() as c:
+            c.execute("SELECT count(*) FROM app.cube_comment_edits WHERE comment_id = %s",
+                      [self.cid])
+            self.assertEqual(c.fetchone()[0], 1, 'a refused save left a history row')
+
+    def test_retrying_from_the_CURRENT_text_succeeds(self):
+        self.post({'comment': 'the agent got there first', 'base_text': 'the original wording'})
+        r = self.post({'comment': 'MC on top of the agent',
+                       'base_text': 'the agent got there first'})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.stored(), 'MC on top of the agent')
+
+    def test_omitting_base_text_keeps_the_old_last_write_wins(self):
+        # Deliberately optional: an existing caller that does not send it must
+        # not start failing. The console always sends it.
+        self.post({'comment': 'the agent got there first', 'base_text': 'the original wording'})
+        r = self.post({'comment': 'blind overwrite'})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.stored(), 'blind overwrite')
+
+    def test_base_text_is_not_treated_as_an_edit_to_a_protected_field(self):
+        r = self.post({'comment': 'fine', 'base_text': 'the original wording'})
+        self.assertEqual(r.status_code, 200, r.content[:200])
+
+    def test_a_no_op_with_a_matching_base_is_still_a_no_op(self):
+        r = self.post({'comment': 'the original wording', 'base_text': 'the original wording'})
+        self.assertEqual(r.status_code, 200)
+        self.assertIs(r.json()['edited'], False)
